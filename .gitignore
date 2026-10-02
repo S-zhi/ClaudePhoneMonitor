@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+.gradle/
+.idea/
+*.iml
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.sqlite3
+.DS_Store
+coverage/
