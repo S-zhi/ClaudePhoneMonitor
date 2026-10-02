@@ -1,0 +1,83 @@
+#!/bin/bash
+# User-facing dispatcher for the claude-monitor Skill.
+# `setup` is an explicit configuration action. Hook lifecycle events invoke the
+# adapter command written by install; they never call this script.
+
+set -u
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+usage() {
+  cat <<'USAGE'
+Usage: monitor-setup [setup|install|pair|doctor|status|uninstall] [options]
+
+Commands:
+  setup       install hooks/launchd and create a development pairing (default)
+  install     merge hooks and render the launchd template
+  pair        create or show the stable development pairing code
+  doctor      run read-only diagnostics
+  status      show read-only status
+  uninstall   remove only monitor-owned hooks and launchd artifacts
+
+Skill setup and Hook lifecycle are deliberately separate. Claude Code invokes
+the generated adapter command for lifecycle events; those commands fail open
+and never run monitor-setup.
+
+Run `scripts/<command> --help` for command-specific options.
+USAGE
+}
+
+COMMAND="setup"
+if [ "$#" -gt 0 ]; then
+  case "$1" in
+    setup|install|pair|doctor|status|uninstall) COMMAND="$1"; shift ;;
+    -h|--help) usage; exit 0 ;;
+  esac
+fi
+
+case "$COMMAND" in
+  install) exec "$SCRIPT_DIR/install" "$@" ;;
+  pair) exec "$SCRIPT_DIR/pair" "$@" ;;
+  doctor) exec "$SCRIPT_DIR/doctor" "$@" ;;
+  status) exec "$SCRIPT_DIR/status" "$@" ;;
+  uninstall) exec "$SCRIPT_DIR/uninstall" "$@" ;;
+  setup) ;;
+  *) usage; exit 2 ;;
+esac
+
+INSTALL_ARGS=()
+PAIR_ARGS=()
+NO_PAIR=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --no-pair) NO_PAIR=1; shift ;;
+    --state-dir|--endpoint)
+      [ "$#" -ge 2 ] || { printf 'monitor-setup: %s needs a value\n' "$1" >&2; exit 2; }
+      INSTALL_ARGS+=("$1" "$2")
+      PAIR_ARGS+=("$1" "$2")
+      shift 2
+      ;;
+    --code|--rotate)
+      PAIR_ARGS+=("$1")
+      if [ "$1" = "--code" ]; then
+        [ "$#" -ge 2 ] || { printf 'monitor-setup: --code needs a value\n' >&2; exit 2; }
+        PAIR_ARGS+=("$2")
+        shift 2
+      else
+        shift
+      fi
+      ;;
+    --json)
+      # Keep setup output human-readable while allowing JSON pair output when
+      # explicitly requested by a caller.
+      PAIR_ARGS+=("$1")
+      shift
+      ;;
+    *) INSTALL_ARGS+=("$1"); shift ;;
+  esac
+done
+
+"$SCRIPT_DIR/install" "${INSTALL_ARGS[@]}"
+if [ "$NO_PAIR" -eq 0 ]; then
+  "$SCRIPT_DIR/pair" "${PAIR_ARGS[@]}"
+fi
+printf 'Skill setup complete. Hook lifecycle delivery remains independent and fail-open.\n'

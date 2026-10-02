@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.claude.phone-monitor.collector</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE_BIN__</string>
+    <string>__COLLECTOR_ROOT__/dist/cli.js</string>
+    <string>--collector</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__COLLECTOR_ROOT__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>COLLECTOR_DATA_DIR</key>
+    <string>__COLLECTOR_DATA_DIR__</string>
+    <key>COLLECTOR_SOCKET_PATH</key>
+    <string>__COLLECTOR_SOCKET_PATH__</string>
+    <key>COLLECTOR_RELAY_URL</key>
+    <string>__COLLECTOR_RELAY_URL__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__COLLECTOR_DATA_DIR__/collector.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>__COLLECTOR_DATA_DIR__/collector.stderr.log</string>
+</dict>
+</plist>

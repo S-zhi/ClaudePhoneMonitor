@@ -1,0 +1,24 @@
+{
+  "hook_event_name": "PostToolUse",
+  "session_id": "session-123",
+  "task_id": "task-456",
+  "tool_name": "Bash",
+  "duration_ms": 42,
+  "exit_code": 0,
+  "timestamp": "2026-10-02T10:00:00Z",
+  "prompt": "do not transmit this prompt",
+  "tool_input": {
+    "command": "cat /Users/alice/private.txt",
+    "api_key": "sk-test-secret"
+  },
+  "tool_response": {
+    "stdout": "private output",
+    "stderr": "private error",
+    "result": "private result"
+  },
+  "transcript_path": "/Users/alice/.claude/projects/private.jsonl",
+  "cwd": "/Users/alice/private-project",
+  "env": {
+    "TOKEN": "top-secret"
+  }
+}

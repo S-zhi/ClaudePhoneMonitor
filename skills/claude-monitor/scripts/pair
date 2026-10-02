@@ -1,0 +1,109 @@
+#!/bin/bash
+# Create or display the local development pairing code.
+
+set -u
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/common.sh"
+
+STATE_DIR="$CM_STATE_DIR_DEFAULT"
+ENDPOINT="$CM_ENDPOINT_DEFAULT"
+REQUESTED_CODE=""
+ROTATE=0
+JSON_OUTPUT=0
+
+usage() {
+  cat <<'USAGE'
+Usage: pair [options]
+
+Create a stable development pairing code. Re-running is idempotent; use
+--rotate to replace an existing code.
+
+Options:
+  --state-dir PATH  monitor state directory
+  --endpoint URL    endpoint saved with the pairing record
+  --code CODE       deterministic code (tests/development only)
+  --rotate          generate a fresh code
+  --json            print one JSON object instead of human-readable output
+  -h, --help        show this help
+USAGE
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --state-dir) [ "$#" -ge 2 ] || cm_usage_error "--state-dir needs a path"; STATE_DIR="$2"; shift 2 ;;
+    --endpoint) [ "$#" -ge 2 ] || cm_usage_error "--endpoint needs a URL"; ENDPOINT="$2"; shift 2 ;;
+    --code) [ "$#" -ge 2 ] || cm_usage_error "--code needs a value"; REQUESTED_CODE="$2"; shift 2 ;;
+    --rotate) ROTATE=1; shift ;;
+    --json) JSON_OUTPUT=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) cm_usage_error "unknown option: $1" ;;
+  esac
+done
+
+cm_require_command "$CM_PYTHON_DEFAULT"
+STATE_DIR="$(cm_abs_path "$STATE_DIR")"
+cm_mkdir_state "$STATE_DIR"
+PAIRING_FILE="$STATE_DIR/pairing.json"
+
+PAIRING_JSON="$(cm_python - "$PAIRING_FILE" "$ENDPOINT" "$REQUESTED_CODE" "$ROTATE" <<'PY'
+from __future__ import annotations
+
+import datetime
+import json
+import os
+import pathlib
+import re
+import secrets
+import sys
+
+path, endpoint, requested, rotate = sys.argv[1:]
+rotate = rotate == "1"
+existing = {}
+file_path = pathlib.Path(path)
+if file_path.exists():
+    try:
+        value = json.loads(file_path.read_text(encoding="utf-8"))
+        if isinstance(value, dict):
+            existing = value
+    except (OSError, json.JSONDecodeError):
+        # A corrupt development record should not prevent recovery.
+        existing = {}
+
+if requested:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{3,63}", requested):
+        raise SystemExit("pair: --code must be 4-64 characters: letters, digits, _ or -")
+    code = requested
+elif existing.get("code") and not rotate:
+    code = str(existing["code"])
+else:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    code = "".join(secrets.choice(alphabet) for _ in range(8))
+
+created_at = existing.get("created_at") if existing.get("code") == code else None
+if not created_at:
+    created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+data = {
+    "version": 1,
+    "development": True,
+    "code": code,
+    "endpoint": endpoint,
+    "created_at": created_at,
+}
+tmp = pathlib.Path(str(file_path) + ".tmp")
+tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+os.chmod(tmp, 0o600)
+os.replace(tmp, file_path)
+print(json.dumps(data, sort_keys=True))
+PY
+)" || cm_die "could not write pairing record"
+
+if [ "$JSON_OUTPUT" -eq 1 ]; then
+  printf '%s\n' "$PAIRING_JSON"
+else
+  CODE="$(printf '%s' "$PAIRING_JSON" | cm_python -c 'import json,sys; print(json.load(sys.stdin)["code"])')"
+  SAVED_ENDPOINT="$(printf '%s' "$PAIRING_JSON" | cm_python -c 'import json,sys; print(json.load(sys.stdin)["endpoint"])')"
+  printf 'Development pairing code: %s\n' "$CODE"
+  printf 'Endpoint: %s\n' "$SAVED_ENDPOINT"
+  printf 'This code is for local development only; rotate it with --rotate.\n'
+fi

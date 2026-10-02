@@ -1,0 +1,128 @@
+#!/bin/bash
+# Read-only monitor status.
+
+set -u
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/common.sh"
+
+SETTINGS="$CM_SETTINGS_FILE_DEFAULT"
+STATE_DIR="$CM_STATE_DIR_DEFAULT"
+LAUNCH_AGENTS_DIR="$CM_LAUNCH_AGENTS_DIR_DEFAULT"
+ADAPTER="$CM_ADAPTER_DEFAULT"
+SHOW_CODE=0
+JSON_OUTPUT=0
+
+usage() {
+  cat <<'USAGE'
+Usage: status [options]
+
+Options:
+  --settings PATH          settings JSON
+  --state-dir PATH         monitor state directory
+  --launch-agents-dir PATH LaunchAgents directory
+  --show-code              print the development pairing code (unsafe in logs)
+  --json                   print machine-readable JSON
+  -h, --help               show this help
+USAGE
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --settings) [ "$#" -ge 2 ] || cm_usage_error "--settings needs a path"; SETTINGS="$2"; shift 2 ;;
+    --state-dir) [ "$#" -ge 2 ] || cm_usage_error "--state-dir needs a path"; STATE_DIR="$2"; shift 2 ;;
+    --launch-agents-dir) [ "$#" -ge 2 ] || cm_usage_error "--launch-agents-dir needs a path"; LAUNCH_AGENTS_DIR="$2"; shift 2 ;;
+    --show-code) SHOW_CODE=1; shift ;;
+    --json) JSON_OUTPUT=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) cm_usage_error "unknown option: $1" ;;
+  esac
+done
+
+cm_require_command "$CM_PYTHON_DEFAULT"
+SETTINGS="$(cm_abs_path "$SETTINGS")"
+STATE_DIR="$(cm_abs_path "$STATE_DIR")"
+LAUNCH_AGENTS_DIR="$(cm_abs_path "$LAUNCH_AGENTS_DIR")"
+INSTALL_FILE="$STATE_DIR/install.json"
+PAIRING_FILE="$STATE_DIR/pairing.json"
+PLIST="$LAUNCH_AGENTS_DIR/$CM_LAUNCHD_LABEL.plist"
+STATE_PLIST="$STATE_DIR/$CM_LAUNCHD_LABEL.plist"
+
+HOOK_JSON="$(cm_python "$CM_SCRIPT_DIR/lib/settings.py" inspect --settings "$SETTINGS" --marker "$CM_HOOK_MARKER" 2>/dev/null || printf '{"count":0,"events":{}}')"
+STATUS_JSON="$(cm_python - "$STATE_DIR" "$INSTALL_FILE" "$PAIRING_FILE" "$PLIST" "$STATE_PLIST" "$ADAPTER" "$HOOK_JSON" "$SHOW_CODE" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+state_dir, install_file, pairing_file, plist, state_plist, adapter, hook_json, show_code = sys.argv[1:]
+state = pathlib.Path(state_dir)
+def read_json(path):
+    try:
+        value = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+install = read_json(install_file)
+pairing = read_json(pairing_file)
+try:
+    hooks = json.loads(hook_json)
+except json.JSONDecodeError:
+    hooks = {"count": 0, "events": {}}
+queue = state / "events.jsonl"
+try:
+    queue_bytes = queue.stat().st_size
+    queue_lines = sum(1 for _ in queue.open("r", encoding="utf-8"))
+except OSError:
+    queue_bytes = 0
+    queue_lines = 0
+code = str(pairing.get("code", ""))
+if code and show_code != "1":
+    code = "*" * max(4, len(code) - 2) + code[-2:]
+result = {
+    "installed": bool(install),
+    "state_dir": state_dir,
+    "settings": install.get("settings") or "",
+    "hooks": hooks,
+    "events": install.get("events", []),
+    "adapter": install.get("adapter") or adapter,
+    "adapter_exists": pathlib.Path(install.get("adapter") or adapter).is_file(),
+    "endpoint": pairing.get("endpoint") or install.get("endpoint") or "",
+    "pairing": {
+        "present": bool(pairing.get("code")),
+        "code": code,
+        "development": bool(pairing.get("development", False)),
+        "created_at": pairing.get("created_at", ""),
+    },
+    "launchd": {
+        "plist": plist,
+        "plist_exists": pathlib.Path(plist).is_file(),
+        "state_plist_exists": pathlib.Path(state_plist).is_file(),
+    },
+    "queue": {"path": str(queue), "lines": queue_lines, "bytes": queue_bytes},
+}
+print(json.dumps(result, sort_keys=True))
+PY
+)" || cm_die "could not read status"
+
+if [ "$JSON_OUTPUT" -eq 1 ]; then
+  printf '%s\n' "$STATUS_JSON"
+  exit 0
+fi
+
+cm_python - "$STATUS_JSON" <<'PY'
+import json
+import sys
+value = json.loads(sys.argv[1])
+print("Claude phone monitor status")
+print(f"  installed: {'yes' if value['installed'] else 'no'}")
+print(f"  state: {value['state_dir']}")
+print(f"  settings hooks: {value['hooks'].get('count', 0)} owned entries")
+print(f"  adapter: {'present' if value['adapter_exists'] else 'missing'} ({value['adapter']})")
+print(f"  pairing: {value['pairing']['code'] if value['pairing']['present'] else 'not paired'}")
+print(f"  endpoint: {value['endpoint'] or 'not configured'}")
+print(f"  launchd plist: {'present' if value['launchd']['plist_exists'] else 'missing'} ({value['launchd']['plist']})")
+print(f"  queued events: {value['queue']['lines']} ({value['queue']['bytes']} bytes)")
+PY

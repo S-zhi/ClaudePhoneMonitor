@@ -1,0 +1,21 @@
+{
+  "type": "event",
+  "schema_version": 1,
+  "event_id": "real-lan-fixture-event-001",
+  "installation_id": "real-lan-fixture-installation",
+  "session_id": "real-lan-fixture-session",
+  "task_id": "real-lan-fixture-task",
+  "sequence": 1,
+  "occurred_at": "2026-10-02T10:00:00.000Z",
+  "event_type": "tool_started",
+  "payload": {
+    "tool_name": "Read",
+    "duration_ms": 12,
+    "prompt": "REAL_LAN_PRIVATE_PROMPT_MUST_NOT_CROSS_PHONE_BOUNDARY",
+    "tool_input": "REAL_LAN_PRIVATE_TOOL_INPUT_MUST_NOT_CROSS_PHONE_BOUNDARY",
+    "tool_result": "REAL_LAN_PRIVATE_TOOL_RESULT_MUST_NOT_CROSS_PHONE_BOUNDARY",
+    "stdout": "REAL_LAN_PRIVATE_STDOUT_MUST_NOT_CROSS_PHONE_BOUNDARY",
+    "stderr": "REAL_LAN_PRIVATE_STDERR_MUST_NOT_CROSS_PHONE_BOUNDARY",
+    "diagnostic": "file=/Users/example/private-project/source.ts authorization=Bearer REAL_LAN_PRIVATE_BEARER"
+  }
+}

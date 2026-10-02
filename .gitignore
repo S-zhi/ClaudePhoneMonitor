@@ -12,3 +12,5 @@ build/
 *.sqlite3
 .DS_Store
 coverage/
+__pycache__/
+logs/

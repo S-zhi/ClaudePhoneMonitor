@@ -1,0 +1,79 @@
+#!/bin/bash
+# Minimal launchd keep-alive for the MVP. Hook delivery itself is performed by
+# Claude Code's command hooks; this process only records that the user agent is
+# alive and never blocks Claude when the collector is unavailable.
+
+set -u
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/common.sh"
+
+STATE_DIR="$CM_STATE_DIR_DEFAULT"
+INTERVAL=30
+ONCE=0
+ADAPTER="$CM_ADAPTER_DEFAULT"
+NODE="$CM_NODE_DEFAULT"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --state-dir) [ "$#" -ge 2 ] || cm_usage_error "--state-dir needs a path"; STATE_DIR="$2"; shift 2 ;;
+    --interval) [ "$#" -ge 2 ] || cm_usage_error "--interval needs seconds"; INTERVAL="$2"; shift 2 ;;
+    --adapter) [ "$#" -ge 2 ] || cm_usage_error "--adapter needs a path"; ADAPTER="$2"; shift 2 ;;
+    --node) [ "$#" -ge 2 ] || cm_usage_error "--node needs a command"; NODE="$2"; shift 2 ;;
+    --once) ONCE=1; shift ;;
+    -h|--help)
+      printf 'Usage: monitor-daemon --state-dir PATH [--once] [--interval SECONDS]\n'
+      exit 0
+      ;;
+    *) cm_usage_error "unknown option: $1" ;;
+  esac
+done
+
+STATE_DIR="$(cm_abs_path "$STATE_DIR")"
+cm_mkdir_state "$STATE_DIR"
+mkdir -p "$STATE_DIR/run" 2>/dev/null || exit 0
+PID_FILE="$STATE_DIR/run/daemon.pid"
+HEARTBEAT="$STATE_DIR/run/daemon.json"
+
+# A stale heartbeat is informational only. Do not fail a launchd job because a
+# previous instance exited unexpectedly.
+cleanup() {
+  rm -f "$PID_FILE" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+printf '%s\n' "$$" > "$PID_FILE" 2>/dev/null || true
+
+write_heartbeat() {
+  # Python is used only for valid JSON and atomic replacement; any failure is
+  # deliberately swallowed so this helper remains fail-open.
+  cm_python - "$HEARTBEAT" "$ADAPTER" "$NODE" <<'PY' >/dev/null 2>&1 || true
+import datetime
+import json
+import os
+import pathlib
+import sys
+path, adapter, node = sys.argv[1:]
+data = {
+    "pid": os.getpid(),
+    "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "adapter": adapter,
+    "node": node,
+}
+tmp = pathlib.Path(path + ".tmp")
+tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+PY
+}
+
+write_heartbeat
+if [ "$ONCE" -eq 1 ]; then
+  exit 0
+fi
+
+# Keep the process quiet and inexpensive. Hook commands remain independent of
+# this process and are allowed to fail without affecting Claude Code.
+while :; do
+  sleep "$INTERVAL" 2>/dev/null || exit 0
+  write_heartbeat
+done

@@ -1,0 +1,28 @@
+{
+  "name": "@claude-phone-monitor/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared protocol, validation, activity classification, and monitor state for Claude Phone Monitor.",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./schemas": {
+      "types": "./src/schemas.ts",
+      "import": "./src/schemas.ts",
+      "default": "./src/schemas.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

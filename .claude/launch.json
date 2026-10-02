@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "relay-local",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "relay:dev"],
+      "port": 8787,
+      "url": "http://localhost:8787"
+    }
+  ]
+}

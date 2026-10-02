@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- claude-phone-monitor:v1 -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.claude.phone-monitor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__CM_INSTALL_ROOT__/scripts/monitor-daemon</string>
+    <string>--state-dir</string>
+    <string>__CM_STATE_DIR__</string>
+    <string>--adapter</string>
+    <string>__CM_ADAPTER__</string>
+    <string>--node</string>
+    <string>__CM_NODE__</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>__CM_STATE_DIR__/logs/daemon.log</string>
+  <key>StandardErrorPath</key>
+  <string>__CM_STATE_DIR__/logs/daemon.error.log</string>
+</dict>
+</plist>

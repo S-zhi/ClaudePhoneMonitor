@@ -1,0 +1,126 @@
+#!/bin/bash
+# Remove only the monitor's own hooks and generated launchd artifacts.
+
+set -u
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/common.sh"
+
+SETTINGS="$CM_SETTINGS_FILE_DEFAULT"
+SETTINGS_EXPLICIT=0
+STATE_DIR="$CM_STATE_DIR_DEFAULT"
+LAUNCH_AGENTS_DIR="$CM_LAUNCH_AGENTS_DIR_DEFAULT"
+PURGE_STATE=0
+NO_LAUNCHD=0
+
+usage() {
+  cat <<'USAGE'
+Usage: uninstall [options]
+
+Remove the monitor's marker-owned hooks and generated LaunchAgent. Event logs
+are retained by default; use --purge-state to delete the complete state dir.
+Unrelated settings hooks and unrelated files are never removed.
+
+Options:
+  --settings PATH          settings JSON
+  --state-dir PATH         monitor state directory
+  --launch-agents-dir PATH LaunchAgents directory
+  --purge-state            delete the monitor state directory after removal
+  --no-launchd             do not unload with launchctl (still remove marked plist)
+  -h, --help               show this help
+USAGE
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --settings) [ "$#" -ge 2 ] || cm_usage_error "--settings needs a path"; SETTINGS="$2"; SETTINGS_EXPLICIT=1; shift 2 ;;
+    --state-dir) [ "$#" -ge 2 ] || cm_usage_error "--state-dir needs a path"; STATE_DIR="$2"; shift 2 ;;
+    --launch-agents-dir) [ "$#" -ge 2 ] || cm_usage_error "--launch-agents-dir needs a path"; LAUNCH_AGENTS_DIR="$2"; shift 2 ;;
+    --purge-state) PURGE_STATE=1; shift ;;
+    --no-launchd) NO_LAUNCHD=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) cm_usage_error "unknown option: $1" ;;
+  esac
+done
+
+cm_require_command "$CM_PYTHON_DEFAULT"
+STATE_DIR="$(cm_abs_path "$STATE_DIR")"
+LAUNCH_AGENTS_DIR="$(cm_abs_path "$LAUNCH_AGENTS_DIR")"
+INSTALL_FILE="$STATE_DIR/install.json"
+
+# Reuse the settings path recorded by install when the caller did not override
+# it. This lets uninstall remain safe after a test or alternate config root.
+if [ "$SETTINGS_EXPLICIT" -eq 0 ] && [ -f "$INSTALL_FILE" ]; then
+  RECORDED_SETTINGS="$(cm_python - "$INSTALL_FILE" <<'PY'
+import json
+import pathlib
+import sys
+try:
+    value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+    print(value.get("settings", ""))
+except (OSError, json.JSONDecodeError):
+    pass
+PY
+)"
+  if [ -n "$RECORDED_SETTINGS" ]; then
+    SETTINGS="$RECORDED_SETTINGS"
+  fi
+fi
+SETTINGS="$(cm_abs_path "$SETTINGS")"
+
+REMOVE_RESULT="$(cm_python "$CM_SCRIPT_DIR/lib/settings.py" remove --settings "$SETTINGS" --marker "$CM_HOOK_MARKER" 2>/dev/null || printf '{"removed":0}')"
+
+PLIST="$LAUNCH_AGENTS_DIR/$CM_LAUNCHD_LABEL.plist"
+if [ -f "$INSTALL_FILE" ]; then
+  RECORDED_PLIST="$(cm_python - "$INSTALL_FILE" <<'PY'
+import json
+import pathlib
+import sys
+try:
+    value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+    print(value.get("launch_agent", ""))
+except (OSError, json.JSONDecodeError):
+    pass
+PY
+)"
+  [ -n "$RECORDED_PLIST" ] && PLIST="$RECORDED_PLIST"
+fi
+PLIST="$(cm_abs_path "$PLIST")"
+
+if [ "$NO_LAUNCHD" -eq 0 ] && [ -f "$PLIST" ]; then
+  cm_launchctl_unload "$PLIST"
+fi
+if [ -f "$PLIST" ]; then
+  if grep -q -- "$CM_HOOK_MARKER" "$PLIST" 2>/dev/null; then
+    rm -f "$PLIST"
+  else
+    cm_warn "leaving unmarked plist in place: $PLIST"
+  fi
+fi
+
+STATE_PLIST="$STATE_DIR/$CM_LAUNCHD_LABEL.plist"
+if [ -f "$STATE_PLIST" ] && grep -q -- "$CM_HOOK_MARKER" "$STATE_PLIST" 2>/dev/null; then
+  rm -f "$STATE_PLIST"
+fi
+
+if [ "$PURGE_STATE" -eq 1 ]; then
+  case "$STATE_DIR" in
+    ""|/|"$HOME"|"$HOME/.claude"|"$HOME/.config")
+      cm_die "refusing to purge unsafe state directory: $STATE_DIR" ;;
+  esac
+  rm -rf "$STATE_DIR"
+else
+  rm -f "$STATE_DIR/install.json" "$STATE_DIR/monitor.env" \
+    "$STATE_DIR/pairing.json" "$STATE_DIR/launchd.template.plist"
+  rmdir "$STATE_DIR/run" 2>/dev/null || true
+  rmdir "$STATE_DIR" 2>/dev/null || true
+fi
+
+printf 'Uninstalled Claude phone monitor hooks (%s).\n' "$REMOVE_RESULT"
+printf '  settings preserved except marker-owned entries: %s\n' "$SETTINGS"
+printf '  launchd plist removed only when marked: %s\n' "$PLIST"
+if [ "$PURGE_STATE" -eq 1 ]; then
+  printf '  state purged: %s\n' "$STATE_DIR"
+else
+  printf '  event logs retained; use --purge-state to delete them\n'
+fi

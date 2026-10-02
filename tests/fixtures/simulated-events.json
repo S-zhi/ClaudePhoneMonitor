@@ -1,0 +1,138 @@
+[
+  {
+    "type": "event",
+    "schema_version": 1,
+    "event_id": "fake-event-001",
+    "installation_id": "fake-installation-001",
+    "session_id": "fake-session-001",
+    "sequence": 1,
+    "occurred_at": "2026-10-02T09:00:00Z",
+    "event_type": "session_started",
+    "payload": {
+      "fixture_label": "synthetic session start"
+    }
+  },
+  {
+    "type": "event",
+    "schema_version": 1,
+    "event_id": "fake-event-002",
+    "installation_id": "fake-installation-001",
+    "session_id": "fake-session-001",
+    "task_id": "fake-task-001",
+    "sequence": 2,
+    "occurred_at": "2026-10-02T09:00:01Z",
+    "event_type": "task_started",
+    "payload": {
+      "fixture_label": "synthetic task start"
+    }
+  },
+  {
+    "type": "event",
+    "schema_version": 1,
+    "event_id": "fake-event-003",
+    "installation_id": "fake-installation-001",
+    "session_id": "fake-session-001",
+    "task_id": "fake-task-001",
+    "sequence": 3,
+    "occurred_at": "2026-10-02T09:00:02Z",
+    "event_type": "tool_started",
+    "correlation_id": "fake-correlation-001",
+    "payload": {
+      "fixture_label": "synthetic tool start"
+    }
+  },
+  {
+    "type": "event",
+    "schema_version": 1,
+    "event_id": "fake-event-004",
+    "installation_id": "fake-installation-001",
+    "session_id": "fake-session-001",
+    "task_id": "fake-task-001",
+    "sequence": 4,
+    "occurred_at": "2026-10-02T09:00:03Z",
+    "event_type": "tool_finished",
+    "payload": {
+      "fixture_label": "synthetic tool finish"
+    }
+  },
+  {
+    "type": "event",
+    "schema_version": 1,
+    "event_id": "fake-event-005",
+    "installation_id": "fake-installation-001",
+    "session_id": "fake-session-001",
+    "task_id": "fake-task-001",
+    "sequence": 5,
+    "occurred_at": "2026-10-02T09:00:04Z",
+    "event_type": "waiting",
+    "payload": {
+      "fixture_label": "synthetic waiting state"
+    }
+  },
+  {
+    "type": "event",
+    "schema_version": 1,
+    "event_id": "fake-event-006",
+    "installation_id": "fake-installation-001",
+    "session_id": "fake-session-001",
+    "task_id": "fake-task-001",
+    "sequence": 6,
+    "occurred_at": "2026-10-02T09:00:05Z",
+    "event_type": "task_finished",
+    "payload": {
+      "fixture_label": "synthetic task finish"
+    }
+  },
+  {
+    "type": "event",
+    "schema_version": 1,
+    "event_id": "fake-event-007",
+    "installation_id": "fake-installation-001",
+    "session_id": "fake-session-001",
+    "sequence": 7,
+    "occurred_at": "2026-10-02T09:00:06Z",
+    "event_type": "task_failed",
+    "payload": {
+      "fixture_label": "synthetic task failure"
+    }
+  },
+  {
+    "type": "event",
+    "schema_version": 1,
+    "event_id": "fake-event-008",
+    "installation_id": "fake-installation-001",
+    "session_id": "fake-session-001",
+    "sequence": 8,
+    "occurred_at": "2026-10-02T09:00:07Z",
+    "event_type": "tool_failed",
+    "payload": {
+      "fixture_label": "synthetic tool failure"
+    }
+  },
+  {
+    "type": "event",
+    "schema_version": 1,
+    "event_id": "fake-event-009",
+    "installation_id": "fake-installation-001",
+    "session_id": "fake-session-001",
+    "sequence": 9,
+    "occurred_at": "2026-10-02T09:00:08Z",
+    "event_type": "heartbeat",
+    "payload": {
+      "fixture_label": "synthetic heartbeat"
+    }
+  },
+  {
+    "type": "event",
+    "schema_version": 1,
+    "event_id": "fake-event-010",
+    "installation_id": "fake-installation-001",
+    "session_id": "fake-session-001",
+    "sequence": 10,
+    "occurred_at": "2026-10-02T09:00:09Z",
+    "event_type": "session_ended",
+    "payload": {
+      "fixture_label": "synthetic session end"
+    }
+  }
+]
