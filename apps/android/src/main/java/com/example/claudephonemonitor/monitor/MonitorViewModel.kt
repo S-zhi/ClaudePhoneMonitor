@@ -2,6 +2,7 @@ package com.example.claudephonemonitor.monitor
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.claudephonemonitor.ui.ClawdPersona
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,13 +17,15 @@ data class MonitorUiState(
     val snapshot: MonitorSnapshot = MonitorSnapshot(),
     val petState: PetState = PetState.IDLE,
     val activity: ActivityVariation = ActivityVariation.BREATH,
-    val message: String = "Demo stream ready",
+    val persona: ClawdPersona = ClawdPersona.AUTO,
+    val isSilentMode: Boolean = false,
+    val message: String = "Ready",
     val isConnected: Boolean = false,
     val isDemoMode: Boolean = true,
-    val controlsVisible: Boolean = true,
-    val overlayState: PetState? = null,
-    val overlayRemainingMs: Long = 0L,
+    val controlsVisible: Boolean = false,
     val eventCount: Int = 0,
+    val transitionRemainingMs: Long = 10_000L, // Show on initial launch and every switch for 10s
+    val activeStateLabel: String = "IDLE",
 )
 
 class MonitorViewModel(
@@ -31,8 +34,8 @@ class MonitorViewModel(
     private val _uiState = MutableStateFlow(MonitorUiState())
     val uiState: StateFlow<MonitorUiState> = _uiState.asStateFlow()
 
-    private var overlayDeadlineMs: Long? = null
-    private var overlayJob: Job? = null
+    private var transitionDeadlineMs: Long = System.currentTimeMillis() + 10_000L
+    private var timerJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -43,9 +46,9 @@ class MonitorViewModel(
                 _uiState.update { it.copy(isConnected = connected) }
             }
         }
-        overlayJob = viewModelScope.launch {
+        timerJob = viewModelScope.launch {
             while (isActive) {
-                refreshOverlayTimer()
+                refreshTransitionTimer()
                 delay(100L)
             }
         }
@@ -54,24 +57,53 @@ class MonitorViewModel(
 
     fun toggleControls() {
         _uiState.update { it.copy(controlsVisible = !it.controlsVisible) }
+        triggerTransition(durationMs = 10_000L)
     }
 
     fun setControlsVisible(visible: Boolean) {
         _uiState.update { it.copy(controlsVisible = visible) }
     }
 
+    fun selectPersona(persona: ClawdPersona) {
+        _uiState.update { it.copy(persona = persona) }
+        triggerTransition(durationMs = 10_000L)
+    }
+
+    fun toggleSilentMode() {
+        val nextSilent = !_uiState.value.isSilentMode
+        _uiState.update { it.copy(isSilentMode = nextSilent) }
+        triggerTransition(
+            label = if (nextSilent) "SLEEP" else _uiState.value.petState.title,
+            durationMs = 10_000L,
+        )
+    }
+
     fun toggleDemoMode() {
         val enabled = !_uiState.value.isDemoMode
         _uiState.update { it.copy(isDemoMode = enabled) }
         client.send(MonitorCommand.SetDemoMode(enabled))
+        triggerTransition(durationMs = 10_000L)
     }
 
     fun simulateFinish() {
         client.send(MonitorCommand.RequestFinish)
+        triggerTransition(label = "FINISHED", durationMs = 10_000L)
     }
 
     fun simulateError() {
         client.send(MonitorCommand.RequestError)
+        triggerTransition(label = "ERROR", durationMs = 10_000L)
+    }
+
+    fun triggerTransition(label: String? = null, durationMs: Long = 10_000L) {
+        transitionDeadlineMs = System.currentTimeMillis() + durationMs
+        _uiState.update { state ->
+            val resolvedLabel = label ?: if (state.isSilentMode) "SLEEP" else state.petState.title
+            state.copy(
+                transitionRemainingMs = durationMs,
+                activeStateLabel = resolvedLabel,
+            )
+        }
     }
 
     private fun handleEvent(event: MonitorEvent) {
@@ -98,12 +130,29 @@ class MonitorViewModel(
         val activity = (event.activity ?: nextSnapshot.activity ?: event.name.wireValue)
             .toActivityVariation()
         val detail = event.detail.ifBlank { defaultMessage(event, nextSnapshot) }
+
+        val stateChanged = stateFromEvent != previous.petState || event.name == MonitorEventName.TASK_FINISHED ||
+            event.name == MonitorEventName.TASK_FAILED || event.name == MonitorEventName.TOOL_FAILED
+
+        val displayLabel = when {
+            previous.isSilentMode -> "SLEEP"
+            event.name == MonitorEventName.TASK_FINISHED -> "FINISHED"
+            event.name == MonitorEventName.TASK_FAILED || event.name == MonitorEventName.TOOL_FAILED -> "ERROR"
+            else -> stateFromEvent.title
+        }
+
+        if (stateChanged) {
+            transitionDeadlineMs = System.currentTimeMillis() + 10_000L
+        }
+
         _uiState.update {
             it.copy(
                 snapshot = nextSnapshot,
                 petState = stateFromEvent,
                 activity = activity,
                 message = detail,
+                activeStateLabel = displayLabel,
+                transitionRemainingMs = if (stateChanged) 10_000L else it.transitionRemainingMs,
                 isConnected = when (event.type) {
                     MonitorEventType.CONNECTED -> true
                     MonitorEventType.DISCONNECTED -> false
@@ -114,45 +163,12 @@ class MonitorViewModel(
                 ) it.eventCount else it.eventCount + 1,
             )
         }
-        when (event.name) {
-            MonitorEventName.TASK_FINISHED -> beginOverlay(PetState.FINISH, 5_000L)
-            MonitorEventName.TASK_FAILED,
-            MonitorEventName.TOOL_FAILED -> beginOverlay(PetState.ERROR, 10_000L)
-            else -> Unit
-        }
     }
 
-    private fun beginOverlay(state: PetState, durationMs: Long) {
-        overlayDeadlineMs = System.currentTimeMillis() + durationMs
-        _uiState.update {
-            it.copy(
-                petState = state,
-                overlayState = state,
-                overlayRemainingMs = durationMs,
-            )
-        }
-    }
-
-    private fun refreshOverlayTimer() {
-        val deadline = overlayDeadlineMs ?: return
-        val remaining = (deadline - System.currentTimeMillis()).coerceAtLeast(0L)
-        if (remaining == 0L) {
-            val finishedOverlay = _uiState.value.overlayState
-            overlayDeadlineMs = null
-            _uiState.update { state ->
-                if (finishedOverlay == null || state.overlayState != finishedOverlay) {
-                    state
-                } else {
-                    state.copy(
-                        petState = state.snapshot.toPetState(),
-                        overlayState = null,
-                        overlayRemainingMs = 0L,
-                        message = "Overlay complete",
-                    )
-                }
-            }
-        } else {
-            _uiState.update { it.copy(overlayRemainingMs = remaining) }
+    private fun refreshTransitionTimer() {
+        val remaining = (transitionDeadlineMs - System.currentTimeMillis()).coerceAtLeast(0L)
+        if (_uiState.value.transitionRemainingMs != remaining) {
+            _uiState.update { it.copy(transitionRemainingMs = remaining) }
         }
     }
 
@@ -167,7 +183,7 @@ class MonitorViewModel(
     }
 
     override fun onCleared() {
-        overlayJob?.cancel()
+        timerJob?.cancel()
         client.disconnect()
         super.onCleared()
     }

@@ -1,8 +1,14 @@
 package com.example.claudephonemonitor.ui
 
+import android.app.Activity
+import android.view.WindowManager
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -12,6 +18,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -19,35 +26,46 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.claudephonemonitor.monitor.ActivityVariation
 import com.example.claudephonemonitor.monitor.ComputerState
 import com.example.claudephonemonitor.monitor.MonitorUiState
 import com.example.claudephonemonitor.monitor.MonitorViewModel
 import com.example.claudephonemonitor.monitor.PetState
 import java.util.Locale
-import kotlin.math.max
 
 @Composable
 fun MonitorApp(viewModel: MonitorViewModel = viewModel()) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+
+    // Ensure the screen stays always on
+    val context = LocalContext.current
+    DisposableEffect(Unit) {
+        val window = (context as? Activity)?.window
+        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
     PhoneMonitorTheme {
         MonitorScreen(
             uiState = uiState,
@@ -69,106 +87,200 @@ private fun MonitorScreen(
     onError: () -> Unit,
     onHideControls: () -> Unit,
 ) {
-    val stateColor = Color(uiState.petState.color)
-    val computerColor = when (uiState.snapshot.computerState) {
-        ComputerState.ONLINE -> Color(0xFF8DE6A8)
-        ComputerState.STALE -> Color(0xFFF6C76D)
-        ComputerState.OFFLINE -> Color(0xFFFF7B85)
+    val isSilent = uiState.isSilentMode
+    val activeState = uiState.petState
+    val isTransitionActive = uiState.transitionRemainingMs > 0L
+
+    // Large Typography artistic gradient colors matching the active state
+    val (titleColor1, titleColor2) = if (isSilent) {
+        Color(0xFF94A3B8) to Color(0xFF64748B)
+    } else {
+        when (activeState) {
+            PetState.WORKING -> Color(0xFF34D399) to Color(0xFF059669)
+            PetState.WAITING -> Color(0xFFFBBF24) to Color(0xFFD97706)
+            PetState.FINISH -> Color(0xFF38BDF8) to Color(0xFF0284C7)
+            PetState.ERROR -> Color(0xFFF87171) to Color(0xFFDC2626)
+            PetState.IDLE -> Color(0xFFFB923C) to Color(0xFFEA580C)
+            PetState.OFFLINE -> Color(0xFF94A3B8) to Color(0xFF475569)
+        }
     }
+
+    val computerColor = if (isSilent) {
+        Color(0xFF5B697D)
+    } else {
+        when (uiState.snapshot.computerState) {
+            ComputerState.ONLINE -> Color(0xFF8DE6A8)
+            ComputerState.STALE -> Color(0xFFF6C76D)
+            ComputerState.OFFLINE -> Color(0xFFFF7B85)
+        }
+    }
+
+    val backgroundColor = if (isSilent) Color(0xFF05070B) else Color(0xFF090D15)
+
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF090D16))
+            .background(backgroundColor)
             .pointerInput(Unit) {
                 detectTapGestures { onToggleControls() }
             }
-            .semantics { contentDescription = "Phone monitor. Tap anywhere to toggle controls." },
+            .semantics { contentDescription = "Claude phone monitor." },
     ) {
-        PixelPetCanvas(
-            state = uiState.petState,
-            activity = uiState.activity,
-            modifier = Modifier.fillMaxSize(),
-        )
+        // Main content layer:
+        // When transition is active: Large artistic display words on left, Clawd on right.
+        // When transition completes (normal state): Clawd smoothly expands and centers on screen!
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 24.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = if (isTransitionActive) Arrangement.SpaceBetween else Arrangement.Center,
+        ) {
+            // Left: Extra Large Modern Print Typography (Zero countdown pill, purely huge artistic text)
+            // Slower, smoother fade and expand transitions
+            AnimatedVisibility(
+                visible = isTransitionActive,
+                enter = fadeIn(tween(750, easing = FastOutSlowInEasing)) +
+                    expandHorizontally(tween(850, easing = FastOutSlowInEasing)),
+                exit = fadeOut(tween(1100, easing = FastOutSlowInEasing)) +
+                    shrinkHorizontally(tween(1200, easing = FastOutSlowInEasing)),
+                modifier = Modifier
+                    .weight(1.15f, fill = false)
+                    .fillMaxHeight(),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .padding(start = 16.dp, end = 20.dp),
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    val displayWord = if (isSilent) {
+                        "SLEEP"
+                    } else when (activeState) {
+                        PetState.WORKING -> "WORK"
+                        PetState.WAITING -> "WAIT"
+                        PetState.FINISH -> "DONE"
+                        PetState.ERROR -> "ERR"
+                        PetState.IDLE -> "IDLE"
+                        PetState.OFFLINE -> "OFF"
+                    }
 
+                    // Dynamic extra huge font sizing: 3 letters -> 118sp, 4 letters -> 108sp, 5 letters -> 98sp
+                    val titleSize = when {
+                        displayWord.length <= 3 -> 118.sp
+                        displayWord.length == 4 -> 108.sp
+                        else -> 98.sp
+                    }
+                    val titleLineHeight = when {
+                        displayWord.length <= 3 -> 120.sp
+                        displayWord.length == 4 -> 110.sp
+                        else -> 100.sp
+                    }
+
+                    // Extra Large Single-Line Editorial Display Poster Title (No wrap, gigantic visual impact)
+                    Text(
+                        text = displayWord,
+                        fontSize = titleSize,
+                        lineHeight = titleLineHeight,
+                        fontWeight = FontWeight.Black,
+                        letterSpacing = 3.sp,
+                        maxLines = 1,
+                        softWrap = false,
+                        style = androidx.compose.ui.text.TextStyle(
+                            brush = Brush.verticalGradient(
+                                colors = listOf(titleColor1, titleColor2),
+                            ),
+                        ),
+                        fontFamily = FontFamily.SansSerif,
+                    )
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Elegant secondary subtitle line (Single line, strictly no countdown!)
+                    Text(
+                        text = if (isSilent) "STANDBY" else uiState.message.uppercase(Locale.US),
+                        color = titleColor1.copy(alpha = 0.85f),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.2.sp,
+                        maxLines = 1,
+                        softWrap = false,
+                        fontFamily = FontFamily.SansSerif,
+                    )
+                }
+            }
+
+            // Right/Center: Screen-filling Giant Procedural Clawd Mascot
+            // Naturally centers when left typography gently recedes
+            Box(
+                modifier = Modifier
+                    .weight(if (isTransitionActive) 1.25f else 1.0f)
+                    .fillMaxHeight(),
+                contentAlignment = Alignment.Center,
+            ) {
+                ClawdProceduralView(
+                    state = activeState,
+                    activity = uiState.activity,
+                    isSilent = isSilent,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+
+        // Top-Left Minimal Header
         Column(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(start = 22.dp, top = 18.dp),
+                .padding(start = 22.dp, top = 16.dp),
         ) {
             Text(
                 text = "PHONE MONITOR",
-                color = Color(0xFFEAF0F5),
-                fontSize = 16.sp,
+                color = Color(0xFFF3F6FA),
+                fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
-                letterSpacing = 1.5.sp,
-                fontFamily = MaterialTheme.typography.labelMedium.fontFamily,
-            )
-            Spacer(modifier = Modifier.height(5.dp))
-            Text(
-                text = "INSTALLATION  ${uiState.snapshot.installationId}",
-                color = Color(0xFF65748C),
-                fontSize = 10.sp,
-                fontFamily = MaterialTheme.typography.labelMedium.fontFamily,
+                letterSpacing = 1.2.sp,
+                fontFamily = FontFamily.Monospace,
             )
         }
 
+        // Top-Right Status Indicator (Online dot, WS connection & sequence number)
         Row(
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(end = 22.dp, top = 18.dp),
+                .padding(end = 22.dp, top = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             StatusDot(color = computerColor)
-            Spacer(modifier = Modifier.width(7.dp))
+            Spacer(modifier = Modifier.width(6.dp))
             Text(
-                text = uiState.snapshot.computerState.wireValue.uppercase(Locale.US),
+                text = "CLAUDE ${uiState.snapshot.computerState.wireValue.uppercase(Locale.US)}",
                 color = computerColor,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
-                fontFamily = MaterialTheme.typography.labelMedium.fontFamily,
+                fontFamily = FontFamily.Monospace,
             )
-            Spacer(modifier = Modifier.width(14.dp))
+            Spacer(modifier = Modifier.width(10.dp))
             Text(
-                text = "SEQ ${uiState.snapshot.lastSequence.toString().padStart(4, '0')}",
-                color = Color(0xFF65748C),
+                text = "WS ${if (uiState.isConnected) "CONNECTED" else "OFFLINE"}",
+                color = if (uiState.isConnected) Color(0xFF8DE6A8) else Color(0xFFFF7B85),
                 fontSize = 10.sp,
-                fontFamily = MaterialTheme.typography.labelMedium.fontFamily,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = "SEQ #${uiState.snapshot.lastSequence.toString().padStart(4, '0')}",
+                color = Color(0xFF556275),
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
             )
         }
 
-        Column(
-            modifier = Modifier
-                .align(Alignment.Center)
-                .padding(top = 190.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            StatePill(
-                state = uiState.petState,
-                activity = uiState.activity,
-                color = stateColor,
-            )
-            Spacer(modifier = Modifier.height(9.dp))
-            Text(
-                text = uiState.message.uppercase(Locale.US),
-                color = Color(0xFF9AA8BC),
-                fontSize = 11.sp,
-                letterSpacing = 1.sp,
-                textAlign = TextAlign.Center,
-                fontFamily = MaterialTheme.typography.labelMedium.fontFamily,
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "CLAUDE ${uiState.snapshot.claudeState.wireValue.uppercase(Locale.US)}  ·  EVENTS ${uiState.eventCount}",
-                color = Color(0xFF58667A),
-                fontSize = 9.sp,
-                fontFamily = MaterialTheme.typography.labelMedium.fontFamily,
-            )
-        }
-
+        // Floating Compact Controls (tap screen to toggle, hidden by default for pure clean look)
         AnimatedVisibility(
             visible = uiState.controlsVisible,
-            enter = fadeIn(),
-            exit = fadeOut(),
+            enter = fadeIn(tween(250)),
+            exit = fadeOut(tween(250)),
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
             CompactControls(
@@ -177,32 +289,6 @@ private fun MonitorScreen(
                 onFinish = onFinish,
                 onError = onError,
                 onHideControls = onHideControls,
-            )
-        }
-
-        AnimatedVisibility(
-            visible = !uiState.controlsVisible,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 18.dp),
-        ) {
-            Text(
-                text = "TAP TO SHOW CONTROLS",
-                color = Color(0xFF526174),
-                fontSize = 9.sp,
-                letterSpacing = 1.2.sp,
-                fontFamily = MaterialTheme.typography.labelMedium.fontFamily,
-            )
-        }
-
-        val overlay = uiState.overlayState
-        if (overlay != null && uiState.overlayRemainingMs > 0L) {
-            TimerOverlay(
-                state = overlay,
-                remainingMs = uiState.overlayRemainingMs,
-                message = uiState.message,
             )
         }
     }
@@ -218,11 +304,11 @@ private fun CompactControls(
 ) {
     Row(
         modifier = Modifier
-            .padding(horizontal = 18.dp, vertical = 16.dp)
+            .padding(horizontal = 18.dp, vertical = 14.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(Color(0xE6172230))
             .border(1.dp, Color(0xFF2B3A4D), RoundedCornerShape(12.dp))
-            .padding(8.dp),
+            .padding(6.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -232,12 +318,12 @@ private fun CompactControls(
             onClick = onToggleDemo,
         )
         CompactControl(
-            label = "FINISH 5S",
+            label = "FINISH",
             tint = Color(0xFF8FE1FF),
             onClick = onFinish,
         )
         CompactControl(
-            label = "ERROR 10S",
+            label = "ERROR",
             tint = Color(0xFFFF7B85),
             onClick = onError,
         )
@@ -261,87 +347,12 @@ private fun CompactControl(label: String, tint: Color, onClick: () -> Unit) {
     ) {
         Text(
             text = label,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 0.6.sp,
-            fontFamily = MaterialTheme.typography.labelMedium.fontFamily,
-        )
-    }
-}
-
-@Composable
-private fun StatePill(state: PetState, activity: ActivityVariation, color: Color) {
-    Row(
-        modifier = Modifier
-            .clip(CircleShape)
-            .background(Color(0xD91A2635))
-            .border(1.dp, color.copy(alpha = 0.75f), CircleShape)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        StatusDot(color = color)
-        Spacer(modifier = Modifier.width(7.dp))
-        Text(
-            text = state.title,
-            color = color,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
-            letterSpacing = 1.sp,
-            fontFamily = MaterialTheme.typography.labelMedium.fontFamily,
+            letterSpacing = 0.6.sp,
+            fontFamily = FontFamily.Monospace,
         )
-        Spacer(modifier = Modifier.width(9.dp))
-        Text(
-            text = activity.label,
-            color = Color(0xFF9AA8BC),
-            fontSize = 9.sp,
-            fontFamily = MaterialTheme.typography.labelMedium.fontFamily,
-        )
-    }
-}
-
-@Composable
-private fun TimerOverlay(state: PetState, remainingMs: Long, message: String) {
-    val tint = Color(state.color)
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0x66050A11)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            modifier = Modifier
-                .clip(RoundedCornerShape(14.dp))
-                .background(Color(0xF2141D2A))
-                .border(1.dp, tint.copy(alpha = 0.85f), RoundedCornerShape(14.dp))
-                .padding(horizontal = 34.dp, vertical = 22.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text(
-                text = state.title,
-                color = tint,
-                fontSize = 26.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 2.sp,
-                fontFamily = MaterialTheme.typography.headlineMedium.fontFamily,
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = formatTimer(remainingMs),
-                color = Color(0xFFEAF0F5),
-                fontSize = 46.sp,
-                fontWeight = FontWeight.Bold,
-                fontFamily = MaterialTheme.typography.headlineMedium.fontFamily,
-            )
-            Spacer(modifier = Modifier.height(5.dp))
-            Text(
-                text = message.uppercase(Locale.US),
-                color = Color(0xFF9AA8BC),
-                fontSize = 10.sp,
-                letterSpacing = 0.8.sp,
-                fontFamily = MaterialTheme.typography.labelMedium.fontFamily,
-            )
-        }
     }
 }
 
@@ -349,11 +360,8 @@ private fun TimerOverlay(state: PetState, remainingMs: Long, message: String) {
 private fun StatusDot(color: Color) {
     Box(
         modifier = Modifier
-            .size(7.dp)
+            .size(8.dp)
             .clip(CircleShape)
             .background(color),
     )
 }
-
-private fun formatTimer(remainingMs: Long): String =
-    String.format(Locale.US, "%.1fs", max(0L, remainingMs) / 1_000f)
