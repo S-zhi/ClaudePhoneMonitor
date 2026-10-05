@@ -50,6 +50,15 @@ NO_PAIR=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --no-pair) NO_PAIR=1; shift ;;
+    --relay-http|--relay-ws|--public-url|--bootstrap-secret|--installation-id)
+      [ "$#" -ge 2 ] || { printf 'monitor-setup: %s needs a value\n' "$1" >&2; exit 2; }
+      PAIR_ARGS+=("$1" "$2")
+      shift 2
+      ;;
+    --development)
+      PAIR_ARGS+=("$1")
+      shift
+      ;;
     --state-dir|--endpoint)
       [ "$#" -ge 2 ] || { printf 'monitor-setup: %s needs a value\n' "$1" >&2; exit 2; }
       INSTALL_ARGS+=("$1" "$2")

@@ -88,8 +88,8 @@ PY
 )"
 printf '%s\n' '{"session_id":"fixture"}' | /bin/sh -c "$COMMAND" || fail "hook was not fail-open"
 
-CODE1="$("$SCRIPTS/pair" --state-dir "$STATE" --code TEST1234 --json)" || fail "pair"
-CODE2="$("$SCRIPTS/pair" --state-dir "$STATE" --json)" || fail "idempotent pair"
+CODE1="$($SCRIPTS/pair --development --state-dir "$STATE" --code TEST1234 --json)" || fail "pair"
+CODE2="$($SCRIPTS/pair --development --state-dir "$STATE" --json)" || fail "idempotent pair"
 python3 - "$CODE1" "$CODE2" "$STATE/pairing.json" <<'PY'
 import json
 import pathlib

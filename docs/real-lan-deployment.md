@@ -161,7 +161,9 @@ are not claims about a particular Hook payload schema.
    ```bash
    export RELAY_HOST=0.0.0.0
    export RELAY_PORT=8787
+   export RELAY_PUBLIC_URL="http://192.168.1.42:8787"
    export RELAY_BOOTSTRAP_SECRET='replace-with-a-long-random-value'
+   export RELAY_DB_PATH="$HOME/.claude-phone-monitor/relay.sqlite"
    npm --prefix services/relay run start
    ```
 

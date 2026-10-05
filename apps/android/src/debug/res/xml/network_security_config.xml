@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug-only LAN transport exception. Release keeps the main resource, which
+     rejects cleartext HTTP/WebSocket until WSS/TLS is configured. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

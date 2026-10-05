@@ -6,6 +6,11 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/common.sh"
 
+if [ "${1:-}" != "--development" ]; then
+  exec "${CLAUDE_PHONE_MONITOR_PYTHON:-python3}" "$SCRIPT_DIR/lib/real_pair.py" "$@"
+fi
+shift
+
 STATE_DIR="$CM_STATE_DIR_DEFAULT"
 ENDPOINT="$CM_ENDPOINT_DEFAULT"
 REQUESTED_CODE=""

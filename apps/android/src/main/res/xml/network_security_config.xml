@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Release builds stay encrypted-transport-only. Debug uses the trusted-LAN
+     ws:///http:// development path; do not expose a debug APK beyond the LAN. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

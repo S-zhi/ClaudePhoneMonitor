@@ -4,6 +4,7 @@ build/
 .gradle/
 .idea/
 *.iml
+*.apk
 .env
 .env.*
 !.env.example

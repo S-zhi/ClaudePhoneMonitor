@@ -9,30 +9,35 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
 private val MonitorColors = darkColorScheme(
-    primary = androidx.compose.ui.graphics.Color(0xFFB8F57B),
-    onPrimary = androidx.compose.ui.graphics.Color(0xFF182018),
-    secondary = androidx.compose.ui.graphics.Color(0xFF8FE1FF),
-    background = androidx.compose.ui.graphics.Color(0xFF090D16),
-    surface = androidx.compose.ui.graphics.Color(0xFF111827),
-    onSurface = androidx.compose.ui.graphics.Color(0xFFEAF0F5),
+    primary = androidx.compose.ui.graphics.Color(0xFFD97757),
+    onPrimary = androidx.compose.ui.graphics.Color(0xFF1B1816),
+    secondary = androidx.compose.ui.graphics.Color(0xFFE5A187),
+    onSecondary = androidx.compose.ui.graphics.Color(0xFF211915),
+    tertiary = androidx.compose.ui.graphics.Color(0xFFE9D7C5),
+    background = androidx.compose.ui.graphics.Color(0xFF1B1816),
+    surface = androidx.compose.ui.graphics.Color(0xFF28221F),
+    surfaceVariant = androidx.compose.ui.graphics.Color(0xFF342D28),
+    onSurface = androidx.compose.ui.graphics.Color(0xFFF1E8DE),
+    onSurfaceVariant = androidx.compose.ui.graphics.Color(0xFFB2A499),
 )
 
+private val DefaultTypography = Typography()
 private val MonitorTypography = Typography(
-    headlineMedium = androidx.compose.material3.Typography().headlineMedium.copy(
+    headlineMedium = DefaultTypography.headlineMedium.copy(
         fontFamily = FontFamily.Monospace,
         fontWeight = FontWeight.Bold,
         letterSpacing = 0.sp,
     ),
-    titleMedium = androidx.compose.material3.Typography().titleMedium.copy(
-        fontFamily = FontFamily.Monospace,
-        fontWeight = FontWeight.Bold,
+    titleMedium = DefaultTypography.titleMedium.copy(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.SemiBold,
         letterSpacing = 0.sp,
     ),
-    bodyMedium = androidx.compose.material3.Typography().bodyMedium.copy(
-        fontFamily = FontFamily.Monospace,
+    bodyMedium = DefaultTypography.bodyMedium.copy(
+        fontFamily = FontFamily.SansSerif,
         letterSpacing = 0.sp,
     ),
-    labelMedium = androidx.compose.material3.Typography().labelMedium.copy(
+    labelMedium = DefaultTypography.labelMedium.copy(
         fontFamily = FontFamily.Monospace,
         fontWeight = FontWeight.Bold,
         letterSpacing = 0.sp,

@@ -63,6 +63,7 @@ export interface HelloMessage {
   type: "hello";
   schema_version?: typeof RELAY_SCHEMA_VERSION;
   client_id?: string;
+  role?: "collector" | "phone" | "relay";
   installation_id?: string;
   pairing_id?: string;
   pairing_code?: string;
@@ -107,6 +108,7 @@ export interface SubscribeMessage {
   installation_id?: string;
   all?: boolean;
   android_token?: string;
+  token?: string;
 }
 
 export interface ResumeMessage {

@@ -32,7 +32,7 @@ class MonitorModelsTest {
 
     @Test
     fun subscribeCommandUsesCanonicalWireKeys() {
-        val hello = MonitorCommand.Hello("install-7", "phone-1", 40L).toWireJson()
+        val hello = MonitorCommand.Hello("install-7", "phone-1", "android-token", 40L).toWireJson()
         val payload = MonitorCommand.Subscribe("install-7", "token", 41L).toWireJson()
         assertTrue(hello.contains("\"type\":\"hello\""))
         assertTrue(hello.contains("\"schema_version\":1"))
