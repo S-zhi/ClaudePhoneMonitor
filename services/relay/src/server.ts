@@ -2,6 +2,7 @@ import Fastify, {
   type FastifyInstance,
   type FastifyRequest,
 } from "fastify";
+import { timingSafeEqual } from "node:crypto";
 import websocket from "@fastify/websocket";
 import WebSocket from "ws";
 
@@ -25,8 +26,21 @@ interface PairingParams {
   pairing_id: string;
 }
 
+interface PairingBody {
+  installation_id: string;
+  relay_url: string;
+  public_url?: string;
+}
+
 interface ClaimBody {
   code?: string;
+  device_name?: string;
+}
+
+function safeEqualText(left: string, right: string): boolean {
+  const a = Buffer.from(left, "utf8");
+  const b = Buffer.from(right, "utf8");
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 function queryString(value: unknown): string | undefined {
@@ -66,6 +80,23 @@ export function createRelayServer(options: RelayServerOptions = {}): {
     });
   const app = Fastify({ logger: false });
 
+  // Invalid upgrade paths use Fastify's HTTP fallback; the peer can reset that raw socket before its response completes.
+  app.server.on("upgrade", (request, socket) => {
+    socket.on("error", (error: NodeJS.ErrnoException) => {
+      const errorCode = typeof error.code === "string" ? error.code : "unknown";
+      const context = {
+        method: request.method,
+        error_code: errorCode,
+        error_name: error.name,
+      };
+      if (errorCode === "ECONNRESET" || errorCode === "EPIPE") {
+        logger.debug("websocket_socket_error", context);
+      } else {
+        logger.error("websocket_socket_error", context);
+      }
+    });
+  });
+
   app.addHook("onRequest", async (request) => {
     logger.debug("http_request", {
       method: request.method,
@@ -77,8 +108,8 @@ export function createRelayServer(options: RelayServerOptions = {}): {
     status: "ok",
     service: "relay",
     schema_version: RELAY_SCHEMA_VERSION,
-    auth: { mode: "development", placeholder: true },
-    storage: "memory",
+    auth: { mode: config.authMode },
+    storage: relay.repository.storageKind ?? "memory",
     uptime_ms: Math.round(process.uptime() * 1000),
   }));
 
@@ -89,7 +120,7 @@ export function createRelayServer(options: RelayServerOptions = {}): {
   app.get("/readyz", async () => ({
     status: "ready",
     service: "relay",
-    storage: "memory",
+    storage: relay.repository.storageKind ?? "memory",
     gateways: ["collector", "android"],
     ...relay.stats(),
   }));
@@ -102,8 +133,18 @@ export function createRelayServer(options: RelayServerOptions = {}): {
     }),
   );
 
-  app.post("/v1/pairing", async (_request, reply) => {
-    return reply.code(201).send(relay.createPairing());
+  app.post<{ Body: PairingBody }>("/v1/pairing", async (request, reply) => {
+    if (config.bootstrapSecret) {
+      const authorization = request.headers.authorization ?? "";
+      const bearer = authorization.match(/^Bearer (.+)$/i)?.[1];
+      if (!bearer || !safeEqualText(bearer, config.bootstrapSecret)) {
+        return reply.code(401).send({ error: "unauthorized" });
+      }
+    } else if (config.authMode === "paired") {
+      return reply.code(503).send({ error: "pairing_unavailable" });
+    }
+    const pairing = relay.createPairing(request.body ?? {});
+    return reply.code(201).send(pairing);
   });
 
   app.get<{ Params: PairingParams }>(
@@ -119,10 +160,14 @@ export function createRelayServer(options: RelayServerOptions = {}): {
     "/v1/pairing/:pairing_id/claim",
     async (request, reply) => {
       const code = queryString(request.body?.code);
-      if (!code || !relay.claimPairing(request.params.pairing_id, code)) {
-        return reply.code(400).send({ error: "invalid_pairing" });
-      }
-      return reply.code(204).send();
+      if (!code) return reply.code(400).send({ error: "invalid_pairing" });
+      const claimed = relay.claimPairingResult(
+        request.params.pairing_id,
+        code,
+        queryString(request.body?.device_name),
+      );
+      if (!claimed) return reply.code(400).send({ error: "invalid_pairing" });
+      return reply.code(200).send(claimed);
     },
   );
 

@@ -267,3 +267,160 @@ test("resume replays stored events after a sequence and then sends a snapshot", 
   assert.deepEqual(replayed.map((message) => message.type === "event" && message.sequence), [1, 2]);
   assert.equal(androidMessages.at(-1)?.type, "snapshot");
 });
+
+test("paired phones receive sanitized live events before snapshots only for their installation", () => {
+  const relay = new Relay({
+    autoStart: false,
+    config: {
+      authMode: "paired",
+      bootstrapSecret: "test-bootstrap-secret-long-enough",
+    },
+  });
+  const firstPairing = relay.createPairing({ installation_id: "install-1" });
+  const firstPhone = relay.claimPairingResult(firstPairing.pairing_id, firstPairing.code);
+  const secondPairing = relay.createPairing({ installation_id: "install-2" });
+  const secondPhone = relay.claimPairingResult(secondPairing.pairing_id, secondPairing.code);
+  assert.ok(firstPhone);
+  assert.ok(secondPhone);
+
+  const firstCollectorMessages = messages();
+  const secondCollectorMessages = messages();
+  const firstPhoneMessages = messages();
+  const secondPhoneMessages = messages();
+  const preAuthPhoneMessages = messages();
+  const badTokenPhoneMessages = messages();
+  const firstCollector = relay.connect({
+    gateway: "collector",
+    token: firstPairing.collector_token,
+    transport: { send: (message) => firstCollectorMessages.push(message) },
+  });
+  const secondCollector = relay.connect({
+    gateway: "collector",
+    token: secondPairing.collector_token,
+    transport: { send: (message) => secondCollectorMessages.push(message) },
+  });
+  const firstAndroid = relay.connect({
+    gateway: "android",
+    token: firstPhone.android_token,
+    transport: { send: (message) => firstPhoneMessages.push(message) },
+  });
+  const secondAndroid = relay.connect({
+    gateway: "android",
+    token: secondPhone.android_token,
+    transport: { send: (message) => secondPhoneMessages.push(message) },
+  });
+  const preAuthAndroid = relay.connect({
+    gateway: "android",
+    installation_id: "install-1",
+    transport: { send: (message) => preAuthPhoneMessages.push(message) },
+  });
+  const badTokenAndroid = relay.connect({
+    gateway: "android",
+    installation_id: "install-1",
+    token: "and_invalid_test_token",
+    transport: { send: (message) => badTokenPhoneMessages.push(message) },
+  });
+
+  relay.receive(preAuthAndroid.connection_id, JSON.stringify({
+    type: "subscribe",
+    schema_version: 1,
+    installation_id: "install-1",
+  }));
+  relay.receive(badTokenAndroid.connection_id, JSON.stringify({
+    type: "subscribe",
+    schema_version: 1,
+    installation_id: "install-1",
+    token: "and_invalid_test_token",
+  }));
+  assert.ok(badTokenPhoneMessages.some((message) => message.type === "error"));
+
+  relay.receive(firstAndroid.connection_id, JSON.stringify({
+    type: "subscribe",
+    schema_version: 1,
+    installation_id: "install-1",
+    installation_ids: ["install-1", "install-2"],
+    all: true,
+    token: firstPhone.android_token,
+  }));
+  const firstSubscription = firstPhoneMessages.find((message) => message.type === "subscribe");
+  assert.ok(firstSubscription && firstSubscription.type === "subscribe");
+  assert.deepEqual(firstSubscription.installation_ids, ["install-1"]);
+  assert.equal(firstSubscription.all, false);
+  relay.receive(secondAndroid.connection_id, JSON.stringify({
+    type: "subscribe",
+    schema_version: 1,
+    installation_id: "install-2",
+    token: secondPhone.android_token,
+  }));
+
+  firstPhoneMessages.length = 0;
+  secondPhoneMessages.length = 0;
+  preAuthPhoneMessages.length = 0;
+  badTokenPhoneMessages.length = 0;
+
+  const firstEvent = event({
+    payload: { prompt: "private prompt", visible: "safe status" },
+  });
+  relay.receive(firstCollector.connection_id, JSON.stringify(firstEvent));
+  const firstDelivery = firstPhoneMessages.filter(
+    (message) => message.type === "event" || message.type === "snapshot",
+  );
+  assert.deepEqual(firstDelivery.map((message) => message.type), ["event", "snapshot"]);
+  const liveEvent = firstDelivery[0];
+  assert.ok(liveEvent && liveEvent.type === "event");
+  assert.equal(liveEvent.event_id, "event-1");
+  assert.deepEqual(liveEvent.payload, { prompt: "[REDACTED]", visible: "safe status" });
+  const firstSnapshot = firstDelivery[1];
+  assert.ok(firstSnapshot && firstSnapshot.type === "snapshot");
+  assert.equal(firstSnapshot.last_sequence, 1);
+  assert.equal(
+    secondPhoneMessages.some((message) => message.type === "event" || message.type === "snapshot"),
+    false,
+  );
+  assert.equal(
+    preAuthPhoneMessages.some((message) => message.type === "event" || message.type === "snapshot"),
+    false,
+  );
+  assert.equal(
+    badTokenPhoneMessages.some((message) => message.type === "event" || message.type === "snapshot"),
+    false,
+  );
+
+  const deliveredCount = firstPhoneMessages.length;
+  relay.receive(firstCollector.connection_id, JSON.stringify(firstEvent));
+  assert.equal(firstPhoneMessages.length, deliveredCount);
+
+  firstPhoneMessages.length = 0;
+  const secondEvent = event({
+    event_id: "event-2",
+    installation_id: "install-2",
+    sequence: 1,
+    event_type: "task_started",
+    payload: { task_id: "task-2" },
+  });
+  relay.receive(secondCollector.connection_id, JSON.stringify(secondEvent));
+  const secondDelivery = secondPhoneMessages.filter(
+    (message) => message.type === "event" || message.type === "snapshot",
+  );
+  assert.deepEqual(secondDelivery.map((message) => message.type), ["event", "snapshot"]);
+  assert.equal(secondDelivery[0]?.type === "event" ? secondDelivery[0].installation_id : undefined, "install-2");
+  assert.equal(
+    firstPhoneMessages.some((message) => message.type === "event" || message.type === "snapshot"),
+    false,
+  );
+
+  firstPhoneMessages.length = 0;
+  relay.receive(firstAndroid.connection_id, JSON.stringify({
+    type: "resume",
+    schema_version: 1,
+    installation_id: "install-2",
+    last_sequence: 0,
+  }));
+  assert.ok(firstPhoneMessages.some((message) => message.type === "error"));
+  assert.equal(
+    firstPhoneMessages.some((message) => message.type === "event" || message.type === "snapshot"),
+    false,
+  );
+
+  relay.stop();
+});

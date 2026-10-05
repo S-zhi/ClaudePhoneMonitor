@@ -62,7 +62,7 @@ enum class MonitorEventName(val wireValue: String) {
 
 data class MonitorSnapshot(
     val installationId: String = "demo-installation",
-    val computerState: ComputerState = ComputerState.ONLINE,
+    val computerState: ComputerState = ComputerState.OFFLINE,
     val claudeState: ClaudeState = ClaudeState.IDLE,
     val activity: String? = null,
     val lastSequence: Long = 0L,
@@ -176,6 +176,7 @@ sealed interface MonitorCommand {
     data class Hello(
         val installationId: String,
         val clientId: String,
+        val token: String,
         val lastSequence: Long,
     ) : MonitorCommand {
         override fun toWireJson(): String = JSONObject().apply {
@@ -184,6 +185,7 @@ sealed interface MonitorCommand {
             put("installation_id", installationId)
             put("client_id", clientId)
             put("role", "phone")
+            put("token", token)
             put("last_sequence", lastSequence)
         }.toString()
     }
@@ -200,21 +202,6 @@ sealed interface MonitorCommand {
             put("token", token)
             put("last_sequence", lastSequence)
         }.toString()
-    }
-
-    data class SetDemoMode(val enabled: Boolean) : MonitorCommand {
-        override fun toWireJson(): String = JSONObject().apply {
-            put("type", "set_demo_mode")
-            put("enabled", enabled)
-        }.toString()
-    }
-
-    data object RequestFinish : MonitorCommand {
-        override fun toWireJson(): String = "{\"type\":\"demo_event\",\"event_type\":\"task_finished\"}"
-    }
-
-    data object RequestError : MonitorCommand {
-        override fun toWireJson(): String = "{\"type\":\"demo_event\",\"event_type\":\"task_failed\"}"
     }
 }
 

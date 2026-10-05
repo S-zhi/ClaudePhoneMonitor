@@ -229,6 +229,7 @@ export class Relay {
     }
     for (const probeId of this.pendingProbes.keys()) this.clearPendingProbe(probeId);
     this.pendingChallenges.clear();
+    this.repository.close?.();
   }
 
   private authenticationRequired(): boolean {
@@ -514,12 +515,12 @@ export class Relay {
       issued_at: now,
     });
     const qrPayload = JSON.stringify({
-      schema_version: RELAY_SCHEMA_VERSION,
+      version: RELAY_SCHEMA_VERSION,
+      relay_http_url: this.resolveHttpUrl(request.public_url ?? request.relay_url),
+      relay_ws_url: this.resolveAndroidWsUrl(request.public_url ?? request.relay_url, wsUrl),
       pairing_id: record.pairing_id,
-      code: record.code,
+      pairing_code: record.code,
       installation_id: installationId,
-      ws_url: wsUrl,
-      expires_at: record.expires_at,
     });
     return {
       pairing_id: record.pairing_id,
@@ -587,6 +588,28 @@ export class Relay {
 
   revokeToken(tokenId: string): boolean {
     return this.repository.revokeToken(tokenId, this.now().toISOString());
+  }
+
+  private resolveHttpUrl(requestedUrl?: string): string {
+    const candidate = requestedUrl ?? this.config.publicUrl;
+    if (!candidate) return `http://${this.config.host}:${this.config.port}`;
+    const parsed = new URL(candidate);
+    if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("invalid relay HTTP URL");
+    parsed.search = "";
+    parsed.hash = "";
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+    return parsed.toString().replace(/\/$/, "");
+  }
+
+  private resolveAndroidWsUrl(requestedUrl: string | undefined, wsUrl: string): string {
+    const candidate = requestedUrl ?? wsUrl;
+    const parsed = new URL(candidate);
+    if (parsed.protocol === "http:") parsed.protocol = "ws:";
+    if (parsed.protocol === "https:") parsed.protocol = "wss:";
+    parsed.pathname = "/ws/android";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
   }
 
   private resolveWsUrl(requestedUrl?: string): string {
@@ -742,10 +765,14 @@ export class Relay {
       sequence_status: result.sequence_status,
       duplicate: result.duplicate,
     });
-    if (!result.duplicate) this.broadcastSnapshotsForInstallation(safeEvent.installation_id);
+    if (!result.duplicate) {
+      this.broadcastEventForInstallation(result.stored.event);
+      this.broadcastSnapshotsForInstallation(safeEvent.installation_id);
+    }
   }
 
   private handleHeartbeat(connectionId: string, message: Record<string, unknown>): void {
+    if (!this.requireAuthenticated(connectionId)) return;
     const heartbeatId =
       optionalString(message.heartbeat_id, 128) ?? optionalString(message.nonce, 128);
     const acknowledged = message.acknowledged === true;
@@ -775,9 +802,31 @@ export class Relay {
   private handleSubscribe(connectionId: string, message: Record<string, unknown>): void {
     const connection = this.connections.get(connectionId);
     if (!connection) return;
-    const all = message.all === true || message.installation_ids === undefined && message.installation_id === undefined;
+    const suppliedToken = optionalString(message.token, 512);
+    if (connection.gateway === "android" && this.authenticationRequired()) {
+      if (!this.authenticateConnection(connectionId, suppliedToken, optionalString(message.installation_id))) {
+        this.sendError(connectionId, "unauthorized", "invalid credentials");
+        return;
+      }
+    } else if (suppliedToken) {
+      const validation = this.authenticateConnection(connectionId, suppliedToken, optionalString(message.installation_id));
+      if (!validation && this.authenticationRequired()) {
+        this.sendError(connectionId, "unauthorized", "invalid credentials");
+        return;
+      }
+    }
+    if (!this.requireAuthenticated(connectionId)) return;
+    const requestsAll =
+      message.all === true ||
+      message.installation_ids === undefined && message.installation_id === undefined;
+    const tokenInstallationId = this.authenticationRequired()
+      ? connection.token_installation_id
+      : undefined;
+    const all = requestsAll && tokenInstallationId === undefined;
     const ids = new Set<string>();
-    if (!all) {
+    if (tokenInstallationId) {
+      ids.add(tokenInstallationId);
+    } else if (!all) {
       if (Array.isArray(message.installation_ids)) {
         for (const value of message.installation_ids) {
           const id = nonEmptyString(value);
@@ -789,7 +838,9 @@ export class Relay {
     }
     connection.subscriptions = all ? null : ids;
     const identityInstallation =
-      nonEmptyString(message.installation_id) ?? (ids.size === 1 ? [...ids][0] : undefined);
+      tokenInstallationId ??
+      nonEmptyString(message.installation_id) ??
+      (ids.size === 1 ? [...ids][0] : undefined);
     const currentRecord = this.repository.getConnection(connectionId);
     if (!currentRecord?.installation_id && identityInstallation) {
       this.repository.updateConnectionIdentity(connectionId, {
@@ -808,11 +859,21 @@ export class Relay {
   }
 
   private handleResume(connectionId: string, message: Record<string, unknown>): void {
+    if (!this.requireAuthenticated(connectionId)) return;
+    const connection = this.connections.get(connectionId);
     const installationId = nonEmptyString(message.installation_id);
     const lastSequence =
       message.last_sequence === undefined ? -1 : safeSequence(message.last_sequence);
     if (!installationId || lastSequence === undefined) {
       this.sendError(connectionId, "invalid_message", "resume requires installation_id and last_sequence");
+      return;
+    }
+    if (
+      connection &&
+      this.authenticationRequired() &&
+      connection.token_installation_id !== installationId
+    ) {
+      this.sendError(connectionId, "unauthorized", "installation does not match phone token");
       return;
     }
 
@@ -823,6 +884,7 @@ export class Relay {
   }
 
   private handleProbe(connectionId: string, message: Record<string, unknown>): void {
+    if (!this.requireAuthenticated(connectionId)) return;
     const probeId = nonEmptyString(message.probe_id, 128) ?? `probe_${randomUUID()}`;
     const nonce = nonEmptyString(message.nonce, 512) ?? `nonce_${randomUUID()}`;
     const timeoutMs =
@@ -869,6 +931,7 @@ export class Relay {
   }
 
   private handleChallenge(connectionId: string, message: Record<string, unknown>): void {
+    if (!this.requireAuthenticated(connectionId)) return;
     const challengeId =
       nonEmptyString(message.challenge_id, 128) ??
       nonEmptyString(message.probe_id, 128) ??
@@ -914,6 +977,7 @@ export class Relay {
   }
 
   private handleChallengeAck(connectionId: string, message: Record<string, unknown>): void {
+    if (!this.requireAuthenticated(connectionId)) return;
     const probeId = optionalString(message.probe_id, 128);
     const nonce = optionalString(message.nonce, 512);
     const pendingProbe = probeId
@@ -1128,11 +1192,32 @@ export class Relay {
     }
   }
 
+  private isSubscribedToInstallation(
+    connection: ActiveConnection,
+    installationId: string,
+  ): boolean {
+    if (connection.gateway !== "android" || !connection.authenticated) return false;
+    if (
+      this.authenticationRequired() &&
+      connection.token_installation_id !== installationId
+    ) {
+      return false;
+    }
+    return connection.subscriptions === null || connection.subscriptions.has(installationId);
+  }
+
   private sendSnapshotIfSubscribed(connectionId: string, installationId: string): void {
     const connection = this.connections.get(connectionId);
-    if (!connection || connection.gateway !== "android") return;
-    if (connection.subscriptions && !connection.subscriptions.has(installationId)) return;
+    if (!connection || !this.isSubscribedToInstallation(connection, installationId)) return;
     this.send(connectionId, this.snapshot(installationId));
+  }
+
+  private broadcastEventForInstallation(event: EventEnvelope): void {
+    for (const connection of this.connections.values()) {
+      if (this.isSubscribedToInstallation(connection, event.installation_id)) {
+        this.send(connection.id, event);
+      }
+    }
   }
 
   private broadcastSnapshotsForInstallation(installationId?: string): void {

@@ -30,6 +30,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 STATE_DIR="$(cm_abs_path "$STATE_DIR")"
+cm_load_env "$STATE_DIR"
 cm_mkdir_state "$STATE_DIR"
 mkdir -p "$STATE_DIR/run" 2>/dev/null || exit 0
 PID_FILE="$STATE_DIR/run/daemon.pid"
@@ -71,8 +72,13 @@ if [ "$ONCE" -eq 1 ]; then
   exit 0
 fi
 
-# Keep the process quiet and inexpensive. Hook commands remain independent of
-# this process and are allowed to fail without affecting Claude Code.
+# The launch agent is the real Collector process in production. Keep the
+# heartbeat-only behavior available for fixture tests and incomplete installs.
+if [ -f "$ADAPTER" ]; then
+  exec "$NODE" "$ADAPTER" --collector
+fi
+
+# Keep the process quiet and inexpensive when the adapter is not built yet.
 while :; do
   sleep "$INTERVAL" 2>/dev/null || exit 0
   write_heartbeat

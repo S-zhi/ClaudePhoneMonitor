@@ -20,12 +20,14 @@ is deliberately separate from Claude Code's hook lifecycle:
 The default adapter is:
 
 ```text
-services/collector/dist/hook-adapter.js --event EVENT
+services/collector/dist/cli.js --event EVENT
 ```
 
-The generated command uses the configured Node executable and safely quotes the
-adapter path and event. Override it with `--adapter`, `--node`, or
-`--hook-command` when developing from another checkout.
+The generated launchd agent runs the same Collector binary with `--collector` so
+Hook events have a local Unix socket daemon to receive them. The generated command
+uses the configured Node executable and safely quotes the adapter path and event.
+Override it with `--adapter`, `--node`, or `--hook-command` when developing from
+another checkout.
 
 ## Quick start (macOS)
 
@@ -37,16 +39,31 @@ skills/claude-monitor/scripts/status
 skills/claude-monitor/scripts/doctor
 ```
 
-`setup` is equivalent to an idempotent install followed by creation/display of a
-stable development pairing code. Pairing is local development only; do not use the
-printed code as a production credential. Rotate it with:
+`setup` installs Hooks and the launchd Collector, then calls the real Relay pairing
+API by default. Set `RELAY_BOOTSTRAP_SECRET` and pass a LAN Relay HTTP URL; the
+pair command writes a one-time QR payload and collector token into the private
+state directory. Use the explicit `--development` flag only for fixture tests.
 
 ```bash
-skills/claude-monitor/scripts/pair --rotate
+RELAY_BOOTSTRAP_SECRET='replace-with-a-long-secret' \
+skills/claude-monitor/scripts/pair \
+  --relay-http http://127.0.0.1:8787 \
+  --relay-ws ws://192.168.1.3:8787/ws/collector \
+  --public-url http://192.168.1.3:8787
 ```
 
-For a first install without registering hooks, use `install --no-hooks`. For a
-fixture or CI install, pass all paths explicitly:
+The QR payload must contain the Mac LAN address, not `127.0.0.1`, because Android's
+localhost points to the phone itself. The current LAN MVP uses trusted `ws://`; use
+WSS/TLS before exposing the Relay outside a trusted network.
+
+For fixture or CI tests, use:
+
+```bash
+skills/claude-monitor/scripts/pair --development --state-dir "$TMP/state" --code TEST1234 --json
+```
+
+Pairing tokens are never printed. The generated `pairing.png`, `pairing.json`, and
+`monitor.env` are mode `0600`.
 
 ```bash
 skills/claude-monitor/scripts/install \
@@ -145,7 +162,8 @@ unavailable. This protects Claude Code's lifecycle and tool execution. Diagnose
 lost delivery with `doctor` and `status`; do not make the hook blocking as a local
 workaround.
 
-Pairing codes are generated with Python's OS-backed `secrets` module (or accepted
-explicitly for tests), are stored with mode `0600`, and are marked
-`development: true`. This MVP does not claim production authentication or remote
-transport security.
+The real pairing flow uses a bootstrap bearer only for the Relay's pairing API and
+returns separate opaque collector/Android tokens. Tokens are stored with mode `0600`
+and are never printed or placed in the QR payload. The explicit `--development`
+flag is reserved for fixture tests. The LAN MVP uses trusted `ws://`; use WSS/TLS
+before exposing the Relay beyond the local network.

@@ -47,7 +47,7 @@ export function loadConfig(
   const envBootstrapSecret = nonEmpty(env.RELAY_BOOTSTRAP_SECRET);
   const bootstrapSecret = envBootstrapSecret ?? nonEmpty(overrides.bootstrapSecret);
   const requestedAuthMode =
-    overrides.authMode ?? (env.RELAY_AUTH_MODE === "development" ? "development" : "paired");
+    overrides.authMode ?? (env.RELAY_AUTH_MODE === "paired" ? "paired" : "development");
   const config: RelayConfig = {
     ...DEFAULTS,
     host: env.RELAY_HOST?.trim() || DEFAULTS.host,

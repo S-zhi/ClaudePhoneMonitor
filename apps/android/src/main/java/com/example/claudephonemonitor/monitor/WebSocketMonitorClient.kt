@@ -11,6 +11,9 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 
+internal fun androidWebSocketRequest(endpoint: String): Request =
+    Request.Builder().url(normalizeAndroidWebSocketUrl(endpoint)).build()
+
 class WebSocketMonitorClient(
     private val endpoint: String,
     private val installationId: String,
@@ -30,7 +33,7 @@ class WebSocketMonitorClient(
 
     override fun connect() {
         if (socket != null) return
-        val request = Request.Builder().url(endpoint).build()
+        val request = androidWebSocketRequest(endpoint)
         socket = httpClient.newWebSocket(
             request,
             object : WebSocketListener() {
@@ -40,6 +43,7 @@ class WebSocketMonitorClient(
                         MonitorCommand.Hello(
                             installationId = installationId,
                             clientId = clientId,
+                            token = token,
                             lastSequence = lastSequence,
                         ).toWireJson(),
                     )

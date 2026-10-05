@@ -155,3 +155,94 @@ test("Fastify health, pairing, and WebSocket gateways are runnable", async () =>
     await app.close();
   }
 });
+
+test("paired mode requires bootstrap and role-scoped device tokens", async () => {
+  const { app } = createRelayServer({
+    config: {
+      host: "127.0.0.1",
+      port: 0,
+      authMode: "paired",
+      bootstrapSecret: "bootstrap-secret-for-relay-tests-123456",
+      publicUrl: "http://192.168.1.3:8787",
+      bookkeepingIntervalMs: 60_000,
+      heartbeatIntervalMs: 60_000,
+    },
+    relayOptions: { autoStart: false },
+  });
+  let collector: TestClient | undefined;
+  let android: TestClient | undefined;
+  try {
+    await app.ready();
+    const unauthorized = await app.inject({
+      method: "POST",
+      url: "/v1/pairing",
+      payload: { installation_id: "paired-install", relay_url: "http://192.168.1.3:8787" },
+    });
+    assert.equal(unauthorized.statusCode, 401);
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/pairing",
+      headers: { authorization: "Bearer bootstrap-secret-for-relay-tests-123456" },
+      payload: { installation_id: "paired-install", relay_url: "http://192.168.1.3:8787" },
+    });
+    assert.equal(created.statusCode, 201);
+    const pairing = created.json();
+    assert.equal(pairing.installation_id, "paired-install");
+    const qr = JSON.parse(pairing.qr_payload);
+    assert.deepEqual(
+      Object.keys(qr).sort(),
+      ["installation_id", "pairing_code", "pairing_id", "relay_http_url", "relay_ws_url", "version"].sort(),
+    );
+    assert.equal(qr.version, 1);
+    assert.equal(qr.relay_http_url, "http://192.168.1.3:8787");
+    assert.equal(qr.relay_ws_url, "ws://192.168.1.3:8787/ws/android");
+
+    const claimed = await app.inject({
+      method: "POST",
+      url: `/v1/pairing/${pairing.pairing_id}/claim`,
+      payload: { code: pairing.code, device_name: "test-phone" },
+    });
+    assert.equal(claimed.statusCode, 200);
+    const phone = claimed.json();
+    assert.equal(phone.installation_id, "paired-install");
+    assert.notEqual(phone.android_token, pairing.collector_token);
+
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    assert.ok(address && typeof address === "object");
+    const base = `ws://127.0.0.1:${address.port}`;
+    collector = await open(`${base}/ws/collector`);
+    collector.socket.send(JSON.stringify({
+      type: "hello",
+      schema_version: 1,
+      role: "collector",
+      installation_id: "paired-install",
+      token: pairing.collector_token,
+    }));
+    assert.equal((await collector.waitFor((message) => message.type === "hello_ack" && message.accepted === true)).accepted, true);
+
+    android = await open(`${base}/ws/android`);
+    android.socket.send(JSON.stringify({
+      type: "hello",
+      schema_version: 1,
+      role: "phone",
+      installation_id: "paired-install",
+    }));
+    const preAuth = await android.waitFor((message) => message.type === "error" || message.type === "hello_ack");
+    assert.ok(preAuth.type === "error" || preAuth.accepted === false);
+    android.socket.send(JSON.stringify({
+      type: "subscribe",
+      schema_version: 1,
+      installation_id: "paired-install",
+      token: phone.android_token,
+      last_sequence: 0,
+    }));
+    const subscription = await android.waitFor((message) => message.type === "subscribe");
+    assert.equal(subscription.type, "subscribe");
+  } finally {
+    await closeClient(collector);
+    await closeClient(android);
+    await app.close();
+  }
+});
