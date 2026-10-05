@@ -15,3 +15,4 @@ build/
 coverage/
 __pycache__/
 logs/
+*.apk
