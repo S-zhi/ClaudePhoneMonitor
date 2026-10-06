@@ -5,7 +5,7 @@
 ## 当前实现
 
 - `packages/protocol/`：canonical v1 事件/消息类型、隐私校验、状态 reducer、sequence/resume 辅助。
-- `services/collector/`：macOS Hook Adapter、Unix Socket、持久化 outbox、WebSocket 心跳/重连/challenge、launchd Collector。
+- `services/collector/`：macOS Claude Hook Adapter、只读 Codex 会话监听、Unix Socket、持久化 outbox、WebSocket 心跳/重连/challenge、launchd Collector。
 - `services/relay/`：Fastify 健康检查、collector/Android WebSocket、SQLite 持久化、一次性 pairing、角色令牌、事件 ACK、快照、resume、probe/challenge 和脱敏。
 - `apps/android/`：Kotlin + Jetpack Compose 横屏沉浸式真实模式客户端，首次启动扫码配对，使用 Android Keystore 保存令牌；已移除 Mock/Demo 客户端。
 - `skills/claude-monitor/`：安装/真实配对/诊断/状态/卸载 Skill 和 Hook 配置脚本。
@@ -159,11 +159,36 @@ scripts/start-lan-monitor.sh
 
 `--install-hooks` 会修改用户级 `~/.claude/settings.json`；如果只想验证服务而不改 Claude 配置，不要传这个选项。
 
+需要同时观察本机 Codex 桌面应用和 CLI 时，可显式启用只读 sessions 监听：
+
+```bash
+scripts/start-lan-monitor.sh --watch-codex
+```
+
+等价的环境开关是 `COLLECTOR_WATCH_CODEX=1`；直接运行 Collector 时也可使用
+`--collector --watch-codex`。监听默认读取 `$CODEX_HOME/sessions`，未设置
+`CODEX_HOME` 时读取 `~/.codex/sessions`；可用
+`COLLECTOR_CODEX_SESSIONS_DIR` 指定其他目录。监听只读取 sessions JSONL 的安全
+生命周期字段，不安装 Hook、不修改 Codex 配置；如关闭监听，省略选项或使用
+`--no-watch-codex`。
+
+Codex 会话记录格式随版本变化。当前投影只报告可核实的 WORKING、正常完成 FINISH、
+已确认的 `server_overloaded` 错误以及中性回稳；未知错误、中断、等待状态和工具活动
+不会被推断。源文件连续 30 分钟没有增长或修改会中性结束会话，不代表完成、错误或等待；
+这个阈值短于 Relay 的两小时 working-session TTL。原始会话内容、命令、工具输入/结果、
+错误文本和完整路径不会进入 Relay。诊断只输出固定错误码，例如
+`codex_jsonl_unsupported_shape`、`codex_jsonl_malformed_row` 和
+`codex_source_read_failed`；这些代码提示本机来源格式或可读性需要复查，不代表任务失败，
+也不包含计数、路径或源数据。
+
 ## 当前限制
 
 - LAN MVP 的 `ws://` 未加密，只能运行在可信局域网；生产公网需要 WSS/TLS。
 - FCM 后台推送尚未接入，前台 WebSocket 已可用。
 - 真实 Claude Hook payload 仍需针对目标 Claude Code 版本做脱敏 fixture 验证；未知字段会被忽略。
+- Codex 监听需要显式启用。已核实桌面应用版本为 26.930.61225（内嵌 runtime 0.160.0），
+  独立 CLI 二进制为 0.159.3；两种执行形态不可混称。当前 Codex 会话 JSONL 格式不稳定。
+  本项不假定可观察显式等待、全部工具活动或所有错误。
 - 本轮明确跳过 Android 真机验收；设备上的 Compose 页面选择和 15 秒可见时长仍待后续录屏复验。JVM 测试验证 wire JSON、fake client、ViewModel 状态流及纯页面选择逻辑，不代表真机验收。
 
 ## 目录

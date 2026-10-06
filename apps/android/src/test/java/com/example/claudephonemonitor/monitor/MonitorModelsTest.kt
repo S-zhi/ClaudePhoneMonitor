@@ -31,6 +31,33 @@ class MonitorModelsTest {
     }
 
     @Test
+    fun relayEventInstallationIdAloneDoesNotMasqueradeAsAnIdleSnapshot() {
+        val event = requireNotNull(
+            MonitorEvent.fromWireJson(
+                """{"type":"event","schema_version":1,"event_id":"evt-1","installation_id":"install-7","session_id":"session-1","task_id":"task-1","sequence":8,"occurred_at":"2026-10-07T01:00:00Z","event_type":"task_started","payload":{}}""",
+            ),
+        )
+
+        assertEquals(MonitorEventType.EVENT, event.type)
+        assertEquals(MonitorEventName.TASK_STARTED, event.name)
+        assertEquals(8L, event.sequence)
+        assertEquals(null, event.snapshot)
+    }
+
+    @Test
+    fun legacyTopLevelSnapshotWithoutTypeStillParsesItsStateFields() {
+        val event = requireNotNull(
+            MonitorEvent.fromWireJson(
+                """{"installation_id":"install-7","computer_state":"online","claude_state":"working","last_sequence":42}""",
+            ),
+        )
+
+        assertEquals(ComputerState.ONLINE, event.snapshot?.computerState)
+        assertEquals(ClaudeState.WORKING, event.snapshot?.claudeState)
+        assertEquals(42L, event.snapshot?.lastSequence)
+    }
+
+    @Test
     fun oldSnapshotsKeepLegacyStateWithoutInventingSessionCounts() {
         val parsed = requireNotNull(
             MonitorEvent.fromWireJson(

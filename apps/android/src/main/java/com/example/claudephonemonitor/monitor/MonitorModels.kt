@@ -167,7 +167,9 @@ data class MonitorEvent(
         }.getOrNull()
 
         private fun hasSnapshotFields(json: JSONObject): Boolean =
-            json.has("installation_id") || json.has("computer_state") || json.has("claude_state")
+            // Relay event envelopes also contain installation_id. Only actual
+            // state fields identify a legacy top-level snapshot.
+            json.has("computer_state") || json.has("claude_state")
 
         private fun snapshotFromJson(json: JSONObject): MonitorSnapshot = MonitorSnapshot(
             installationId = json.optString("installation_id", "demo-installation"),

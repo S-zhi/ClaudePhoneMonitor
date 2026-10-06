@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { normalizeHookEvent } from "../src/normalize.ts";
 import { Collector } from "../src/collector.ts";
@@ -57,6 +58,29 @@ test("canonical event_type and allowlisted payload survive local socket normaliz
 test("unknown hook names are dropped rather than forwarded", () => {
   assert.equal(normalizeHookEvent({ hook_event_name: "UnknownHook", session_id: "s1" }, { now }), null);
   assert.equal(normalizeHookEvent({ prompt: "only user data" }, { now }), null);
+});
+
+test("Claude identifiers only change when they collide with the reserved Codex namespace", () => {
+  const unchanged = normalizeHookEvent({
+    hook_event_name: "UserPromptSubmit",
+    session_id: "claude-session-1",
+    task_id: "claude-task-1",
+  }, { now });
+  assert.equal(unchanged?.session_id, "claude-session-1");
+  assert.equal(unchanged?.task_id, "claude-task-1");
+
+  const collidingSession = "codex:sess:source-value";
+  const collidingTask = "codex:turn:task-value";
+  const escaped = normalizeHookEvent({
+    hook_event_name: "UserPromptSubmit",
+    session_id: collidingSession,
+    task_id: collidingTask,
+  }, { now });
+  const hash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+  assert.equal(escaped?.session_id, `claude:session:${hash(collidingSession)}`);
+  assert.equal(escaped?.task_id, `claude:task:${hash(collidingTask)}`);
+  assert.equal(escaped?.session_id.startsWith("codex:"), false);
+  assert.equal(escaped?.task_id?.startsWith("codex:"), false);
 });
 
 test("SessionStart carries only a safe explicit title and prompt_id fills task_id", () => {
