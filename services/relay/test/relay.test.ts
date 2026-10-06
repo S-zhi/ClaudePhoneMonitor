@@ -112,6 +112,122 @@ test("event ingest returns event_ack and broadcasts the canonical snapshot", () 
   relay.disconnect(android.connection_id);
 });
 
+test("subscribers receive complete session snapshots and expiry broadcasts", () => {
+  let nowMs = Date.parse("2026-10-02T00:00:00.000Z");
+  const relay = new Relay({ autoStart: false, now: () => new Date(nowMs) });
+  const phoneMessages = messages();
+  const collector = relay.connect({
+    gateway: "collector",
+    installation_id: "install-1",
+    transport: { send: () => undefined },
+  });
+  const phone = relay.connect({
+    gateway: "android",
+    installation_id: "install-1",
+    transport: { send: (message) => phoneMessages.push(message) },
+  });
+  relay.receive(phone.connection_id, JSON.stringify({ type: "subscribe", installation_id: "install-1" }));
+  relay.receive(collector.connection_id, JSON.stringify(event({
+    session_id: "session-A",
+    session_title: "Project Alpha",
+  })));
+  relay.receive(collector.connection_id, JSON.stringify(event({
+    event_id: "event-2",
+    sequence: 2,
+    session_id: "session-B",
+    event_type: "task_started",
+    task_id: "task-B",
+  })));
+
+  let snapshot = phoneMessages.filter((message) => message.type === "snapshot").at(-1);
+  assert.ok(snapshot && snapshot.type === "snapshot");
+  assert.equal(snapshot.claude_state, "working");
+  assert.equal(snapshot.running_count, 1);
+  assert.equal(snapshot.session_count, 2);
+  assert.deepEqual(snapshot.sessions?.map((row) => row.session_id), ["session-B", "session-A"]);
+
+  relay.receive(collector.connection_id, JSON.stringify(event({
+    event_id: "event-3",
+    sequence: 3,
+    session_id: "session-A",
+    event_type: "task_finished",
+    task_id: "task-A",
+  })));
+  snapshot = phoneMessages.filter((message) => message.type === "snapshot").at(-1);
+  assert.ok(snapshot && snapshot.type === "snapshot");
+  assert.equal(snapshot.recent_completion?.display_name, "Project Alpha");
+  assert.equal(snapshot.claude_state, "working");
+
+  nowMs += 5_001;
+  relay.tick();
+  snapshot = phoneMessages.filter((message) => message.type === "snapshot").at(-1);
+  assert.ok(snapshot && snapshot.type === "snapshot");
+  assert.equal(snapshot.recent_completion, undefined);
+
+  nowMs += 2 * 60 * 60 * 1000;
+  relay.tick();
+  snapshot = phoneMessages.filter((message) => message.type === "snapshot").at(-1);
+  assert.ok(snapshot && snapshot.type === "snapshot");
+  assert.equal(snapshot.session_count, 0);
+  assert.deepEqual(snapshot.sessions, []);
+  relay.stop();
+});
+
+test("Relay accepts only safe SessionStart titles and falls back for sensitive values", () => {
+  const relay = new Relay({ autoStart: false, now: () => new Date("2026-10-02T00:00:00.000Z") });
+  const phoneMessages = messages();
+  const collector = relay.connect({
+    gateway: "collector",
+    installation_id: "install-1",
+    transport: { send: () => undefined },
+  });
+  const phone = relay.connect({
+    gateway: "android",
+    installation_id: "install-1",
+    transport: { send: (message) => phoneMessages.push(message) },
+  });
+  relay.receive(phone.connection_id, JSON.stringify({ type: "subscribe", installation_id: "install-1" }));
+
+  const rejectedTitles = [
+    "Note /Users/example/private.txt",
+    "Visit HTTPS://example.test/docs",
+    "prefix C:\\Users\\example\\secret.txt",
+    "token: hidden-value",
+    "A Bearer abcdefghijklmnop",
+    "ghp_abcdefghijklmnopQRST1234",
+    "github_pat_abcdefghijklmnopQRST1234",
+    "sk-abcdefgh12345678",
+    "a title\nwith line break",
+  ];
+  rejectedTitles.forEach((title, index) => {
+    const id = `bad-${index + 1}`;
+    relay.receive(collector.connection_id, JSON.stringify(event({
+      event_id: `title-${index + 1}`,
+      installation_id: "install-1",
+      session_id: id,
+      sequence: index + 1,
+      event_type: "session_started",
+      session_title: title,
+    })));
+    const current = phoneMessages.filter((message) => message.type === "snapshot").at(-1);
+    assert.ok(current && current.type === "snapshot");
+    assert.equal(current.sessions?.find((session) => session.session_id === id)?.title, `会话 ${id.slice(-4)}`);
+  });
+  relay.receive(collector.connection_id, JSON.stringify(event({
+    event_id: "title-safe",
+    installation_id: "install-1",
+    session_id: "safe-title",
+    sequence: rejectedTitles.length + 1,
+    event_type: "session_started",
+    session_title: "  Team   Sprint  ",
+  })));
+
+  const snapshot = phoneMessages.filter((message) => message.type === "snapshot").at(-1);
+  assert.ok(snapshot && snapshot.type === "snapshot");
+  assert.equal(snapshot.sessions?.find((session) => session.session_id === "safe-title")?.title, "Team Sprint");
+  relay.stop();
+});
+
 test("probe and challenge messages route between gateways", () => {
   const relay = new Relay({ autoStart: false });
   const collectorMessages = messages();

@@ -31,6 +31,64 @@ class MonitorModelsTest {
     }
 
     @Test
+    fun oldSnapshotsKeepLegacyStateWithoutInventingSessionCounts() {
+        val parsed = requireNotNull(
+            MonitorEvent.fromWireJson(
+                """{"type":"snapshot","computer_state":"online","claude_state":"waiting","last_sequence":3}""",
+            ),
+        ).snapshot
+
+        requireNotNull(parsed)
+        assertEquals(null, parsed.sessions)
+        assertEquals(null, parsed.runningCount)
+        assertEquals(null, parsed.sessionCount)
+        assertEquals(ClaudeState.WAITING, parsed.claudeState)
+    }
+
+    @Test
+    fun parsesAuthoritativeSessionListCompletionAndTopLevelEventIdentity() {
+        val parsed = requireNotNull(
+            MonitorEvent.fromWireJson(
+                """{"type":"snapshot","computer_state":"online","claude_state":"idle","sessions":[],"running_count":0,"session_count":0,"recent_completion":{"session_id":"sess-1","task_id":"task-2","sequence":12,"occurred_at":"2026-10-06T01:02:03Z","display_name":"release prep"}}""",
+            ),
+        ).snapshot
+
+        requireNotNull(parsed)
+        assertEquals(emptyList<SessionSummary>(), parsed.sessions)
+        assertEquals(0, parsed.runningCount)
+        assertEquals(0, parsed.sessionCount)
+        assertEquals("sess-1|task-2|12", parsed.recentCompletion?.identity)
+        assertEquals("release prep", parsed.recentCompletion?.displayName)
+
+        val event = requireNotNull(
+            MonitorEvent.fromWireJson(
+                """{"type":"event","event_type":"task_finished","session_id":"sess-1","task_id":"task-2","session_title":"release prep","sequence":12,"occurred_at":"2026-10-06T01:02:03Z"}""",
+            ),
+        )
+        assertEquals("sess-1", event.sessionId)
+        assertEquals("task-2", event.taskId)
+        assertEquals("release prep", event.sessionTitle)
+        assertEquals("2026-10-06T01:02:03Z", event.occurredAt)
+    }
+
+    @Test
+    fun aPresentEmptySessionArrayMeansReplaceWithNoSessions() {
+        val populated = requireNotNull(
+            MonitorEvent.fromWireJson(
+                """{"type":"snapshot","computer_state":"online","claude_state":"working","sessions":[{"session_id":"s1","title":"Build","claude_state":"working","last_activity_sequence":7}],"running_count":1,"session_count":1}""",
+            ),
+        ).snapshot
+        val empty = requireNotNull(
+            MonitorEvent.fromWireJson(
+                """{"type":"snapshot","computer_state":"online","claude_state":"idle","sessions":[],"running_count":0,"session_count":0}""",
+            ),
+        ).snapshot
+
+        assertEquals("s1", populated?.sessions?.single()?.sessionId)
+        assertEquals(emptyList<SessionSummary>(), empty?.sessions)
+    }
+
+    @Test
     fun subscribeCommandUsesCanonicalWireKeys() {
         val hello = MonitorCommand.Hello("install-7", "phone-1", "android-token", 40L).toWireJson()
         val payload = MonitorCommand.Subscribe("install-7", "token", 41L).toWireJson()

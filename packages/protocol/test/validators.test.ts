@@ -56,6 +56,70 @@ test("validates canonical event envelopes and snapshots", () => {
   assert.equal(SNAPSHOT_SCHEMA.type, "object");
 });
 
+test("accepts the optional session contract while keeping its boundaries strict", () => {
+  const started = { ...makeEvent(EVENT_TYPES.SESSION_STARTED, {}), session_title: "Release review" };
+  assert.equal(validateEventEnvelope(started).success, true);
+  assert.equal(validateEventEnvelope({ ...started, event_type: EVENT_TYPES.TASK_STARTED }).success, false);
+  assert.equal(validateEventEnvelope({ ...started, session_title: "/private/path" }).success, false);
+
+  const extended: Snapshot = {
+    ...snapshot,
+    sessions: [{
+      session_id: "s1",
+      title: "Release review",
+      claude_state: "working",
+      last_activity_sequence: 4,
+    }],
+    running_count: 1,
+    session_count: 1,
+    recent_completion: {
+      session_id: "s1",
+      task_id: "round-1",
+      sequence: 3,
+      occurred_at: new Date(300).toISOString(),
+      display_name: "Release review",
+    },
+  };
+  assert.equal(validateSnapshot(extended).success, true);
+  assert.equal(validateSnapshot({ ...extended, sessions: Array.from({ length: 6 }, (_, i) => ({
+    session_id: `s${i}`, title: "title", claude_state: "idle", last_activity_sequence: i,
+  })) }).success, false);
+  assert.equal(validateSnapshot({ ...extended, sessions: [{
+    session_id: "unknown", title: "title", claude_state: "idle", last_activity_sequence: 0,
+  }] }).success, false);
+});
+
+test("rejects case-insensitive URL and credential-like titles at both wire boundaries", () => {
+  const unsafeTitles = [
+    "HTTPS://example.test",
+    "TOKEN=abc123",
+    "ghp_1234567890abcdef",
+    "github_pat_1234567890abcdef",
+    "GHp_1234567890abcdef",
+    "Bearer abcdef0123456789",
+    "gho_1234567890abcdef",
+    "xoxb-1234567890abcdef",
+    "sk-1234567890abcdef",
+  ];
+  const started = makeEvent(EVENT_TYPES.SESSION_STARTED, {});
+  const withSession = (title: string): Snapshot => ({
+    ...snapshot,
+    sessions: [{
+      session_id: "s1",
+      title,
+      claude_state: "idle",
+      last_activity_sequence: 1,
+    }],
+  });
+
+  for (const title of unsafeTitles) {
+    assert.equal(validateEventEnvelope({ ...started, session_title: title }).success, false, title);
+    assert.equal(validateSnapshot(withSession(title)).success, false, title);
+  }
+  assert.equal(validateEventEnvelope({ ...started, session_title: "Release review" }).success, true);
+  assert.equal(validateSnapshot(snapshot).success, true, "legacy snapshot remains valid");
+});
+
 test("validates event payloads without allowing arbitrary fields", () => {
   const valid = validateEventPayload(EVENT_TYPES.WAITING, { reason: "permission" });
   const unknown = validateEventPayload(EVENT_TYPES.WAITING, {

@@ -107,12 +107,12 @@ class MonitorPresentationStateTest {
         )
         assertTrue(newerSnapshot.accepted)
         assertEquals(PetState.WORKING, newerSnapshot.state.baseState)
-        assertEquals(PetState.FINISH, MonitorPresentationReducer.effectivePetState(newerSnapshot.state, 4_000L))
+        assertEquals(PetState.WORKING, MonitorPresentationReducer.effectivePetState(newerSnapshot.state, 4_000L))
         assertEquals(3_000L, MonitorPresentationReducer.overlayRemainingMs(newerSnapshot.state, 4_000L))
 
         val oneMillisecondBeforeExpiry = MonitorPresentationReducer.expire(newerSnapshot.state, 6_999L)
         assertEquals(1L, MonitorPresentationReducer.overlayRemainingMs(oneMillisecondBeforeExpiry, 6_999L))
-        assertEquals(PetState.FINISH, MonitorPresentationReducer.effectivePetState(oneMillisecondBeforeExpiry, 6_999L))
+        assertEquals(PetState.WORKING, MonitorPresentationReducer.effectivePetState(oneMillisecondBeforeExpiry, 6_999L))
 
         val expired = MonitorPresentationReducer.expire(newerSnapshot.state, 7_000L)
         assertNull(expired.overlayState)
@@ -261,12 +261,205 @@ class MonitorPresentationStateTest {
         )
         assertTrue(nextTask.accepted)
         assertEquals(PetState.WORKING, nextTask.state.baseState)
-        assertEquals(PetState.FINISH, MonitorPresentationReducer.effectivePetState(nextTask.state, 2_000L))
+        assertEquals(PetState.WORKING, MonitorPresentationReducer.effectivePetState(nextTask.state, 2_000L))
         assertEquals(4_000L, MonitorPresentationReducer.overlayRemainingMs(nextTask.state, 2_000L))
 
         val expired = MonitorPresentationReducer.expire(nextTask.state, 6_000L)
         assertNull(expired.overlayState)
         assertEquals(PetState.WORKING, MonitorPresentationReducer.effectivePetState(expired, 6_000L))
+    }
+
+    @Test
+    fun finishDoesNotHideAnotherWorkingSessionAndIsBoundToSessionTaskIdentity() {
+        val aggregateWorking = MonitorPresentationReducer.reduce(
+            MonitorPresentationState(),
+            MonitorEvent(
+                type = MonitorEventType.SNAPSHOT,
+                snapshot = MonitorSnapshot(
+                    computerState = ComputerState.ONLINE,
+                    claudeState = ClaudeState.WORKING,
+                    lastSequence = 20L,
+                    sessions = listOf(
+                        SessionSummary("session-b", "background build", ClaudeState.WORKING, 20L),
+                    ),
+                    runningCount = 1,
+                    sessionCount = 2,
+                ),
+            ),
+            nowMs = 0L,
+        ).state
+        val finished = MonitorEvent(
+            type = MonitorEventType.EVENT,
+            name = MonitorEventName.TASK_FINISHED,
+            sequence = 21L,
+            sessionId = "session-a",
+            taskId = "task-a1",
+        )
+
+        val first = MonitorPresentationReducer.reduce(aggregateWorking, finished, nowMs = 100L)
+        assertTrue(first.accepted)
+        assertEquals("session-a|task-a1|21", first.state.lastCompletionIdentity)
+        assertEquals(PetState.WORKING, MonitorPresentationReducer.effectivePetState(first.state, 100L))
+        assertNull(MonitorPresentationReducer.visibleOverlayState(first.state, 100L))
+
+        val duplicate = MonitorPresentationReducer.reduce(first.state, finished, nowMs = 1_000L)
+        assertFalse(duplicate.accepted)
+        assertEquals(4_100L, MonitorPresentationReducer.overlayRemainingMs(duplicate.state, 1_000L))
+        assertEquals(PetState.WORKING, MonitorPresentationReducer.effectivePetState(duplicate.state, 1_000L))
+    }
+
+    @Test
+    fun aggregateWorkingOutsideTopFiveSurvivesFinishUntilAuthoritativeIdleSnapshot() {
+        val snapshot = MonitorEvent(
+            type = MonitorEventType.SNAPSHOT,
+            snapshot = MonitorSnapshot(
+                computerState = ComputerState.ONLINE,
+                claudeState = ClaudeState.WORKING,
+                lastSequence = 40L,
+                sessions = (1..5).map { index ->
+                    SessionSummary("idle-$index", "Idle $index", ClaudeState.IDLE, 40L - index)
+                },
+                runningCount = 1,
+                sessionCount = 6,
+            ),
+        )
+        val current = MonitorPresentationReducer.reduce(
+            MonitorPresentationState(),
+            snapshot,
+            nowMs = 0L,
+        ).state
+        val finished = MonitorPresentationReducer.reduce(
+            current,
+            MonitorEvent(
+                type = MonitorEventType.EVENT,
+                name = MonitorEventName.TASK_FINISHED,
+                sequence = 41L,
+                sessionId = "hidden-working-session",
+                taskId = "task-6",
+            ),
+            nowMs = 100L,
+        )
+
+        assertTrue(finished.accepted)
+        assertTrue(finished.state.workingSessionIds?.isEmpty() == true)
+        assertEquals(PetState.WORKING, MonitorPresentationReducer.effectivePetState(finished.state, 100L))
+        assertNull(MonitorPresentationReducer.visibleOverlayState(finished.state, 100L))
+
+        val settled = MonitorPresentationReducer.reduce(
+            finished.state,
+            MonitorEvent(
+                type = MonitorEventType.SNAPSHOT,
+                snapshot = snapshot.snapshot?.copy(
+                    claudeState = ClaudeState.IDLE,
+                    lastSequence = 41L,
+                    runningCount = 0,
+                ),
+            ),
+            nowMs = 200L,
+        )
+        assertTrue(settled.accepted)
+        assertEquals(PetState.IDLE, settled.state.baseState)
+        assertEquals(PetState.FINISH, MonitorPresentationReducer.effectivePetState(settled.state, 200L))
+        assertEquals("hidden-working-session|task-6|41", settled.state.lastCompletionIdentity)
+    }
+
+    @Test
+    fun finalWorkingSessionCompletionShowsFinishAfterRelayConfirmsIdle() {
+        val working = MonitorPresentationReducer.reduce(
+            MonitorPresentationState(),
+            MonitorEvent(
+                type = MonitorEventType.SNAPSHOT,
+                snapshot = MonitorSnapshot(
+                    computerState = ComputerState.ONLINE,
+                    claudeState = ClaudeState.WORKING,
+                    lastSequence = 50L,
+                    sessions = listOf(SessionSummary("only", "Only task", ClaudeState.WORKING, 50L)),
+                    runningCount = 1,
+                    sessionCount = 1,
+                ),
+            ),
+            nowMs = 0L,
+        ).state
+        val finish = MonitorPresentationReducer.reduce(
+            working,
+            MonitorEvent(
+                type = MonitorEventType.EVENT,
+                name = MonitorEventName.TASK_FINISHED,
+                sequence = 51L,
+                sessionId = "only",
+                taskId = "task-only",
+            ),
+            nowMs = 100L,
+        )
+        assertEquals(PetState.WORKING, MonitorPresentationReducer.effectivePetState(finish.state, 100L))
+
+        val idle = MonitorPresentationReducer.reduce(
+            finish.state,
+            MonitorEvent(
+                type = MonitorEventType.SNAPSHOT,
+                snapshot = MonitorSnapshot(
+                    computerState = ComputerState.ONLINE,
+                    claudeState = ClaudeState.IDLE,
+                    lastSequence = 51L,
+                    sessions = listOf(SessionSummary("only", "Only task", ClaudeState.IDLE, 51L)),
+                    runningCount = 0,
+                    sessionCount = 1,
+                ),
+            ),
+            nowMs = 150L,
+        )
+
+        assertTrue(idle.accepted)
+        assertEquals(PetState.FINISH, MonitorPresentationReducer.effectivePetState(idle.state, 150L))
+        assertEquals(4_950L, MonitorPresentationReducer.overlayRemainingMs(idle.state, 150L))
+    }
+
+    @Test
+    fun reconnectSnapshotCarriesCompletionNameWithoutReplayingAnimation() {
+        val reconnect = MonitorPresentationReducer.reduce(
+            MonitorPresentationState(),
+            MonitorEvent(
+                type = MonitorEventType.SNAPSHOT,
+                snapshot = MonitorSnapshot(
+                    computerState = ComputerState.ONLINE,
+                    claudeState = ClaudeState.IDLE,
+                    lastSequence = 30L,
+                    sessions = emptyList(),
+                    runningCount = 0,
+                    sessionCount = 0,
+                    recentCompletion = RecentCompletion(
+                        sessionId = "session-a",
+                        taskId = "task-a1",
+                        sequence = 29L,
+                        occurredAt = "2026-10-06T01:02:03Z",
+                        displayName = "release prep",
+                    ),
+                ),
+            ),
+            nowMs = 5_000L,
+        )
+
+        assertTrue(reconnect.accepted)
+        assertNull(reconnect.state.overlayState)
+        assertEquals(PetState.IDLE, MonitorPresentationReducer.effectivePetState(reconnect.state, 5_000L))
+    }
+
+    @Test
+    fun offlineStillOutranksSessionActivityAndOutcomeOverlays() {
+        val offline = MonitorPresentationReducer.reduce(
+            MonitorPresentationState(),
+            MonitorEvent(
+                type = MonitorEventType.SNAPSHOT,
+                snapshot = MonitorSnapshot(
+                    computerState = ComputerState.OFFLINE,
+                    claudeState = ClaudeState.WORKING,
+                    sessions = listOf(SessionSummary("s1", "working", ClaudeState.WORKING, 1L)),
+                ),
+            ),
+            nowMs = 0L,
+        ).state
+
+        assertEquals(PetState.OFFLINE, MonitorPresentationReducer.effectivePetState(offline, 0L))
     }
 
     private fun outcomeEvent(sequence: Long, name: MonitorEventName) = MonitorEvent(

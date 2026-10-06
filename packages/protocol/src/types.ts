@@ -47,6 +47,8 @@ export interface NormalizedEvent {
   readonly event_type: MonitorEventType;
   readonly session_id: string;
   readonly task_id?: string;
+  /** Safe custom title from Claude SessionStart metadata. */
+  readonly session_title?: string;
   readonly occurred_at: WireTimestamp;
   readonly payload: SafeEventPayload;
   readonly correlation_id?: string;
@@ -98,6 +100,7 @@ export interface EventEnvelopeBase<T extends MonitorEventType = MonitorEventType
   readonly installation_id: string;
   readonly session_id: string;
   readonly task_id?: string;
+  readonly session_title?: string;
   readonly sequence: SequenceNumber;
   readonly occurred_at: WireTimestamp;
   readonly event_type: T;
@@ -118,6 +121,21 @@ export interface SnapshotActivity {
   readonly occurred_at: WireTimestamp;
 }
 
+export interface SessionSummary {
+  readonly session_id: string;
+  readonly title: string;
+  readonly claude_state: ClaudeState;
+  readonly last_activity_sequence: SequenceNumber;
+}
+
+export interface RecentCompletion {
+  readonly session_id: string;
+  readonly task_id?: string;
+  readonly sequence: SequenceNumber;
+  readonly occurred_at: WireTimestamp;
+  readonly display_name: string;
+}
+
 export interface Snapshot {
   readonly type: typeof MESSAGE_TYPES.SNAPSHOT;
   readonly schema_version: ProtocolVersion;
@@ -126,6 +144,10 @@ export interface Snapshot {
   readonly claude_state: ClaudeState;
   /** Short, sanitized label or event metadata; never a prompt/tool input/result. */
   readonly activity?: string | SnapshotActivity;
+  readonly sessions?: readonly SessionSummary[];
+  readonly running_count?: number;
+  readonly session_count?: number;
+  readonly recent_completion?: RecentCompletion;
   readonly last_sequence: SequenceNumber | null;
   readonly updated_at: WireTimestamp;
 }
@@ -349,6 +371,7 @@ export interface JsonSchema {
   readonly anyOf?: readonly JsonSchema[];
   readonly minLength?: number;
   readonly maxLength?: number;
+  readonly maxItems?: number;
   readonly minimum?: number;
   readonly maximum?: number;
   readonly pattern?: string;

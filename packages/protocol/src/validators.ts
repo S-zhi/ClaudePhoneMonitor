@@ -125,6 +125,9 @@ export function validateAgainstSchema(
   }
 
   if (Array.isArray(value) && schema.items) {
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+      issues.push({ path, message: `must contain at most ${schema.maxItems} items` });
+    }
     value.forEach((item, index) => {
       issues.push(...validateAgainstSchema(item, schema.items as JsonSchema, indexPathFor(path, index)));
     });

@@ -32,6 +32,7 @@ export class Collector {
       installation_id: this.options.installationId,
       session_id: normalized.session_id,
       ...(normalized.task_id ? { task_id: normalized.task_id } : {}),
+      ...(normalized.session_title ? { session_title: normalized.session_title } : {}),
       sequence,
       occurred_at: normalized.occurred_at,
       event_type: normalized.event_type,

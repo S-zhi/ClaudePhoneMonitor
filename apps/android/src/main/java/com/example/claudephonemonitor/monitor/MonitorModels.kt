@@ -67,7 +67,30 @@ data class MonitorSnapshot(
     val activity: String? = null,
     val lastSequence: Long = 0L,
     val updatedAt: String = "",
+    /** Present only on new Relay snapshots. Its presence means the list is authoritative. */
+    val sessions: List<SessionSummary>? = null,
+    val runningCount: Int? = null,
+    val sessionCount: Int? = null,
+    val recentCompletion: RecentCompletion? = null,
 )
+
+data class SessionSummary(
+    val sessionId: String,
+    val title: String,
+    val claudeState: ClaudeState,
+    val lastActivitySequence: Long,
+)
+
+data class RecentCompletion(
+    val sessionId: String,
+    val taskId: String? = null,
+    val sequence: Long,
+    val occurredAt: String,
+    val displayName: String,
+) {
+    /** Stable across live event + authoritative snapshot delivery and reconnects. */
+    val identity: String get() = "$sessionId|${taskId.orEmpty()}|$sequence"
+}
 
 data class MonitorEvent(
     val type: MonitorEventType,
@@ -78,6 +101,10 @@ data class MonitorEvent(
     val detail: String = "",
     val updatedAt: String = "",
     val probeLatencyMs: Long? = null,
+    val sessionId: String? = null,
+    val taskId: String? = null,
+    val sessionTitle: String? = null,
+    val occurredAt: String = "",
 ) {
     fun toWireJson(): String = JSONObject().apply {
         put("type", type.wireValue)
@@ -88,6 +115,10 @@ data class MonitorEvent(
         if (detail.isNotBlank()) put("detail", detail)
         if (updatedAt.isNotBlank()) put("updated_at", updatedAt)
         probeLatencyMs?.let { put("latency_ms", it) }
+        sessionId?.let { put("session_id", it) }
+        taskId?.let { put("task_id", it) }
+        sessionTitle?.let { put("session_title", it) }
+        if (occurredAt.isNotBlank()) put("occurred_at", occurredAt)
     }.toString()
 
     companion object {
@@ -128,6 +159,10 @@ data class MonitorEvent(
                 detail = root.optString("detail", root.optString("message")),
                 updatedAt = root.optString("updated_at", snapshot?.updatedAt.orEmpty()),
                 probeLatencyMs = root.longOrNull("latency_ms"),
+                sessionId = root.stringOrNull("session_id"),
+                taskId = root.stringOrNull("task_id"),
+                sessionTitle = root.stringOrNull("session_title"),
+                occurredAt = root.optString("occurred_at"),
             )
         }.getOrNull()
 
@@ -145,6 +180,38 @@ data class MonitorEvent(
             activity = json.activityOrNull(),
             lastSequence = json.longOrNull("last_sequence") ?: json.longOrNull("sequence") ?: 0L,
             updatedAt = json.optString("updated_at"),
+            sessions = json.optJSONArray("sessions")?.let { array ->
+                buildList {
+                    for (index in 0 until array.length()) {
+                        val item = array.optJSONObject(index) ?: continue
+                        val id = item.stringOrNull("session_id") ?: continue
+                        val state = ClaudeState.entries.firstOrNull {
+                            it.wireValue == item.optString("claude_state").lowercase(Locale.US)
+                        } ?: continue
+                        add(
+                            SessionSummary(
+                                sessionId = id,
+                                title = item.optString("title").ifBlank { "会话 ${id.takeLast(4)}" },
+                                claudeState = state,
+                                lastActivitySequence = item.longOrNull("last_activity_sequence") ?: 0L,
+                            ),
+                        )
+                    }
+                }
+            },
+            runningCount = json.intOrNull("running_count"),
+            sessionCount = json.intOrNull("session_count"),
+            recentCompletion = json.optJSONObject("recent_completion")?.let { completion ->
+                val id = completion.stringOrNull("session_id")
+                val sequence = completion.longOrNull("sequence")
+                if (id == null || sequence == null) null else RecentCompletion(
+                    sessionId = id,
+                    taskId = completion.stringOrNull("task_id"),
+                    sequence = sequence,
+                    occurredAt = completion.optString("occurred_at"),
+                    displayName = completion.optString("display_name").ifBlank { "未命名会话已完成" },
+                )
+            },
         )
     }
 }
@@ -156,6 +223,29 @@ fun MonitorSnapshot.toJson(): JSONObject = JSONObject().apply {
     activity?.let { put("activity", it) }
     put("last_sequence", lastSequence)
     put("updated_at", updatedAt)
+    sessions?.let { rows ->
+        put("sessions", org.json.JSONArray().apply {
+            rows.forEach { session ->
+                put(JSONObject().apply {
+                    put("session_id", session.sessionId)
+                    put("title", session.title)
+                    put("claude_state", session.claudeState.wireValue)
+                    put("last_activity_sequence", session.lastActivitySequence)
+                })
+            }
+        })
+    }
+    runningCount?.let { put("running_count", it) }
+    sessionCount?.let { put("session_count", it) }
+    recentCompletion?.let { completion ->
+        put("recent_completion", JSONObject().apply {
+            put("session_id", completion.sessionId)
+            completion.taskId?.let { put("task_id", it) }
+            put("sequence", completion.sequence)
+            put("occurred_at", completion.occurredAt)
+            put("display_name", completion.displayName)
+        })
+    }
 }
 
 private fun JSONObject.activityOrNull(): String? {
@@ -168,7 +258,14 @@ private fun JSONObject.activityOrNull(): String? {
 }
 
 private fun JSONObject.longOrNull(key: String): Long? =
-    if (!has(key) || isNull(key)) null else optLong(key)
+    if (!has(key) || isNull(key)) null else runCatching { getLong(key) }.getOrNull()
+
+private fun JSONObject.intOrNull(key: String): Int? = longOrNull(key)?.takeIf {
+    it in 0..Int.MAX_VALUE.toLong()
+}?.toInt()
+
+private fun JSONObject.stringOrNull(key: String): String? =
+    if (!has(key) || isNull(key)) null else optString(key).takeIf(String::isNotBlank)
 
 sealed interface MonitorCommand {
     fun toWireJson(): String

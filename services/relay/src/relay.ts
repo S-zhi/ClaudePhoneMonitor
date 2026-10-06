@@ -166,6 +166,22 @@ function sanitizeEvent(event: EventEnvelope): EventEnvelope {
   return { ...event, payload: redactPayload(event.payload) };
 }
 
+function safeSessionTitle(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const title = value.trim().replace(/\s+/g, " ");
+  if (!title || title.length > 64 || /[\u0000-\u001f\u007f]/.test(value)) return undefined;
+  if (
+    /https?:\/\//i.test(title) ||
+    /(?:^|[\s([:{=])\/(?:[^\s/]+(?:\/|$)|$)|\\\\|~[\\/]|\b[A-Za-z]:[\\/]/i.test(title) ||
+    /(?:api[_ -]?key|token|secret|password|authorization)\s*[:=]|\bbearer\s+[A-Za-z0-9._~+/-]{8,}|\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_-]{8,}|github_pat_[A-Za-z0-9_-]{8,}|xox[baprs]-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16})/i.test(
+      title,
+    )
+  ) {
+    return undefined;
+  }
+  return title;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -202,6 +218,7 @@ export class Relay {
   private readonly pendingChallenges = new Map<string, PendingChallenge>();
   private readonly pendingProbes = new Map<string, PendingProbe>();
   private readonly probeStaleInstallations = new Set<string>();
+  private readonly sessionSnapshotFingerprints = new Map<string, string>();
   private timer?: NodeJS.Timeout;
 
   constructor(options: RelayOptions = {}) {
@@ -436,6 +453,14 @@ export class Relay {
     );
     this.prunePendingChallenges(now.getTime());
 
+    let sessionChanged = false;
+    for (const installationId of this.repository.listInstallationIds()) {
+      const fingerprint = this.sessionFingerprint(installationId, nowIso);
+      const previous = this.sessionSnapshotFingerprints.get(installationId);
+      if (previous !== undefined && previous !== fingerprint) sessionChanged = true;
+      this.sessionSnapshotFingerprints.set(installationId, fingerprint);
+    }
+
     for (const connection of this.connections.values()) {
       if (now.getTime() - connection.lastHeartbeatSentMs < this.config.heartbeatIntervalMs) {
         continue;
@@ -450,11 +475,12 @@ export class Relay {
       });
     }
 
-    if (changed) this.broadcastAllSnapshots();
+    if (changed || sessionChanged) this.broadcastAllSnapshots();
   }
 
   snapshot(installationId: string): SnapshotMessage {
-    const state = this.repository.getInstallationState(installationId);
+    const now = this.now().toISOString();
+    const state = this.repository.getInstallationState(installationId, now);
     const connectionStatus = this.repository.connectionStatusForInstallation(installationId);
     const computerState =
       connectionStatus === "offline"
@@ -470,7 +496,11 @@ export class Relay {
       claude_state: state?.claude_state ?? "idle",
       ...(state?.activity ? { activity: state.activity } : {}),
       last_sequence: state?.last_sequence ?? null,
-      updated_at: state?.updated_at ?? this.now().toISOString(),
+      updated_at: state?.updated_at ?? now,
+      ...(state?.sessions ? { sessions: state.sessions } : {}),
+      ...(state?.running_count !== undefined ? { running_count: state.running_count } : {}),
+      ...(state?.session_count !== undefined ? { session_count: state.session_count } : {}),
+      ...(state?.recent_completion ? { recent_completion: state.recent_completion } : {}),
     };
   }
 
@@ -1112,12 +1142,15 @@ export class Relay {
 
     const taskId = optionalString(message.task_id);
     const correlationId = optionalString(message.correlation_id);
+    const sessionTitle =
+      eventType === "session_started" ? safeSessionTitle(message.session_title) : undefined;
     return {
       type: "event",
       schema_version: RELAY_SCHEMA_VERSION,
       event_id: eventId,
       installation_id: installationId,
       session_id: sessionId,
+      ...(sessionTitle ? { session_title: sessionTitle } : {}),
       ...(taskId ? { task_id: taskId } : {}),
       sequence,
       occurred_at: occurredAt,
@@ -1210,6 +1243,10 @@ export class Relay {
     const connection = this.connections.get(connectionId);
     if (!connection || !this.isSubscribedToInstallation(connection, installationId)) return;
     this.send(connectionId, this.snapshot(installationId));
+    this.sessionSnapshotFingerprints.set(
+      installationId,
+      this.sessionFingerprint(installationId, this.now().toISOString()),
+    );
   }
 
   private broadcastEventForInstallation(event: EventEnvelope): void {
@@ -1225,6 +1262,21 @@ export class Relay {
     for (const connection of this.connections.values()) {
       this.sendSnapshotIfSubscribed(connection.id, installationId);
     }
+    this.sessionSnapshotFingerprints.set(
+      installationId,
+      this.sessionFingerprint(installationId, this.now().toISOString()),
+    );
+  }
+
+  private sessionFingerprint(installationId: string, now: string): string {
+    const state = this.repository.getInstallationState(installationId, now);
+    return JSON.stringify({
+      claude_state: state?.claude_state,
+      sessions: state?.sessions,
+      running_count: state?.running_count,
+      session_count: state?.session_count,
+      recent_completion: state?.recent_completion,
+    });
   }
 
   private broadcastAllSnapshots(): void {
