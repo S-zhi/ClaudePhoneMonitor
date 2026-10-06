@@ -1,0 +1,39 @@
+name: State control
+
+on:
+  issues:
+    types: [opened, unlabeled]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  triage:
+    if: github.event.action == 'opened' || (github.event.action == 'unlabeled' && startsWith(github.event.label.name, 'action:'))
+    concurrency:
+      group: issue-state-${{ github.repository }}-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependency
+        run: python -m pip install PyYAML==6.0.2
+      - name: Advance issue state
+        id: advance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: python .github/scripts/advance_issue_state.py --issue-number "$ISSUE_NUMBER"
+      - name: Review and assign new state action
+        if: steps.advance.outputs.state_changed == 'true'
+        env:
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: python .github/scripts/manage_issue_action.py --issue-number "$ISSUE_NUMBER"

@@ -1,0 +1,8 @@
+# TypeSafe Jev reviewer; credentials are supplied only by the environment.
+reviewer:
+  name: TypeSafe
+  model: jev-latest
+  command: ["python", ".github/scripts/jev_review.py"]
+  timeout_seconds: 120
+# Declare only capabilities actually provided by your external agents.
+agents: []
