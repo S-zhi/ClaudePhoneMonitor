@@ -60,7 +60,7 @@ const EVENT_TYPE_SET = new Set<string>(EVENT_TYPES);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SENSITIVE_ID = /(?:^|[-_.:])(secret|token|password|api[_-]?key|authorization)(?:$|[-_.:])/i;
 const SENSITIVE_TITLE = /(?:api[_ -]?key|token|secret|password|authorization)\s*[:=]|\bbearer\s+[A-Za-z0-9_-]{16,}|\b(?:sk-|ghp_|gho_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{8,}/i;
-const UNSAFE_TITLE_PATH_OR_URL = /https?:\/\/|(?:^|\s)(?:\/|\\\\|~[\\/]|[A-Za-z]:[\\/])/i;
+const UNSAFE_TITLE_PATH_OR_URL = /https?:\/\//i;
 const SAFE_NONCE = /^[A-Za-z0-9._:-]{1,256}$/;
 const MAX_DURATION_MS = 24 * 60 * 60 * 1000;
 const MIN_TIMESTAMP_MS = Date.UTC(2000, 0, 1);
@@ -95,7 +95,7 @@ function safeSessionTitle(value: unknown): string | undefined {
   const title = value.trim().replace(/\s+/g, " ");
   if (
     title.length < 1 || title.length > 64 ||
-    UNSAFE_TITLE_PATH_OR_URL.test(title) || SENSITIVE_TITLE.test(title)
+    UNSAFE_TITLE_PATH_OR_URL.test(title) || /[\\/]/.test(title) || SENSITIVE_TITLE.test(title)
   ) return undefined;
   return title;
 }

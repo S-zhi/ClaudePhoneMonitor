@@ -191,7 +191,10 @@ test("Relay accepts only safe SessionStart titles and falls back for sensitive v
   const rejectedTitles = [
     "Note /Users/example/private.txt",
     "Visit HTTPS://example.test/docs",
+    "review|/Users/alice/private",
+    "review-/Users/alice/private",
     "prefix C:\\Users\\example\\secret.txt",
+    "review \\\\fileserver\\share\\private",
     "token: hidden-value",
     "A Bearer abcdefghijklmnop",
     "ghp_abcdefghijklmnopQRST1234",
@@ -212,6 +215,7 @@ test("Relay accepts only safe SessionStart titles and falls back for sensitive v
     const current = phoneMessages.filter((message) => message.type === "snapshot").at(-1);
     assert.ok(current && current.type === "snapshot");
     assert.equal(current.sessions?.find((session) => session.session_id === id)?.title, `会话 ${id.slice(-4)}`);
+    assert.equal(relay.repository.findEvent(`title-${index + 1}`)?.event.session_title, undefined);
   });
   relay.receive(collector.connection_id, JSON.stringify(event({
     event_id: "title-safe",
@@ -219,12 +223,12 @@ test("Relay accepts only safe SessionStart titles and falls back for sensitive v
     session_id: "safe-title",
     sequence: rejectedTitles.length + 1,
     event_type: "session_started",
-    session_title: "  Team   Sprint  ",
+    session_title: "  项目   追踪  ",
   })));
 
   const snapshot = phoneMessages.filter((message) => message.type === "snapshot").at(-1);
   assert.ok(snapshot && snapshot.type === "snapshot");
-  assert.equal(snapshot.sessions?.find((session) => session.session_id === "safe-title")?.title, "Team Sprint");
+  assert.equal(snapshot.sessions?.find((session) => session.session_id === "safe-title")?.title, "项目 追踪");
   relay.stop();
 });
 

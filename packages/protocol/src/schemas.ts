@@ -19,12 +19,13 @@ const sequenceSchema: JsonSchema = {
   maximum: Number.MAX_SAFE_INTEGER,
 };
 
+const safeTitlePattern = String.raw`^(?!.*(?:[Hh][Tt][Tt][Pp][Ss]?://|[/\\]|(?:[Aa][Pp][Ii][- _]?[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn])\s*[:=]|[Bb][Ee][Aa][Rr][Ee][Rr]\s+[A-Za-z0-9_-]{16,}|(?:[Ss][Kk]-|[Gg][Hh][Pp]_|[Gg][Hh][Oo]_|[Gg][Ii][Tt][Hh][Uu][Bb]_[Pp][Aa][Tt]_|[Xx][Oo][Xx][BbAaPpRrSs]-)[A-Za-z0-9_-]{8,}))[^\u0000-\u001F\u007F]+$`;
 const safeTitleSchema: JsonSchema = {
   type: "string",
   minLength: 1,
   maxLength: 64,
   // No control characters, URLs, absolute paths, or credential assignments.
-  pattern: "^(?!.*(?:[Hh][Tt][Tt][Pp][Ss]?://|(?:^|\\s)(?:/|\\\\|~[/\\\\]|[A-Za-z]:[/\\\\])|(?:[Aa][Pp][Ii][- _]?[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn])\\s*[:=]|[Bb][Ee][Aa][Rr][Ee][Rr]\\s+[A-Za-z0-9_-]{16,}|(?:[Ss][Kk]-|[Gg][Hh][Pp]_|[Gg][Hh][Oo]_|[Gg][Ii][Tt][Hh][Uu][Bb]_[Pp][Aa][Tt]_|[Xx][Oo][Xx][BbAaPpRrSs]-)[A-Za-z0-9_-]{8,}))[^\\u0000-\\u001F\\u007F]+$",
+  pattern: safeTitlePattern,
 };
 const identifiedSessionIdSchema: JsonSchema = { ...idSchema, pattern: "^(?!unknown$).+" };
 

@@ -171,8 +171,8 @@ function safeSessionTitle(value: unknown): string | undefined {
   const title = value.trim().replace(/\s+/g, " ");
   if (!title || title.length > 64 || /[\u0000-\u001f\u007f]/.test(value)) return undefined;
   if (
+    /[\\/]/.test(title) ||
     /https?:\/\//i.test(title) ||
-    /(?:^|[\s([:{=])\/(?:[^\s/]+(?:\/|$)|$)|\\\\|~[\\/]|\b[A-Za-z]:[\\/]/i.test(title) ||
     /(?:api[_ -]?key|token|secret|password|authorization)\s*[:=]|\bbearer\s+[A-Za-z0-9._~+/-]{8,}|\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_-]{8,}|github_pat_[A-Za-z0-9_-]{8,}|xox[baprs]-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16})/i.test(
       title,
     )
