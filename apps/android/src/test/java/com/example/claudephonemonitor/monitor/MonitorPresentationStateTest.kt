@@ -180,6 +180,80 @@ class MonitorPresentationStateTest {
     }
 
     @Test
+    fun alreadyWorkingOtherSessionSnapshotRefreshDoesNotCancelFinish() {
+        var state = reduce(MonitorPresentationState(), MonitorEvent(
+            type = MonitorEventType.SNAPSHOT,
+            snapshot = MonitorSnapshot(
+                computerState = ComputerState.ONLINE,
+                claudeState = ClaudeState.WORKING,
+                lastSequence = 10,
+                sessions = listOf(
+                    SessionSummary("codex-done", "Codex", ClaudeState.IDLE, 9),
+                    SessionSummary("claude-existing", "Claude", ClaudeState.WORKING, 10),
+                ),
+                runningCount = 1,
+                sessionCount = 2,
+            ),
+        ), 0L)
+        state = reduce(state, MonitorEvent(
+            type = MonitorEventType.EVENT,
+            name = MonitorEventName.TASK_FINISHED,
+            sessionId = "codex-done",
+            taskId = "turn-done",
+            sequence = 11,
+        ), 100L)
+        val deadline = state.changeDeadlineMs
+        assertEquals(PetState.WORKING, state.baseState)
+        assertEquals(PetState.FINISH, MonitorPresentationReducer.stateChange(state, 100L)?.status)
+
+        // This is only a same-state refresh for the already-working Claude
+        // session; there is no later task_started event in this sequence.
+        state = reduce(state, MonitorEvent(
+            type = MonitorEventType.SNAPSHOT,
+            snapshot = MonitorSnapshot(
+                computerState = ComputerState.ONLINE,
+                claudeState = ClaudeState.WORKING,
+                lastSequence = 12,
+                sessions = listOf(
+                    SessionSummary("codex-done", "Codex", ClaudeState.IDLE, 9),
+                    SessionSummary("claude-existing", "Claude", ClaudeState.WORKING, 12),
+                ),
+                runningCount = 1,
+                sessionCount = 2,
+            ),
+        ), 500L)
+
+        assertEquals(PetState.FINISH, MonitorPresentationReducer.stateChange(state, 500L)?.status)
+        assertEquals(deadline, state.changeDeadlineMs)
+        assertEquals(14_600L, MonitorPresentationReducer.stateChange(state, 500L)?.remainingMs)
+    }
+
+    @Test
+    fun aNewTaskStartedAfterFinishChangesThePromptToWorking() {
+        var state = reduce(MonitorPresentationState(), snapshot(1, PetState.IDLE), 0L)
+        state = reduce(state, MonitorEvent(
+            type = MonitorEventType.EVENT,
+            name = MonitorEventName.TASK_FINISHED,
+            sessionId = "codex-done",
+            taskId = "turn-done",
+            sequence = 2,
+        ), 100L)
+        assertEquals(PetState.FINISH, MonitorPresentationReducer.stateChange(state, 100L)?.status)
+
+        state = reduce(state, MonitorEvent(
+            type = MonitorEventType.EVENT,
+            name = MonitorEventName.TASK_STARTED,
+            sessionId = "claude-new",
+            taskId = "turn-new",
+            sequence = 3,
+        ), 200L)
+
+        assertEquals(PetState.WORKING, state.baseState)
+        assertEquals(PetState.WORKING, MonitorPresentationReducer.stateChange(state, 200L)?.status)
+        assertEquals(15_000L, MonitorPresentationReducer.stateChange(state, 200L)?.remainingMs)
+    }
+
+    @Test
     fun workingAggregateIsNotReplacedBySessionWaitingOrTaskStartedReplay() {
         var state = reduce(MonitorPresentationState(), MonitorEvent(
             type = MonitorEventType.SNAPSHOT,
@@ -279,6 +353,40 @@ class MonitorPresentationStateTest {
             assertNull(vm.uiState.value.stateChange)
             store.clear()
         } finally {
+            kotlinx.coroutines.Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun bareCompletionUsesOnlyTheMatchingSessionTitleFromTheLastSnapshot() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        kotlinx.coroutines.Dispatchers.setMain(dispatcher)
+        val store = ViewModelStore()
+        try {
+            val client = FakeMonitorClient()
+            val vm = MonitorViewModel(client) { 100L }.also { store.put("completion-title", it) }
+            runCurrent()
+            client.emit(
+                """{"type":"snapshot","installation_id":"install","computer_state":"online","claude_state":"idle","last_sequence":1,"sessions":[{"session_id":"codex:sess:target","title":"Codex","claude_state":"idle","last_activity_sequence":1},{"session_id":"other-session","title":"Other Session","claude_state":"idle","last_activity_sequence":1}],"running_count":0,"session_count":2}""",
+            )
+            runCurrent()
+
+            client.emit(
+                """{"type":"event","schema_version":1,"installation_id":"install","session_id":"codex:sess:target","task_id":"codex:turn:target","sequence":2,"occurred_at":"2026-10-07T01:00:00Z","event_type":"task_finished","payload":{}}""",
+            )
+            runCurrent()
+            assertEquals("Codex", vm.uiState.value.stateChange?.completionName)
+            assertEquals("Codex", vm.uiState.value.snapshot.recentCompletion?.displayName)
+            assertEquals("codex:sess:target", vm.uiState.value.snapshot.recentCompletion?.sessionId)
+
+            client.emit(
+                """{"type":"event","installation_id":"install","session_id":"unknown-session","task_id":"task-3","sequence":3,"occurred_at":"2026-10-07T01:00:01Z","event_type":"task_finished","payload":{}}""",
+            )
+            runCurrent()
+            assertEquals("未命名会话已完成", vm.uiState.value.stateChange?.completionName)
+            assertEquals("unknown-session", vm.uiState.value.snapshot.recentCompletion?.sessionId)
+        } finally {
+            store.clear()
             kotlinx.coroutines.Dispatchers.resetMain()
         }
     }

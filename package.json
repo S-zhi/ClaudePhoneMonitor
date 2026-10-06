@@ -7,11 +7,12 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "npm run test:protocol && npm run test:collector && npm run test:relay && node --test tests/monitor-mvp-harness.test.mjs && bash skills/claude-monitor/tests/test_scripts.sh",
+    "test": "npm run test:protocol && npm run test:collector && npm run test:relay && node --test tests/monitor-mvp-harness.test.mjs && npm run test:codex-monitor && bash skills/claude-monitor/tests/test_scripts.sh",
     "typecheck": "npm run typecheck:protocol && npm run typecheck:collector && npm run typecheck:relay",
     "test:protocol": "npm --prefix packages/protocol test",
     "test:collector": "npm --prefix services/collector test",
     "test:relay": "npm --prefix services/relay test",
+    "test:codex-monitor": "node --import ./services/collector/node_modules/tsx/dist/loader.mjs --test tests/codex-monitor-harness.test.mjs",
     "typecheck:protocol": "npm --prefix packages/protocol run typecheck",
     "typecheck:collector": "npm --prefix services/collector run typecheck",
     "typecheck:relay": "npm --prefix services/relay run typecheck",

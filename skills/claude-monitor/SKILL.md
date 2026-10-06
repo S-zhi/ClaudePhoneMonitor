@@ -1,6 +1,6 @@
 ---
 name: claude-monitor
-description: Set up and operate the local macOS Claude phone monitor, including safe user-level hook registration, development pairing, launchd health agent, diagnostics, and uninstall.
+description: Set up and operate the local macOS phone monitor for Claude Code and optional read-only Codex session monitoring, including safe user-level Hook registration, pairing, diagnostics, and uninstall.
 ---
 
 # Claude phone monitor
@@ -72,6 +72,41 @@ skills/claude-monitor/scripts/install \
   --launch-agents-dir "$TMP/LaunchAgents" \
   --no-load
 ```
+
+## Optional Codex session monitoring
+
+To monitor local Codex Desktop and CLI turns through the same Relay and Android
+status page, start the foreground LAN service with:
+
+```bash
+scripts/start-lan-monitor.sh --watch-codex
+```
+
+The equivalent collector controls are `--watch-codex` or
+`COLLECTOR_WATCH_CODEX=1`; `--no-watch-codex` disables it. The watcher reads
+`$CODEX_HOME/sessions`, defaulting to `~/.codex/sessions`; set
+`COLLECTOR_CODEX_SESSIONS_DIR` to point at another local sessions root. It is
+read-only and does not install Codex Hooks or edit Codex settings.
+
+The observed desktop app version is 26.930.61225 with embedded runtime 0.160.0;
+the standalone CLI binary is 0.159.3. These are distinct execution forms and
+version values. The local JSONL
+format can change across releases. The watcher reports new turns as WORKING,
+verified normal completion as FINISH, and only the exact verified
+`server_overloaded` error enum as ERROR. Aborts and unknown errors reset to a
+neutral state. It does not infer WAITING from a pause or claim complete tool and
+approval visibility.
+
+Collector stderr uses fixed diagnostic code identifiers only. For
+example, `codex_watch_start_failed` means the configured sessions root could
+not be opened; `codex_jsonl_unsupported_shape` or
+`codex_source_read_failed` suggests the local format or access needs review.
+Diagnostics print code identifiers only and never include counters, a path,
+session row, prompt, command, or error message. A missing event is not evidence
+that the Codex session is idle. A source session without file growth or mtime
+change for 30 minutes ends neutrally; that stale threshold never means
+completion, error, or WAITING, and is shorter than Relay's two-hour working
+session TTL.
 
 ## Supported lifecycle events
 

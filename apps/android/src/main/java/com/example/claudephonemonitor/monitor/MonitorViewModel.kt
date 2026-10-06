@@ -240,42 +240,59 @@ class MonitorViewModel(
 
     private fun handleEvent(event: MonitorEvent) {
         val previous = _uiState.value
+        val resolvedTitle = if (
+            event.type == MonitorEventType.EVENT &&
+            event.name == MonitorEventName.TASK_FINISHED &&
+            event.sessionTitle.isNullOrBlank()
+        ) {
+            event.sessionId?.let { sessionId ->
+                previous.snapshot.sessions
+                    ?.firstOrNull { it.sessionId == sessionId }
+                    ?.title
+                    ?.takeIf { it.isNotBlank() }
+            }
+        } else null
+        // Relay task_finished envelopes do not carry a title. Reuse only the
+        // title from the authoritative snapshot for this exact session.
+        val presentationEvent = if (resolvedTitle != null) {
+            event.copy(sessionTitle = resolvedTitle)
+        } else event
         val nowMs = monotonicClockMs()
-        val reduction = MonitorPresentationReducer.reduce(presentationState, event, nowMs)
+        val reduction = MonitorPresentationReducer.reduce(presentationState, presentationEvent, nowMs)
         presentationState = reduction.state
         if (!reduction.accepted) {
             publishPresentation(nowMs)
             return
         }
 
-        val activityFromEvent = if (event.type == MonitorEventType.EVENT && event.name != MonitorEventName.UNKNOWN) {
-            event.name.wireValue
-        } else event.activity
-        val incomingSnapshot = event.snapshot?.let { snapshot ->
-            val highestSequence = listOfNotNull(snapshot.lastSequence, event.sequence, previous.snapshot.lastSequence).maxOrNull() ?: 0L
+        val activityFromEvent = if (presentationEvent.type == MonitorEventType.EVENT && presentationEvent.name != MonitorEventName.UNKNOWN) {
+            presentationEvent.name.wireValue
+        } else presentationEvent.activity
+        val incomingSnapshot = presentationEvent.snapshot?.let { snapshot ->
+            val highestSequence = listOfNotNull(snapshot.lastSequence, presentationEvent.sequence, previous.snapshot.lastSequence).maxOrNull() ?: 0L
             snapshot.copy(lastSequence = highestSequence, activity = activityFromEvent ?: snapshot.activity)
         }
         val nextSnapshot = incomingSnapshot ?: previous.snapshot.copy(
-            lastSequence = event.sequence?.let { maxOf(previous.snapshot.lastSequence, it) } ?: previous.snapshot.lastSequence,
+            lastSequence = presentationEvent.sequence?.let { maxOf(previous.snapshot.lastSequence, it) } ?: previous.snapshot.lastSequence,
             activity = activityFromEvent ?: previous.snapshot.activity,
-            updatedAt = event.updatedAt.ifBlank { previous.snapshot.updatedAt },
+            updatedAt = presentationEvent.updatedAt.ifBlank { previous.snapshot.updatedAt },
         )
         val completion = when {
             incomingSnapshot?.recentCompletion != null -> incomingSnapshot.recentCompletion
-            event.type == MonitorEventType.EVENT && event.name == MonitorEventName.TASK_FINISHED &&
-                event.sessionId != null && event.sequence != null -> RecentCompletion(
-                sessionId = event.sessionId,
-                taskId = event.taskId,
-                sequence = event.sequence,
-                occurredAt = event.occurredAt.ifBlank { event.updatedAt },
-                displayName = event.sessionTitle ?: previous.snapshot.sessions?.firstOrNull { it.sessionId == event.sessionId }?.title ?: "未命名会话已完成",
+            presentationEvent.type == MonitorEventType.EVENT && presentationEvent.name == MonitorEventName.TASK_FINISHED &&
+                presentationEvent.sessionId != null && presentationEvent.sequence != null -> RecentCompletion(
+                sessionId = presentationEvent.sessionId,
+                taskId = presentationEvent.taskId,
+                sequence = presentationEvent.sequence,
+                occurredAt = presentationEvent.occurredAt.ifBlank { presentationEvent.updatedAt },
+                displayName = presentationEvent.sessionTitle ?: "未命名会话已完成",
             )
             incomingSnapshot != null -> null
             else -> previous.snapshot.recentCompletion
         }
         val presentationSnapshot = nextSnapshot.copy(recentCompletion = completion)
         val activity = (activityFromEvent ?: nextSnapshot.activity ?: event.name.wireValue).toActivityVariation()
-        val detail = event.detail.ifBlank { defaultMessage(event, nextSnapshot) }
+        val detail = presentationEvent.detail.ifBlank { defaultMessage(presentationEvent, nextSnapshot) }
         _uiState.update { current ->
             current.copy(
                 snapshot = presentationSnapshot,
@@ -283,12 +300,12 @@ class MonitorViewModel(
                 stateChange = MonitorPresentationReducer.stateChange(presentationState, nowMs),
                 activity = activity,
                 message = detail,
-                isConnected = when (event.type) {
+                isConnected = when (presentationEvent.type) {
                     MonitorEventType.CONNECTED -> true
                     MonitorEventType.DISCONNECTED -> false
                     else -> current.isConnected
                 },
-                eventCount = if (event.type == MonitorEventType.CONNECTED || event.type == MonitorEventType.DISCONNECTED) current.eventCount else current.eventCount + 1,
+                eventCount = if (presentationEvent.type == MonitorEventType.CONNECTED || presentationEvent.type == MonitorEventType.DISCONNECTED) current.eventCount else current.eventCount + 1,
                 completedDisplayName = completion?.displayName ?: current.completedDisplayName,
             )
         }

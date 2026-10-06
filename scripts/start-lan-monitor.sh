@@ -11,6 +11,7 @@ PORT="${RELAY_PORT:-8787}"
 PAIR=0
 INSTALL_HOOKS=0
 OPEN_QR=0
+WATCH_CODEX="${COLLECTOR_WATCH_CODEX:-0}"
 RELAY_PID=""
 COLLECTOR_PID=""
 RELAY_STARTED=0
@@ -25,6 +26,8 @@ creates a bootstrap secret, creates a one-time pairing, and writes a QR image.
 Options:
   --pair            create a fresh one-time pairing QR
   --install-hooks   merge monitor-owned Claude Code Hooks (real settings change)
+  --watch-codex     read local Codex session JSONL and send safe lifecycle metadata
+  --no-watch-codex  disable Codex watching even when COLLECTOR_WATCH_CODEX=1
   --open-qr         open pairing.png in Preview after pairing
   --no-build        do not build relay/collector before starting
   -h, --help        show this help
@@ -35,6 +38,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --pair) PAIR=1; shift ;;
     --install-hooks) INSTALL_HOOKS=1; shift ;;
+    --watch-codex) WATCH_CODEX=1; shift ;;
+    --no-watch-codex) WATCH_CODEX=0; shift ;;
     --open-qr) OPEN_QR=1; shift ;;
     --no-build) NO_BUILD=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -140,12 +145,18 @@ if [[ "$INSTALL_HOOKS" -eq 1 ]]; then
   "$ROOT/skills/claude-monitor/scripts/install" --no-launchd --no-load
 fi
 
+COLLECTOR_ARGS=(--collector)
+if [[ "$WATCH_CODEX" == "1" ]]; then
+  COLLECTOR_ARGS+=(--watch-codex)
+fi
+
 COLLECTOR_RELAY_URL="$COLLECTOR_RELAY_URL" \
 COLLECTOR_RELAY_TOKEN="$COLLECTOR_RELAY_TOKEN" \
 COLLECTOR_INSTALLATION_ID="$COLLECTOR_INSTALLATION_ID" \
-COLLECTOR_DATA_DIR="${COLLECTOR_DATA_DIR:-$STATE_DIR}" \
-COLLECTOR_SOCKET_PATH="${COLLECTOR_SOCKET_PATH:-$STATE_DIR/collector.sock}" \
-  npm --prefix "$ROOT/services/collector" run start -- --collector \
+  COLLECTOR_WATCH_CODEX="$WATCH_CODEX" \
+  COLLECTOR_DATA_DIR="${COLLECTOR_DATA_DIR:-$STATE_DIR}" \
+  COLLECTOR_SOCKET_PATH="${COLLECTOR_SOCKET_PATH:-$STATE_DIR/collector.sock}" \
+  npm --prefix "$ROOT/services/collector" run start -- "${COLLECTOR_ARGS[@]}" \
   >> "$STATE_DIR/logs/collector.log" 2>&1 &
 COLLECTOR_PID=$!
 
@@ -157,5 +168,10 @@ printf '\nClaude Phone Monitor is running on the trusted LAN.\n'
 printf 'Relay: %s\n' "$PUBLIC_URL"
 printf 'Pairing QR: %s/pairing.png\n' "$STATE_DIR"
 printf 'Collector log: %s/logs/collector.log\n' "$STATE_DIR"
+if [[ "$WATCH_CODEX" == "1" ]]; then
+  printf 'Codex session monitoring: enabled (read-only; no Codex config or hooks changed)\n'
+else
+  printf 'Codex session monitoring: disabled\n'
+fi
 printf 'Press Ctrl-C to stop processes started by this script.\n\n'
 wait "$COLLECTOR_PID"

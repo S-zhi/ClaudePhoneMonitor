@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   EVENT_TYPES,
   type EventType,
@@ -58,6 +59,8 @@ const SAFE_TOOL_NAMES = new Map<string, string>([
 
 const EVENT_TYPE_SET = new Set<string>(EVENT_TYPES);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+/** Reserved source namespace used by the local Codex session watcher. */
+export const CODEX_ID_PREFIX = "codex:";
 const SENSITIVE_ID = /(?:^|[-_.:])(secret|token|password|api[_-]?key|authorization)(?:$|[-_.:])/i;
 const SENSITIVE_TITLE = /(?:api[_ -]?key|token|secret|password|authorization)\s*[:=]|\bbearer\s+[A-Za-z0-9_-]{16,}|\b(?:sk-|ghp_|gho_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{8,}/i;
 const UNSAFE_TITLE_PATH_OR_URL = /https?:\/\//i;
@@ -88,6 +91,12 @@ function getString(record: Record<string, unknown>, ...keys: string[]): string |
 function safeIdentifier(value: unknown): string | undefined {
   if (typeof value !== "string" || !SAFE_ID.test(value) || SENSITIVE_ID.test(value)) return undefined;
   return value;
+}
+
+function escapeClaudeIdentifier(value: string | undefined, kind: "session" | "task"): string | undefined {
+  if (!value?.startsWith(CODEX_ID_PREFIX)) return value;
+  const digest = createHash("sha256").update(value, "utf8").digest("hex");
+  return `claude:${kind}:${digest}`;
 }
 
 function safeSessionTitle(value: unknown): string | undefined {
@@ -216,8 +225,11 @@ export function normalizeHookEvent(
 
   const now = currentDate(options);
   const rawSessionId = getString(record, "session_id", "sessionId");
-  const taskId = safeIdentifier(getString(record, "task_id", "taskId"))
-    ?? safeIdentifier(getString(record, "prompt_id", "promptId"));
+  const taskId = escapeClaudeIdentifier(
+    safeIdentifier(getString(record, "task_id", "taskId"))
+      ?? safeIdentifier(getString(record, "prompt_id", "promptId")),
+    "task",
+  );
   // Claude only documents session_title on SessionStart. Other hook metadata
   // and user content are deliberately not considered as title sources.
   const sessionTitle = eventType === "session_started"
@@ -262,7 +274,8 @@ export function normalizeHookEvent(
   if (duration !== undefined) payload.duration_ms = duration;
   if (exitCode !== undefined) payload.exit_code = exitCode;
 
-  const safeSession = safeIdentifier(rawSessionId) ?? "unknown";
+  const safeSession =
+    escapeClaudeIdentifier(safeIdentifier(rawSessionId), "session") ?? "unknown";
 
   return {
     event_type: eventType,
