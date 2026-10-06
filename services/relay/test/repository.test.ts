@@ -249,6 +249,80 @@ test("task-scoped tool events cannot replace or finish newer tasks and failures 
   }
 });
 
+test("completed tasks stay idle through tool tails after recent_completion TTL in memory and SQLite", () => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-terminal-task-"));
+  const memory = new InMemoryRelayRepository();
+  const sqlite = new SqliteRelayRepository(join(directory, "relay.sqlite"));
+  const base = Date.parse("2026-10-02T00:00:00.000Z");
+  try {
+    for (const repository of [memory, sqlite]) {
+      let globalSequence = 0;
+      const record = (
+        session_id: string,
+        event_type: EventEnvelope["event_type"],
+        task_id?: string,
+      ) => {
+        globalSequence += 1;
+        const occurred_at = new Date(base + globalSequence * 100).toISOString();
+        repository.recordEvent(event({
+          event_id: `terminal-${globalSequence}`,
+          session_id,
+          sequence: globalSequence,
+          event_type,
+          occurred_at,
+          ...(task_id ? { task_id } : {}),
+          ...(event_type === "session_started" ? { session_title: session_id } : {}),
+        }), occurred_at);
+        return repository.getInstallationState("install-1", occurred_at);
+      };
+
+      record("finished-session", "session_started");
+      record("finished-session", "task_started", "task-done");
+      const finished = record("finished-session", "task_finished", "task-done");
+      assert.equal(finished?.claude_state, "idle");
+      assert.equal(finished?.running_count, 0);
+      assert.equal(finished?.recent_completion?.task_id, "task-done");
+
+      record("other-session", "session_started");
+      let otherWork = record("other-session", "task_started", "task-other");
+      assert.equal(otherWork?.claude_state, "working");
+      assert.equal(otherWork?.running_count, 1);
+
+      // Stop may deliver tool_finished with a newer sequence and without task_id.
+      let afterToolTail = record("finished-session", "tool_finished");
+      assert.equal(afterToolTail?.sessions?.find((item) => item.session_id === "finished-session")?.claude_state, "idle");
+      assert.equal(afterToolTail?.running_count, 1);
+      assert.equal(afterToolTail?.claude_state, "working");
+      const afterTtl = repository.getInstallationState("install-1", new Date(base + 6_000).toISOString());
+      assert.equal(afterTtl?.recent_completion, undefined);
+      assert.equal(afterTtl?.sessions?.find((item) => item.session_id === "finished-session")?.claude_state, "idle");
+      assert.equal(afterTtl?.running_count, 1);
+      assert.equal(afterTtl?.claude_state, "working");
+
+      record("finished-session", "task_started", "task-next");
+      afterToolTail = record("finished-session", "tool_started", "task-next");
+      assert.equal(afterToolTail?.sessions?.find((item) => item.session_id === "finished-session")?.claude_state, "working");
+      assert.equal(afterToolTail?.running_count, 2);
+
+      record("failed-session", "session_started");
+      record("failed-session", "task_started", "task-failed");
+      record("failed-session", "task_failed", "task-failed");
+      record("failed-session", "tool_started");
+      const failedTail = record("failed-session", "tool_finished");
+      assert.equal(failedTail?.sessions?.find((item) => item.session_id === "failed-session")?.claude_state, "idle");
+      assert.notEqual(failedTail?.recent_completion?.session_id, "failed-session");
+
+      // A finished session remains idle while another session keeps the aggregate working.
+      otherWork = record("other-session", "tool_started", "task-other");
+      assert.equal(otherWork?.claude_state, "working");
+      assert.equal(otherWork?.running_count, 2); // The restarted task and task-other are active.
+    }
+  } finally {
+    sqlite.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("successful completion remains visible for five seconds after session end and SQLite restart", () => {
   const directory = mkdtempSync(join(tmpdir(), "relay-ended-completion-"));
   const dbPath = join(directory, "relay.sqlite");

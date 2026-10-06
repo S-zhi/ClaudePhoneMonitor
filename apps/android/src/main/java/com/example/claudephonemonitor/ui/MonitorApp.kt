@@ -276,12 +276,9 @@ private fun MonitorScreen(
         if (!uiState.controlsVisible) controlsReady = true
     }
 
+    val page = selectMonitorPage(uiState)
+    val stateChange = uiState.stateChange?.takeIf { it.remainingMs > 0L }
     val displayPetState = uiState.petState
-    val displayActivity = when {
-        uiState.overlayState == PetState.ERROR && uiState.overlayRemainingMs > 0L -> ActivityVariation.ALERT
-        uiState.overlayState == PetState.FINISH && uiState.overlayRemainingMs > 0L && displayPetState != PetState.WORKING -> ActivityVariation.CELEBRATE
-        else -> uiState.activity
-    }
 
     Box(
         modifier = Modifier
@@ -317,14 +314,28 @@ private fun MonitorScreen(
                         .weight(if (compact) 0.44f else 1.05f)
                         .fillMaxHeight(),
                 )
-                ClawdProceduralView(
-                    state = displayPetState,
-                    activity = displayActivity,
-                    isSilent = displayPetState == PetState.OFFLINE,
-                    modifier = Modifier
-                        .weight(if (compact) 0.56f else 1.4f)
-                        .fillMaxHeight(),
-                )
+                if (page == MonitorPage.STATE_CHANGE && stateChange != null) {
+                    StateChangePanel(
+                        status = stateChange.status,
+                        animationState = resolveStateChangeAnimationState(uiState),
+                        completionName = stateChange.completionName,
+                        runningCount = uiState.snapshot.runningCount,
+                        activity = uiState.activity,
+                        compact = compact || short,
+                        modifier = Modifier
+                            .weight(if (compact) 0.56f else 1.4f)
+                            .fillMaxHeight(),
+                    )
+                } else {
+                    ClawdProceduralView(
+                        state = displayPetState,
+                        activity = uiState.activity,
+                        isSilent = displayPetState == PetState.OFFLINE,
+                        modifier = Modifier
+                            .weight(if (compact) 0.56f else 1.4f)
+                            .fillMaxHeight(),
+                    )
+                }
             }
         }
 
@@ -376,6 +387,63 @@ private fun MonitorScreen(
             containerColor = Color(0xFF28221F),
             titleContentColor = InkColor,
             textContentColor = MutedInkColor,
+        )
+    }
+}
+
+@Composable
+private fun StateChangePanel(
+    status: PetState,
+    animationState: PetState,
+    completionName: String?,
+    runningCount: Int?,
+    activity: ActivityVariation,
+    compact: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val animationActivity = when {
+        status == PetState.ERROR -> ActivityVariation.ALERT
+        status == PetState.FINISH && animationState != PetState.WORKING -> ActivityVariation.CELEBRATE
+        else -> activity
+    }
+    Column(
+        modifier = modifier.padding(horizontal = if (compact) 2.dp else 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            text = status.title,
+            color = Color(status.color),
+            fontSize = if (compact) 28.sp else 42.sp,
+            fontWeight = FontWeight.ExtraBold,
+            letterSpacing = if (compact) 1.2.sp else 2.sp,
+            maxLines = 1,
+        )
+        if (status == PetState.FINISH && !completionName.isNullOrBlank()) {
+            Text(
+                text = "任务完成：$completionName",
+                color = InkColor,
+                fontSize = if (compact) 12.sp else 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (status == PetState.FINISH && animationState == PetState.WORKING) {
+            Text(
+                text = "仍有 ${runningCount?.toString() ?: "其他"} 项任务运行中",
+                color = MutedInkColor,
+                fontSize = if (compact) 10.sp else 13.sp,
+                maxLines = 1,
+            )
+        }
+        ClawdProceduralView(
+            state = animationState,
+            activity = animationActivity,
+            isSilent = animationState == PetState.OFFLINE,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
         )
     }
 }

@@ -1,8 +1,8 @@
 package com.example.claudephonemonitor.ui
 
 /**
- * 1:1 Pure Code Sprite Data sampled directly from official Clawd mascot frames.
- * Eliminates GIF decoding completely and renders through Compose Canvas.
+ * Pure-code Clawd sprites rendered through Compose Canvas. Typing poses are authored from the
+ * confirmed static illustration composition; they do not claim to reproduce source animation frames.
  */
 object ClawdSpriteData {
     const val COLS = 24
@@ -214,6 +214,13 @@ object ClawdSpriteData {
         ),
     )
     val WALK_SEQUENCE = intArrayOf(0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 2, 3, 4, 5, 6, 2, 3, 4, 5, 6, 2, 3, 4, 5, 6, 0, 0, 0)
+
+    /** A seated Clawd behind a fixed laptop, with left/right hands alternating independently. */
+    val TYPING_POSES = listOf(
+        typingPose(leftHandRaised = true),
+        typingPose(leftHandRaised = false),
+    )
+    val TYPING_SEQUENCE = intArrayOf(0, 1, 0, 0, 1, 0)
 
     val CRAB_POSES = listOf(
         // CRAB Pose 0
@@ -1560,4 +1567,49 @@ object ClawdSpriteData {
     )
     val DANCE_SEQUENCE = intArrayOf(0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 4, 5, 5, 4, 4, 6, 6, 4, 4, 2, 2, 7, 7, 8, 9, 10, 10, 11, 11, 10, 10, 12, 12, 10, 10, 8, 8, 7, 7)
 
+}
+
+private fun typingPose(leftHandRaised: Boolean): List<String> {
+    val pixels = Array(22) { CharArray(28) { '.' } }
+    fun paint(row: Int, from: Int, to: Int, pixel: Char) {
+        for (column in from..to) pixels[row][column] = pixel
+    }
+
+    // Head and torso stay anchored while the compact eye arcs and smile remain visible.
+    paint(6, 9, 18, 'O')
+    paint(7, 8, 19, 'O')
+    paint(8, 7, 20, 'O')
+    paint(9, 7, 20, 'O')
+    paint(10, 8, 19, 'O')
+    paint(8, 10, 11, 'B')
+    pixels[9][12] = 'B'
+    paint(8, 16, 17, 'B')
+    pixels[9][15] = 'B'
+    for (row in 11..15) paint(row, 8, 19, 'O')
+    paint(13, 6, 21, 'O')
+    pixels[10][11] = 'B'
+    pixels[10][16] = 'B'
+    paint(11, 12, 15, 'B')
+
+    // The laptop lid is a broad, fixed gray panel in front of Clawd's chest.
+    paint(14, 6, 21, 'K')
+    for (row in 15..18) {
+        pixels[row][6] = 'K'
+        paint(row, 7, 20, 'L')
+        pixels[row][21] = 'K'
+    }
+    paint(19, 5, 22, 'K')
+    paint(20, 6, 21, 'L')
+    paint(20, 9, 18, 'K')
+    paint(21, 9, 18, 'L')
+
+    // Raised hand rests just above the keyboard; the other hand is lowered onto it.
+    val raisedColumn = if (leftHandRaised) 9 else 18
+    val loweredColumn = if (leftHandRaised) 18 else 9
+    pixels[14][raisedColumn] = 'H'
+    pixels[15][raisedColumn] = 'H'
+    pixels[16][loweredColumn] = 'H'
+    pixels[17][loweredColumn] = 'H'
+
+    return pixels.map { it.concatToString() }
 }

@@ -101,6 +101,8 @@ interface SessionState {
   updated_at: string;
   task_id?: string;
   ended: boolean;
+  /** Task completion is terminal until a newer task starts, even after recent_completion expires. */
+  terminalTask?: boolean;
   completion?: RecentCompletion;
 }
 
@@ -137,15 +139,18 @@ function applySessionEvent(
       next.claude_state = "idle";
       next.ended = false;
       next.task_id = undefined;
+      next.terminalTask = false;
       next.completion = undefined;
       break;
     case "task_started":
       next.claude_state = "working";
       next.task_id = event.task_id;
+      next.terminalTask = false;
       next.completion = undefined;
       break;
     case "tool_started":
       if (event.task_id && next.task_id && event.task_id !== next.task_id) break;
+      if (next.terminalTask ?? Boolean(next.completion)) break;
       next.claude_state = "working";
       break;
     case "waiting":
@@ -153,6 +158,7 @@ function applySessionEvent(
       break;
     case "tool_finished":
       if (event.task_id && next.task_id && event.task_id !== next.task_id) break;
+      if (next.terminalTask ?? Boolean(next.completion)) break;
       next.claude_state = "working";
       break;
     case "task_finished":
@@ -163,6 +169,7 @@ function applySessionEvent(
       if (!staleTaskFinish) {
         next.claude_state = "idle";
         next.task_id = undefined;
+        next.terminalTask = true;
         if (event.event_type === "task_finished") {
           next.completion = {
             session_id: event.session_id,
