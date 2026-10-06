@@ -23,6 +23,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
@@ -292,43 +294,37 @@ private fun MonitorScreen(
     ) {
         BoxWithConstraints(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 18.dp, vertical = 12.dp),
+                .fillMaxSize(),
         ) {
-            if (maxWidth < 500.dp) {
-                Column(
-                    modifier = Modifier.fillMaxSize().padding(top = 30.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    SessionSummaryPanel(
-                        snapshot = uiState.snapshot,
-                        state = displayPetState,
-                        modifier = Modifier.fillMaxWidth().weight(0.8f),
-                    )
-                    ClawdProceduralView(
-                        state = displayPetState,
-                        activity = displayActivity,
-                        isSilent = displayPetState == PetState.OFFLINE,
-                        modifier = Modifier.fillMaxWidth().weight(1.2f),
-                    )
-                }
-            } else {
-                Row(
-                    modifier = Modifier.fillMaxSize().padding(top = 30.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    SessionSummaryPanel(
-                        snapshot = uiState.snapshot,
-                        state = displayPetState,
-                        modifier = Modifier.weight(1.05f).fillMaxHeight(),
-                    )
-                    ClawdProceduralView(
-                        state = displayPetState,
-                        activity = displayActivity,
-                        isSilent = displayPetState == PetState.OFFLINE,
-                        modifier = Modifier.weight(1.4f).fillMaxHeight(),
-                    )
-                }
+            val compact = maxWidth < 500.dp
+            val short = maxHeight < 360.dp
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(
+                        start = if (compact) 8.dp else 18.dp,
+                        end = if (compact) 8.dp else 18.dp,
+                        top = 42.dp,
+                        bottom = 12.dp,
+                    ),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SessionSummaryPanel(
+                    snapshot = uiState.snapshot,
+                    state = displayPetState,
+                    compact = compact || short,
+                    modifier = Modifier
+                        .weight(if (compact) 0.44f else 1.05f)
+                        .fillMaxHeight(),
+                )
+                ClawdProceduralView(
+                    state = displayPetState,
+                    activity = displayActivity,
+                    isSilent = displayPetState == PetState.OFFLINE,
+                    modifier = Modifier
+                        .weight(if (compact) 0.56f else 1.4f)
+                        .fillMaxHeight(),
+                )
             }
         }
 
@@ -388,6 +384,7 @@ private fun MonitorScreen(
 private fun SessionSummaryPanel(
     snapshot: com.example.claudephonemonitor.monitor.MonitorSnapshot,
     state: PetState,
+    compact: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val stateLabel = when (state) {
@@ -399,8 +396,13 @@ private fun SessionSummaryPanel(
         PetState.OFFLINE -> "离线"
     }
     Column(
-        modifier = modifier.padding(start = 8.dp, end = 6.dp, top = 4.dp, bottom = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(7.dp),
+        modifier = modifier.padding(
+            start = if (compact) 2.dp else 8.dp,
+            end = if (compact) 3.dp else 6.dp,
+            top = 4.dp,
+            bottom = 8.dp,
+        ),
+        verticalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 7.dp),
     ) {
         Text(
             text = state.title,
@@ -409,52 +411,60 @@ private fun SessionSummaryPanel(
                 PetState.ERROR -> AlertColor
                 else -> InkColor
             },
-            fontSize = 22.sp,
+            fontSize = if (compact) 18.sp else 22.sp,
             fontWeight = FontWeight.Bold,
             letterSpacing = 1.2.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        Text(stateLabel, color = MutedInkColor, fontSize = 12.sp, letterSpacing = 0.7.sp)
+        Text(stateLabel, color = MutedInkColor, fontSize = if (compact) 10.sp else 12.sp, letterSpacing = 0.7.sp)
 
         val sessions = snapshot.sessions
         if (sessions != null) {
             Text(
                 text = "运行中 ${snapshot.runningCount?.toString() ?: "—"} · 会话 ${snapshot.sessionCount?.toString() ?: "—"}",
                 color = TerracottaColor,
-                fontSize = 11.sp,
+                fontSize = if (compact) 9.sp else 11.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            sessions.take(5).forEach { session ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(
-                        text = session.title,
-                        color = InkColor,
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(
-                        text = when (session.claudeState) {
-                            com.example.claudephonemonitor.monitor.ClaudeState.IDLE -> "空闲"
-                            com.example.claudephonemonitor.monitor.ClaudeState.WORKING -> "运行中"
-                            com.example.claudephonemonitor.monitor.ClaudeState.WAITING -> "等待"
-                        },
-                        color = when (session.claudeState) {
-                            com.example.claudephonemonitor.monitor.ClaudeState.WORKING -> Color(0xFF8DE6A8)
-                            com.example.claudephonemonitor.monitor.ClaudeState.WAITING -> Color(0xFFF6C76D)
-                            else -> MutedInkColor
-                        },
-                        fontSize = 10.sp,
-                        maxLines = 1,
-                    )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(if (compact) 2.dp else 5.dp),
+            ) {
+                sessions.take(5).forEach { session ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 6.dp),
+                    ) {
+                        Text(
+                            text = session.title,
+                            color = InkColor,
+                            fontSize = if (compact) 10.sp else 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            text = when (session.claudeState) {
+                                com.example.claudephonemonitor.monitor.ClaudeState.IDLE -> "空闲"
+                                com.example.claudephonemonitor.monitor.ClaudeState.WORKING -> "运行中"
+                                com.example.claudephonemonitor.monitor.ClaudeState.WAITING -> "等待"
+                            },
+                            color = when (session.claudeState) {
+                                com.example.claudephonemonitor.monitor.ClaudeState.WORKING -> Color(0xFF8DE6A8)
+                                com.example.claudephonemonitor.monitor.ClaudeState.WAITING -> Color(0xFFF6C76D)
+                                else -> MutedInkColor
+                            },
+                            fontSize = if (compact) 9.sp else 10.sp,
+                            maxLines = 1,
+                        )
+                    }
                 }
             }
         }
@@ -463,7 +473,7 @@ private fun SessionSummaryPanel(
             Text(
                 text = "已完成：${completion.displayName}",
                 color = TerracottaColor,
-                fontSize = 11.sp,
+                fontSize = if (compact) 9.sp else 11.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )

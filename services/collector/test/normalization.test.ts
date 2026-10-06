@@ -94,6 +94,12 @@ test("unsafe, overlong, and non-SessionStart titles are omitted", () => {
     "ghp_1234567890abcdef", "github_pat_1234567890abcdef",
     "GHp_1234567890abcdef", "Bearer abcdef0123456789", "gho_1234567890abcdef",
     "xoxb-1234567890abcdef", "sk-1234567890abcdef", "line\nbreak", "x".repeat(65),
+    "review(/Users/alice/private)", "review=/Users/alice/private",
+    "review:C:\\private\\project", "review=C:/private/project",
+    "review(\\\\server\\share)", "review=/home/alice/private",
+    "review|/Users/alice/private", "review-/Users/alice/private",
+    "review\"/Users/alice/private\"", "review,/Users/alice/private",
+    "review./Users/alice/private", "中文\\标题", "中文/标题",
   ]) {
     assert.equal(
       normalizeHookEvent({ hook_event_name: "SessionStart", session_id: "s1", session_title: title }, { now })?.session_title,
@@ -109,12 +115,12 @@ test("unsafe, overlong, and non-SessionStart titles are omitted", () => {
 
 test("collector preserves the sanitized title and normalized prompt_id on the wire", async () => {
   let sequence = 0;
-  let queued: unknown;
+  const queued: unknown[] = [];
   const collector = new Collector({
     installationId: "installation-1",
     sequence: { next: async () => ++sequence, current: () => sequence },
     outbox: {
-      enqueue: async (input) => { queued = input.payload; return input as never; },
+      enqueue: async (input) => { queued.push(input.payload); return input as never; },
       peek: async () => [], ack: async () => true, retry: async () => true,
       size: async () => 0, clear: async () => undefined,
     },
@@ -128,5 +134,41 @@ test("collector preserves the sanitized title and normalized prompt_id on the wi
   });
   assert.equal(envelope?.session_title, "Build check");
   assert.equal(envelope?.task_id, "round-2");
-  assert.deepEqual(queued, envelope);
+  assert.deepEqual(queued[0], envelope);
+
+  const unicodeEnvelope = await collector.ingestHook({
+    hook_event_name: "SessionStart",
+    session_id: "s1",
+    session_title: "交付 计划 Review",
+  });
+  assert.equal(unicodeEnvelope?.session_title, "交付 计划 Review");
+  assert.deepEqual(queued[1], unicodeEnvelope);
+
+  const pathTitles = [
+    "review(/Users/alice/private)",
+    "review=/Users/alice/private",
+    "review:C:\\private\\project",
+    "review=C:/private/project",
+    "review(\\\\server\\share)",
+    "review|/Users/alice/private",
+    "review-/Users/alice/private",
+    "review\"/Users/alice/private\"",
+    "review,/Users/alice/private",
+    "review./Users/alice/private",
+    "中文\\标题",
+    "中文/标题",
+  ];
+  for (const session_title of pathTitles) {
+    const pathEnvelope = await collector.ingestHook({
+      hook_event_name: "SessionStart",
+      session_id: "s1",
+      session_title,
+    });
+    assert.equal(pathEnvelope?.session_title, undefined, session_title);
+  }
+  const outboxText = JSON.stringify(queued.slice(2));
+  assert.equal((queued.slice(2) as Array<{ session_title?: string }>).every((entry) => entry.session_title === undefined), true);
+  assert.equal(outboxText.includes("/Users/alice/private"), false);
+  assert.equal(outboxText.includes("C:\\private\\project"), false);
+  assert.equal(outboxText.includes("\\\\server\\share"), false);
 });

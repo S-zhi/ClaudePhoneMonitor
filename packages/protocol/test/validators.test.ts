@@ -100,6 +100,19 @@ test("rejects case-insensitive URL and credential-like titles at both wire bound
     "gho_1234567890abcdef",
     "xoxb-1234567890abcdef",
     "sk-1234567890abcdef",
+    "review(/Users/alice/private)",
+    "review=/Users/alice/private",
+    "review:C:\\private\\project",
+    "review=C:/private/project",
+    "review(\\\\server\\share)",
+    "review=/home/alice/private",
+    "review|/Users/alice/private",
+    "review-/Users/alice/private",
+    "review\"/Users/alice/private\"",
+    "review,/Users/alice/private",
+    "review./Users/alice/private",
+    "中文\\标题",
+    "中文/标题",
   ];
   const started = makeEvent(EVENT_TYPES.SESSION_STARTED, {});
   const withSession = (title: string): Snapshot => ({
@@ -117,6 +130,8 @@ test("rejects case-insensitive URL and credential-like titles at both wire bound
     assert.equal(validateSnapshot(withSession(title)).success, false, title);
   }
   assert.equal(validateEventEnvelope({ ...started, session_title: "Release review" }).success, true);
+  assert.equal(validateEventEnvelope({ ...started, session_title: "交付 计划 Review" }).success, true);
+  assert.equal(validateSnapshot(withSession("交付 计划 Review")).success, true);
   assert.equal(validateSnapshot(snapshot).success, true, "legacy snapshot remains valid");
 });
 
