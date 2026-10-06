@@ -4,6 +4,7 @@ import {
   EVENT_PAYLOAD_SCHEMAS,
   PROTOCOL_MESSAGE_SCHEMA,
   SNAPSHOT_SCHEMA,
+  USAGE_AGGREGATE_SCHEMA,
 } from "./schemas.js";
 import type {
   EventEnvelope,
@@ -12,6 +13,8 @@ import type {
   MonitorEventType,
   ProtocolMessage,
   Snapshot,
+  UsageAggregate,
+  UsageSnapshotMessage,
   ValidationIssue,
   ValidationResult,
 } from "./types.js";
@@ -172,8 +175,12 @@ const forbiddenForwardingIssues = (value: unknown, path = "$", seen = new Set<ob
     return issues;
   }
 
+  // `output` is a safe scalar metric only inside the strict UsageAggregate
+  // object. Everywhere else it remains a forbidden content-bearing key.
+  const isUsageAggregate = Object.hasOwn(value, "epoch_id") &&
+    Object.hasOwn(value, "provider_coverage") && Object.hasOwn(value, "cache_hit");
   for (const [key, child] of Object.entries(value)) {
-    if (forbiddenKeys.has(normalizeKey(key))) {
+    if (forbiddenKeys.has(normalizeKey(key)) && !(key === "output" && isUsageAggregate)) {
       issues.push({ path: pathFor(path, key), message: "Claude prompt/tool content cannot cross the protocol boundary" });
       continue;
     }
@@ -198,11 +205,71 @@ export function validateEventEnvelope(value: unknown): ValidationResult<EventEnv
 }
 
 export function validateSnapshot(value: unknown): ValidationResult<Snapshot> {
-  return resultFor<Snapshot>(value, SNAPSHOT_SCHEMA);
+  const result = resultFor<Snapshot>(value, SNAPSHOT_SCHEMA);
+  if (!result.success || result.data.usage === undefined) return result;
+  const usageIssues = validateUsageAggregateIssues(result.data.usage);
+  return usageIssues.length === 0 ? result : { success: false, issues: usageIssues };
+}
+
+/** Validate arithmetic/counter invariants shared by collector and Relay. */
+export function validateUsageAggregate(value: unknown): ValidationResult<UsageAggregate> {
+  const shape = resultFor<UsageAggregate>(value, USAGE_AGGREGATE_SCHEMA);
+  if (!shape.success) return shape;
+  const issues = validateUsageAggregateIssues(shape.data);
+  return issues.length === 0 ? shape : { success: false, issues };
+}
+
+function validateUsageAggregateIssues(usage: UsageAggregate): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const add = (path: string, message: string) => issues.push({ path, message });
+  const claude = usage.provider_coverage.claude;
+  const codex = usage.provider_coverage.codex;
+  const observed = claude.observed_responses + codex.observed_responses;
+  const complete = claude.complete_responses + codex.complete_responses;
+  const allProvidersComplete = claude.status === "ready" && codex.status === "ready" &&
+    claude.complete_responses === claude.observed_responses && codex.complete_responses === codex.observed_responses;
+  if (!Number.isSafeInteger(observed) || observed !== usage.observed_responses) add("$.observed_responses", "must equal provider response counts");
+  if (!Number.isSafeInteger(complete) || complete !== usage.complete_responses) add("$.complete_responses", "must equal provider response counts");
+  if (usage.complete_responses > usage.observed_responses) add("$.complete_responses", "must not exceed observed responses");
+  for (const [key, metric] of Object.entries({
+    new_input: usage.new_input,
+    cached_input: usage.cached_input,
+    output: usage.output,
+    actual: usage.actual,
+    total_input: usage.total_input,
+  })) {
+    if (metric.quality === "complete" && metric.value === null) add(`$.${key}.value`, "complete metric requires a value");
+    if (metric.quality === "complete" && !allProvidersComplete) add(`$.${key}.quality`, "complete metric requires complete provider coverage");
+    if (metric.quality === "partial" && metric.value === null) add(`$.${key}.value`, "partial metric requires a known subtotal");
+    if (metric.quality === "unavailable" && metric.value !== null) add(`$.${key}.value`, "unavailable metric must be null");
+  }
+  for (const [key, provider] of Object.entries({ claude, codex })) {
+    if (provider.complete_responses > provider.observed_responses) add(`$.provider_coverage.${key}.complete_responses`, "must not exceed observed responses");
+  }
+  const allComplete = usage.new_input.quality === "complete" && usage.output.quality === "complete" && usage.cached_input.quality === "complete" && usage.actual.quality === "complete" && usage.total_input.quality === "complete";
+  if (allComplete && usage.actual.value !== usage.new_input.value! + usage.output.value!) add("$.actual.value", "must equal new input plus output when all metrics are complete");
+  if (allComplete && usage.total_input.value !== usage.new_input.value! + usage.cached_input.value!) add("$.total_input.value", "must equal new input plus cached input when all metrics are complete");
+  const hit = usage.cache_hit;
+  if (hit.numerator !== null && hit.denominator !== null && hit.numerator > hit.denominator) add("$.cache_hit.numerator", "must not exceed denominator");
+  if (hit.quality === "unavailable" && (hit.numerator !== null || hit.denominator !== null)) add("$.cache_hit", "unavailable cache hit must not expose a ratio");
+  if (hit.quality === "partial" && hit.numerator === null && hit.denominator === null) add("$.cache_hit", "partial cache hit requires a known component");
+  if (hit.quality === "complete") {
+    if (!allComplete) add("$.cache_hit", "complete cache hit requires all observed metrics to be complete");
+    if (hit.numerator === null || hit.denominator === null || hit.denominator <= 0) add("$.cache_hit", "complete cache hit requires a positive denominator");
+    if (claude.status !== "ready" || codex.status !== "ready" || claude.complete_responses !== claude.observed_responses || codex.complete_responses !== codex.observed_responses) add("$.cache_hit", "complete cache hit requires complete provider coverage");
+    if (usage.cached_input.quality !== "complete" || usage.total_input.quality !== "complete" || hit.numerator !== usage.cached_input.value || hit.denominator !== usage.total_input.value) add("$.cache_hit", "must match complete cache metrics");
+  }
+  return issues;
 }
 
 export function validateProtocolMessage(value: unknown): ValidationResult<ProtocolMessage> {
-  return resultFor<ProtocolMessage>(value, PROTOCOL_MESSAGE_SCHEMA);
+  const result = resultFor<ProtocolMessage>(value, PROTOCOL_MESSAGE_SCHEMA);
+  if (!result.success) return result;
+  if (result.data.type === MESSAGE_TYPES.USAGE_SNAPSHOT) {
+    const issues = validateUsageAggregateIssues(result.data.usage);
+    return issues.length === 0 ? result : { success: false, issues };
+  }
+  return result;
 }
 
 export function validateEventPayload<T extends MonitorEventType>(
@@ -225,6 +292,10 @@ export function isEventEnvelope(value: unknown): value is EventEnvelope {
 
 export function isSnapshot(value: unknown): value is Snapshot {
   return validateSnapshot(value).success;
+}
+
+export function isUsageSnapshotMessage(value: unknown): value is UsageSnapshotMessage {
+  return validateProtocolMessage(value).success && isRecord(value) && value.type === MESSAGE_TYPES.USAGE_SNAPSHOT;
 }
 
 export function isProtocolMessage(value: unknown): value is ProtocolMessage {

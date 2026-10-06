@@ -58,4 +58,16 @@ class MonitorPageTest {
             assertEquals(state, resolveStateChangeAnimationState(uiState))
         }
     }
+
+    @Test
+    fun usageRouteOverridesAnActiveFifteenSecondStateChangeAndReturnRevealsItAgain() {
+        val uiState = MonitorUiState(
+            petState = PetState.WORKING,
+            stateChange = StateChangeUi(PetState.FINISH, 8_000L, "Codex"),
+            usagePageVisible = true,
+        )
+
+        assertEquals(MonitorPage.USAGE, selectMonitorPage(uiState))
+        assertEquals(MonitorPage.STATE_CHANGE, selectMonitorPage(uiState.copy(usagePageVisible = false)))
+    }
 }

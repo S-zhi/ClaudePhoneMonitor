@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
@@ -59,6 +59,29 @@ test("outbox acknowledges by event id or sequence", async () => {
     assert.equal(await outbox.ack("event-a"), true);
     assert.equal(await outbox.ack(11), true);
     assert.equal(await outbox.ack("missing"), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("enqueue persistence failure rolls back memory so the same id and sequence can retry", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "collector-outbox-"));
+  const filePath = join(directory, "outbox.json");
+  try {
+    const outbox = new FileOutbox<{ value: number }>(filePath);
+    assert.equal(await outbox.size(), 0); // Load before inducing a transient rename failure.
+    await mkdir(filePath);
+
+    await assert.rejects(
+      outbox.enqueue({ id: "stable-event", sequence: 7, payload: { value: 3 } }),
+    );
+    assert.deepEqual(await outbox.snapshot(), []);
+
+    await rm(filePath, { recursive: true });
+    const retried = await outbox.enqueue({ id: "stable-event", sequence: 7, payload: { value: 3 } });
+    assert.equal(retried.id, "stable-event");
+    assert.equal(retried.sequence, 7);
+    assert.equal((await outbox.snapshot()).length, 1);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

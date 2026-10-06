@@ -1,6 +1,8 @@
 package com.example.claudephonemonitor.monitor
 
 import androidx.lifecycle.ViewModelStore
+import com.example.claudephonemonitor.ui.MonitorPage
+import com.example.claudephonemonitor.ui.selectMonitorPage
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -392,6 +394,60 @@ class MonitorPresentationStateTest {
     }
 
     @Test
+    fun usageOnlySnapshotRefreshesAuthoritativeValuesWithoutRestartingFinishPrompt() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        kotlinx.coroutines.Dispatchers.setMain(dispatcher)
+        val store = ViewModelStore()
+        try {
+            var monotonicMs = 100L
+            val client = FakeMonitorClient()
+            val vm = MonitorViewModel(client) { monotonicMs }.also { store.put("usage-refresh", it) }
+            runCurrent()
+            client.emit(usageSnapshotJson(sequence = 1, revision = 1))
+            runCurrent()
+
+            client.emit("""{"type":"event","event_type":"task_finished","session_id":"s-1","task_id":"turn-1","sequence":2,"occurred_at":"2026-10-07T01:00:00Z"}""")
+            runCurrent()
+            assertEquals(PetState.FINISH, vm.uiState.value.stateChange?.status)
+            val finishDeadline = monotonicMs + requireNotNull(vm.uiState.value.stateChange).remainingMs
+
+            monotonicMs = 1_000L
+            client.emit(usageSnapshotJson(sequence = 3, revision = 2))
+            runCurrent()
+            assertEquals(2L, vm.uiState.value.snapshot.usage?.revision)
+            assertEquals(PetState.IDLE, vm.uiState.value.petState)
+            assertEquals(PetState.FINISH, vm.uiState.value.stateChange?.status)
+            assertEquals(finishDeadline, monotonicMs + requireNotNull(vm.uiState.value.stateChange).remainingMs)
+
+            vm.showUsagePage()
+            assertEquals(MonitorPage.USAGE, selectMonitorPage(vm.uiState.value))
+            assertEquals(2L, vm.uiState.value.snapshot.usage?.revision)
+
+            vm.showStatusPage()
+            assertEquals(MonitorPage.STATE_CHANGE, selectMonitorPage(vm.uiState.value))
+            assertEquals(PetState.FINISH, vm.uiState.value.stateChange?.status)
+            assertEquals(finishDeadline, monotonicMs + requireNotNull(vm.uiState.value.stateChange).remainingMs)
+            vm.showUsagePage()
+
+            client.disconnect()
+            client.emit("""{"type":"disconnected"}""")
+            runCurrent()
+            assertEquals(false, vm.uiState.value.isConnected)
+            assertEquals(2L, vm.uiState.value.snapshot.usage?.revision)
+            assertEquals(MonitorPage.USAGE, selectMonitorPage(vm.uiState.value))
+
+            vm.showStatusPage()
+            assertEquals(MonitorPage.STATE_CHANGE, selectMonitorPage(vm.uiState.value))
+            assertEquals(PetState.OFFLINE, vm.uiState.value.petState)
+            assertEquals(PetState.OFFLINE, vm.uiState.value.stateChange?.status)
+            assertEquals(15_000L, vm.uiState.value.stateChange?.remainingMs)
+        } finally {
+            store.clear()
+            kotlinx.coroutines.Dispatchers.resetMain()
+        }
+    }
+
+    @Test
     fun oldSequenceAndEqualSnapshotDoNotRestartPrompt() {
         var state = reduce(MonitorPresentationState(), snapshot(8, PetState.IDLE), 0L)
         state = reduce(state, outcome(9, MonitorEventName.TASK_FINISHED), 100L)
@@ -427,6 +483,38 @@ class MonitorPresentationStateTest {
         sessionId = "session",
         taskId = "task",
     )
+
+    private fun usageSnapshotJson(sequence: Long, revision: Long) = """
+        {
+          "type":"snapshot",
+          "sequence":$sequence,
+          "snapshot":{
+            "installation_id":"install",
+            "computer_state":"online",
+            "claude_state":"idle",
+            "last_sequence":$sequence,
+            "updated_at":"2026-10-07T01:00:00Z",
+            "usage":{
+              "epoch_id":"epoch-1",
+              "started_at":"2026-10-07T00:00:00Z",
+              "revision":$revision,
+              "observed_responses":2,
+              "complete_responses":2,
+              "provider_coverage":{
+                "claude":{"status":"ready","observed_responses":1,"complete_responses":1},
+                "codex":{"status":"ready","observed_responses":1,"complete_responses":1}
+              },
+              "new_input":{"value":20,"quality":"complete"},
+              "cached_input":{"value":10,"quality":"complete"},
+              "output":{"value":15,"quality":"complete"},
+              "actual":{"value":35,"quality":"complete"},
+              "total_input":{"value":30,"quality":"complete"},
+              "cache_hit":{"numerator":10,"denominator":30,"quality":"complete"},
+              "quota":{"start_remaining":null,"current_remaining":null,"unit":null,"reset_at":null,"availability":"unavailable"}
+            }
+          }
+        }
+    """.trimIndent()
 
     private class FakeMonitorClient : MonitorClient {
         private val mutableEvents = MutableSharedFlow<MonitorEvent>(extraBufferCapacity = 8)

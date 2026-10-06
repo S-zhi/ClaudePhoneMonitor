@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { InMemoryRelayRepository, SqliteRelayRepository } from "../src/repository.js";
-import type { EventEnvelope } from "../src/types.js";
+import type { EventEnvelope, UsageAggregate, UsageSnapshotMessage } from "../src/types.js";
 
 function event(overrides: Partial<EventEnvelope> = {}): EventEnvelope {
   return {
@@ -22,6 +22,161 @@ function event(overrides: Partial<EventEnvelope> = {}): EventEnvelope {
     ...overrides,
   };
 }
+
+function usageMessage(overrides: Partial<UsageSnapshotMessage> = {}): UsageSnapshotMessage {
+  const usage: UsageAggregate = {
+    epoch_id: "epoch-a",
+    started_at: "2026-10-07T00:00:00.000Z",
+    revision: 1,
+    observed_responses: 2,
+    complete_responses: 2,
+    provider_coverage: {
+      claude: { status: "ready", observed_responses: 1, complete_responses: 1 },
+      codex: { status: "ready", observed_responses: 1, complete_responses: 1 },
+    },
+    new_input: { value: 90, quality: "complete" },
+    cached_input: { value: 10, quality: "complete" },
+    output: { value: 20, quality: "complete" },
+    actual: { value: 110, quality: "complete" },
+    total_input: { value: 100, quality: "complete" },
+    cache_hit: { numerator: 10, denominator: 100, quality: "complete" },
+    quota: { start_remaining: null, current_remaining: null, unit: null, reset_at: null, availability: "unavailable" },
+  };
+  return {
+    type: "usage_snapshot", schema_version: 1, event_id: "usage-1", installation_id: "install-1",
+    sequence: 1, occurred_at: "2026-10-07T00:00:01.000Z", usage, ...overrides,
+  };
+}
+
+test("usage aggregate is installation scoped, revisioned, and durable without session reduction", () => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-usage-revisions-"));
+  const dbPath = join(directory, "relay.sqlite");
+  const memory = new InMemoryRelayRepository();
+  let sqlite: SqliteRelayRepository | undefined;
+  const record = (repository: InMemoryRelayRepository | SqliteRelayRepository, message: UsageSnapshotMessage) =>
+    repository.recordUsageSnapshot(message, "2026-10-07T00:00:01.100Z");
+  try {
+    sqlite = new SqliteRelayRepository(dbPath);
+    for (const repository of [memory, sqlite]) {
+      const first = usageMessage();
+      assert.equal(record(repository, first).changed, true);
+      assert.equal(repository.findEvent("usage-1"), undefined);
+      const state = repository.getInstallationState("install-1");
+      assert.equal(state?.last_sequence, 1);
+      assert.equal(state?.claude_state, "idle");
+      assert.equal(state?.activity, undefined);
+      assert.equal(state?.sessions, undefined);
+
+      assert.equal(record(repository, first).duplicate, true);
+      const oldRevision = usageMessage({ event_id: "usage-older", sequence: 2, usage: { ...first.usage, revision: 0 } });
+      assert.equal(record(repository, oldRevision).changed, false);
+      const sameRevision = usageMessage({ event_id: "usage-same", sequence: 3, usage: { ...first.usage } });
+      assert.equal(record(repository, sameRevision).changed, false);
+      const newEpoch = usageMessage({ event_id: "usage-new-epoch", sequence: 4, usage: { ...first.usage, epoch_id: "epoch-b", revision: 99 } });
+      assert.equal(record(repository, newEpoch).changed, false);
+      const replacement = usageMessage({ event_id: "usage-2", sequence: 5, usage: { ...first.usage, revision: 2, actual: { value: 130, quality: "complete" }, output: { value: 40, quality: "complete" } } });
+      assert.equal(record(repository, replacement).changed, true);
+      assert.equal(repository.getInstallationState("install-1")?.usage?.actual.value, 130);
+      repository.recordEvent(event({ event_id: "state-after-usage", sequence: 6 }), "2026-10-07T00:00:02.000Z");
+      assert.equal(repository.getInstallationState("install-1")?.usage?.revision, 2);
+      assert.equal(repository.getInstallationState("other-install")?.usage, undefined);
+    }
+    sqlite.close();
+    sqlite = new SqliteRelayRepository(dbPath);
+    assert.equal(sqlite.getInstallationState("install-1")?.usage?.revision, 2);
+    assert.equal(sqlite.getInstallationState("install-1")?.claude_state, "idle");
+  } finally {
+    sqlite?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("usage event ID collisions are rejected while sequences and aggregates stay installation scoped", () => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-usage-installations-"));
+  const sqlite = new SqliteRelayRepository(join(directory, "relay.sqlite"));
+  try {
+    const repositories = [new InMemoryRelayRepository(), sqlite];
+    for (const repository of repositories) {
+      const first = usageMessage({ installation_id: "install-a", event_id: "shared-usage-event", sequence: 1 });
+      const collision = usageMessage({
+        installation_id: "install-b",
+        event_id: "shared-usage-event",
+        sequence: 1,
+        usage: { ...usageMessage().usage, epoch_id: "epoch-b", new_input: { value: 91, quality: "complete" }, actual: { value: 111, quality: "complete" }, total_input: { value: 101, quality: "complete" }, cache_hit: { numerator: 10, denominator: 101, quality: "complete" } },
+      });
+      assert.equal(repository.recordUsageSnapshot(first, "2026-10-07T00:00:01.100Z").changed, true);
+      const collisionResult = repository.recordUsageSnapshot(collision, "2026-10-07T00:00:01.200Z");
+      assert.equal(collisionResult.duplicate, false);
+      assert.equal(collisionResult.conflict, true);
+      assert.equal(repository.getInstallationState("install-a")?.usage?.epoch_id, "epoch-a");
+      assert.equal(repository.getInstallationState("install-b")?.usage, undefined);
+
+      const independent = usageMessage({
+        installation_id: "install-b",
+        event_id: "install-b:1",
+        sequence: 1,
+        usage: { ...collision.usage, epoch_id: "epoch-b" },
+      });
+      assert.equal(repository.recordUsageSnapshot(independent, "2026-10-07T00:00:01.300Z").changed, true);
+      assert.equal(repository.getInstallationState("install-a")?.last_sequence, 1);
+      assert.equal(repository.getInstallationState("install-b")?.last_sequence, 1);
+      assert.equal(repository.getInstallationState("install-a")?.usage?.new_input.value, 90);
+      assert.equal(repository.getInstallationState("install-b")?.usage?.new_input.value, 91);
+    }
+  } finally {
+    sqlite.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("late Usage outbox revisions follow epoch revision while shared state cursor never moves backward", () => {
+  const memory = new InMemoryRelayRepository();
+  const sqlite = new SqliteRelayRepository(":memory:");
+  try {
+    for (const repository of [memory, sqlite]) {
+      const status = repository.recordEvent(event({
+        event_id: "status-ahead",
+        sequence: 11,
+        event_type: "task_started",
+        task_id: "task-live",
+      }), "2026-10-07T00:00:11.000Z");
+      assert.equal(status.conflict, false);
+      const activityBefore = repository.getInstallationState("install-1");
+
+      const lateFirst = usageMessage({ event_id: "usage-late-first", sequence: 10 });
+      const firstResult = repository.recordUsageSnapshot(lateFirst, "2026-10-07T00:00:12.000Z");
+      assert.equal(firstResult.duplicate, false);
+      assert.equal(firstResult.conflict, false);
+      assert.equal(firstResult.changed, true);
+      assert.equal(firstResult.sequence_status, "out_of_order");
+      assert.equal(repository.getInstallationState("install-1")?.usage?.revision, 1);
+      assert.equal(repository.getInstallationState("install-1")?.last_sequence, 11);
+
+      const newerLate = usageMessage({
+        event_id: "usage-late-newer",
+        sequence: 9,
+        usage: { ...lateFirst.usage, revision: 2, actual: { value: 120, quality: "complete" }, output: { value: 30, quality: "complete" } },
+      });
+      assert.equal(repository.recordUsageSnapshot(newerLate, "2026-10-07T00:00:13.000Z").changed, true);
+      const staleHighSequence = usageMessage({
+        event_id: "usage-stale-high-sequence",
+        sequence: 12,
+        usage: { ...lateFirst.usage, revision: 1 },
+      });
+      assert.equal(repository.recordUsageSnapshot(staleHighSequence, "2026-10-07T00:00:14.000Z").changed, false);
+
+      const after = repository.getInstallationState("install-1");
+      assert.equal(after?.usage?.revision, 2);
+      assert.equal(after?.usage?.actual.value, 120);
+      assert.equal(after?.last_sequence, 12);
+      assert.equal(after?.claude_state, activityBefore?.claude_state);
+      assert.deepEqual(after?.activity, activityBefore?.activity);
+      assert.equal(after?.recent_completion, activityBefore?.recent_completion);
+    }
+  } finally {
+    sqlite.close();
+  }
+});
 
 test("in-memory repository tracks sequence status and deduplicates event_id", () => {
   const repository = new InMemoryRelayRepository();
@@ -58,6 +213,40 @@ test("in-memory repository tracks sequence status and deduplicates event_id", ()
   assert.equal(duplicate.duplicate, true);
   assert.equal(duplicate.stored.received_at, "2026-10-02T00:00:01.000Z");
   assert.equal(repository.listEventsAfter("install-1", 2).map((item) => item.event.sequence).join(","), "3,4");
+});
+
+test("only exact persisted event identities are duplicate; sequence collisions are rejected", () => {
+  const memory = new InMemoryRelayRepository();
+  const sqlite = new SqliteRelayRepository(":memory:");
+  try {
+    for (const repository of [memory, sqlite]) {
+      const first = event({ installation_id: "install-a", event_id: "event-a-1", sequence: 1 });
+      const accepted = repository.recordEvent(first, "2026-10-07T00:00:01.000Z");
+      assert.equal(accepted.duplicate, false);
+      assert.equal(accepted.conflict, false);
+
+      const retry = repository.recordEvent(first, "2026-10-07T00:00:02.000Z");
+      assert.equal(retry.duplicate, true);
+      assert.equal(retry.conflict, false);
+
+      const collision = repository.recordEvent(
+        event({ installation_id: "install-a", event_id: "event-a-other", sequence: 1, event_type: "task_started" }),
+        "2026-10-07T00:00:03.000Z",
+      );
+      assert.equal(collision.duplicate, false);
+      assert.equal(collision.conflict, true);
+      assert.equal(repository.getInstallationState("install-a")?.activity?.event_type, "session_started");
+
+      const sameSequenceOtherInstall = repository.recordEvent(
+        event({ installation_id: "install-b", event_id: "event-b-1", sequence: 1 }),
+        "2026-10-07T00:00:04.000Z",
+      );
+      assert.equal(sameSequenceOtherInstall.conflict, false);
+      assert.equal(repository.getInstallationState("install-b")?.last_sequence, 1);
+    }
+  } finally {
+    sqlite.close();
+  }
 });
 
 test("connection status transitions from online to stale to offline", () => {

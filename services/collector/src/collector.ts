@@ -1,11 +1,11 @@
 import { eventId, type LocalSequence } from "./sequence.js";
 import { normalizeHookEvent, type NormalizeOptions } from "./normalize.js";
-import type { EventEnvelope, Outbox, NormalizedHookEvent } from "./types.js";
+import type { EventEnvelope, Outbox, NormalizedHookEvent, RelayOutboundMessage } from "./types.js";
 
 export interface CollectorOptions {
   installationId: string;
   sequence: Pick<LocalSequence, "next" | "current">;
-  outbox: Outbox<EventEnvelope>;
+  outbox: Pick<Outbox<RelayOutboundMessage>, "enqueue" | "size">;
   now?: () => Date;
 }
 

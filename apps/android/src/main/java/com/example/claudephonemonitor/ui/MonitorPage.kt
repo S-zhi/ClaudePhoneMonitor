@@ -7,10 +7,13 @@ import com.example.claudephonemonitor.monitor.PetState
 enum class MonitorPage {
     STATUS,
     STATE_CHANGE,
+    USAGE,
 }
 
 internal fun selectMonitorPage(uiState: MonitorUiState): MonitorPage =
-    if (uiState.stateChange?.remainingMs?.let { it > 0L } == true) {
+    if (uiState.usagePageVisible) {
+        MonitorPage.USAGE
+    } else if (uiState.stateChange?.remainingMs?.let { it > 0L } == true) {
         MonitorPage.STATE_CHANGE
     } else {
         MonitorPage.STATUS

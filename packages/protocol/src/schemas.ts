@@ -35,6 +35,7 @@ const wireTimestampSchema: JsonSchema = {
   maxLength: 64,
   format: "date-time",
 };
+const utcTimestampSchema: JsonSchema = { ...wireTimestampSchema, pattern: "Z$" };
 
 const protocolHeader = (type: string): JsonSchema => ({
   type: "object",
@@ -54,6 +55,82 @@ const strictObject = (
   required,
   additionalProperties: false,
 });
+
+const nonNegativeIntegerSchema: JsonSchema = {
+  type: "integer",
+  minimum: 0,
+  maximum: Number.MAX_SAFE_INTEGER,
+};
+const nullableCountSchema: JsonSchema = {
+  oneOf: [nonNegativeIntegerSchema, { type: "null" }],
+};
+const usageMetricSchema: JsonSchema = strictObject(
+  {
+    value: nullableCountSchema,
+    quality: { enum: ["complete", "partial", "unavailable"] },
+  },
+  ["value", "quality"],
+);
+const usageProviderCoverageSchema: JsonSchema = strictObject(
+  {
+    status: { enum: ["ready", "partial", "unavailable"] },
+    observed_responses: nonNegativeIntegerSchema,
+    complete_responses: nonNegativeIntegerSchema,
+  },
+  ["status", "observed_responses", "complete_responses"],
+);
+export const USAGE_AGGREGATE_SCHEMA: JsonSchema = strictObject(
+  {
+    epoch_id: idSchema,
+    started_at: utcTimestampSchema,
+    revision: sequenceSchema,
+    observed_responses: nonNegativeIntegerSchema,
+    complete_responses: nonNegativeIntegerSchema,
+    provider_coverage: strictObject(
+      { claude: usageProviderCoverageSchema, codex: usageProviderCoverageSchema },
+      ["claude", "codex"],
+    ),
+    new_input: usageMetricSchema,
+    cached_input: usageMetricSchema,
+    output: usageMetricSchema,
+    actual: usageMetricSchema,
+    total_input: usageMetricSchema,
+    cache_hit: strictObject(
+      {
+        numerator: nullableCountSchema,
+        denominator: nullableCountSchema,
+        quality: { enum: ["complete", "partial", "unavailable"] },
+      },
+      ["numerator", "denominator", "quality"],
+    ),
+    quota: strictObject(
+      {
+        start_remaining: { type: "null" },
+        current_remaining: { type: "null" },
+        unit: { type: "null" },
+        reset_at: { type: "null" },
+        availability: { const: "unavailable" },
+      },
+      ["start_remaining", "current_remaining", "unit", "reset_at", "availability"],
+    ),
+  },
+  ["epoch_id", "started_at", "revision", "observed_responses", "complete_responses", "provider_coverage", "new_input", "cached_input", "output", "actual", "total_input", "cache_hit", "quota"],
+);
+
+export const USAGE_SNAPSHOT_SCHEMA: JsonSchema = strictObject(
+  {
+    type: { const: MESSAGE_TYPES.USAGE_SNAPSHOT },
+    schema_version: { const: PROTOCOL_VERSION },
+    event_id: idSchema,
+    installation_id: idSchema,
+    sequence: sequenceSchema,
+    occurred_at: wireTimestampSchema,
+    usage: USAGE_AGGREGATE_SCHEMA,
+  },
+  ["type", "schema_version", "event_id", "installation_id", "sequence", "occurred_at", "usage"],
+);
+
+
 
 const payloadSchemas: Record<MonitorEventType, JsonSchema> = {
   [EVENT_TYPES.SESSION_STARTED]: strictObject({}),
@@ -189,6 +266,7 @@ export const SNAPSHOT_SCHEMA: JsonSchema = {
         },
         ["session_id", "sequence", "occurred_at", "display_name"],
       ),
+      usage: USAGE_AGGREGATE_SCHEMA,
       last_sequence: { oneOf: [sequenceSchema, { type: "null" }] },
       updated_at: wireTimestampSchema,
     },
@@ -257,6 +335,7 @@ export const MESSAGE_SCHEMAS: Readonly<Record<string, JsonSchema>> = {
     ),
   },
   [MESSAGE_TYPES.EVENT]: EVENT_ENVELOPE_SCHEMA,
+  [MESSAGE_TYPES.USAGE_SNAPSHOT]: USAGE_SNAPSHOT_SCHEMA,
   [MESSAGE_TYPES.EVENT_ACK]: strictObject(
     {
       type: { const: MESSAGE_TYPES.EVENT_ACK },

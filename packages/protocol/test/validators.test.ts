@@ -9,6 +9,7 @@ import {
   validateEventPayload,
   validateProtocolMessage,
   validateSnapshot,
+  validateUsageAggregate,
   parseProtocolMessage,
   type EventEnvelope,
   type EventPayload,
@@ -46,6 +47,25 @@ const snapshot: Snapshot = {
   updated_at: new Date(400).toISOString(),
 };
 
+const usage = {
+  epoch_id: "epoch-1",
+  started_at: "2026-10-07T00:00:00.000Z",
+  revision: 3,
+  observed_responses: 3,
+  complete_responses: 2,
+  provider_coverage: {
+    claude: { status: "partial" as const, observed_responses: 1, complete_responses: 0 },
+    codex: { status: "ready" as const, observed_responses: 2, complete_responses: 2 },
+  },
+  new_input: { value: 120, quality: "partial" as const },
+  cached_input: { value: 35, quality: "partial" as const },
+  output: { value: 65, quality: "partial" as const },
+  actual: { value: 185, quality: "partial" as const },
+  total_input: { value: 155, quality: "partial" as const },
+  cache_hit: { numerator: 35, denominator: 155, quality: "partial" as const },
+  quota: { start_remaining: null, current_remaining: null, unit: null, reset_at: null, availability: "unavailable" as const },
+};
+
 test("validates canonical event envelopes and snapshots", () => {
   const event = makeEvent(EVENT_TYPES.TOOL_STARTED, { tool_name: "bash" });
   const eventResult = validateEventEnvelope(event);
@@ -54,6 +74,46 @@ test("validates canonical event envelopes and snapshots", () => {
   assert.equal(eventResult.success, true);
   assert.equal(snapshotResult.success, true);
   assert.equal(SNAPSHOT_SCHEMA.type, "object");
+});
+
+test("validates optional Usage snapshot and collector-only absolute message", () => {
+  const extended = { ...snapshot, usage };
+  assert.equal(validateSnapshot(extended).success, true);
+  assert.equal(validateSnapshot({ ...extended, usage: { ...usage, observed_responses: Number.MAX_SAFE_INTEGER + 1 } }).success, false);
+  assert.equal(validateSnapshot({ ...extended, usage: { ...usage, quota: { ...usage.quota, current_remaining: 10 } } }).success, false);
+  assert.equal(validateSnapshot({ ...extended, usage: { ...usage, raw_prompt: "private" } }).success, false);
+
+  const inbound = {
+    type: MESSAGE_TYPES.USAGE_SNAPSHOT,
+    schema_version: PROTOCOL_VERSION,
+    event_id: "installation-1:43",
+    installation_id: "installation-1",
+    sequence: 43,
+    occurred_at: "2026-10-07T00:01:00.000Z",
+    usage,
+  };
+  assert.equal(validateProtocolMessage(inbound).success, true);
+  assert.equal(validateProtocolMessage({ ...inbound, usage: { ...usage, complete_responses: 4 } }).success, false);
+  assert.equal(validateUsageAggregate({ ...usage, actual: { value: 184, quality: "partial" } }).success, true, "partial metrics can describe different observed subsets");
+  const completeUsage = {
+    ...usage,
+    observed_responses: 1,
+    complete_responses: 1,
+    provider_coverage: {
+      claude: { status: "ready" as const, observed_responses: 1, complete_responses: 1 },
+      codex: { status: "ready" as const, observed_responses: 0, complete_responses: 0 },
+    },
+    new_input: { value: 7, quality: "complete" as const },
+    cached_input: { value: 3, quality: "complete" as const },
+    output: { value: 4, quality: "complete" as const },
+    actual: { value: 11, quality: "complete" as const },
+    total_input: { value: 10, quality: "complete" as const },
+    cache_hit: { numerator: 3, denominator: 10, quality: "complete" as const },
+  };
+  assert.equal(validateUsageAggregate(completeUsage).success, true);
+  assert.equal(validateUsageAggregate({ ...completeUsage, actual: { value: 10, quality: "complete" } }).success, false);
+  assert.equal(validateUsageAggregate({ ...completeUsage, complete_responses: 0, provider_coverage: { ...completeUsage.provider_coverage, claude: { status: "partial", observed_responses: 1, complete_responses: 0 } } }).success, false);
+  assert.equal(validateUsageAggregate({ ...completeUsage, output: { value: null, quality: "unavailable" } }).success, false, "cache ratio cannot be complete when another observed response field is unavailable");
 });
 
 test("accepts the optional session contract while keeping its boundaries strict", () => {

@@ -118,6 +118,8 @@ fun MonitorApp() {
                 uiState = uiState,
                 onToggleControls = viewModel::toggleControls,
                 onHideControls = { viewModel.setControlsVisible(false) },
+                onOpenUsage = viewModel::showUsagePage,
+                onReturnToStatus = viewModel::showStatusPage,
                 onReconnect = {
                     client.disconnect()
                     client.connect()
@@ -266,6 +268,8 @@ private fun MonitorScreen(
     uiState: com.example.claudephonemonitor.monitor.MonitorUiState,
     onToggleControls: () -> Unit,
     onHideControls: () -> Unit,
+    onOpenUsage: () -> Unit,
+    onReturnToStatus: () -> Unit,
     onReconnect: () -> Unit,
     onRePair: () -> Unit,
 ) {
@@ -284,7 +288,7 @@ private fun MonitorScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(StageColor)
-            .pointerInput(Unit) { detectTapGestures { onToggleControls() } }
+            .pointerInput(page) { detectTapGestures { if (page != MonitorPage.USAGE) onToggleControls() } }
             .semantics {
                 contentDescription = "Claude phone monitor. Tap anywhere to show or hide controls."
             },
@@ -295,59 +299,70 @@ private fun MonitorScreen(
         ) {
             val compact = maxWidth < 500.dp
             val short = maxHeight < 360.dp
-            Row(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(
-                        start = if (compact) 8.dp else 18.dp,
-                        end = if (compact) 8.dp else 18.dp,
-                        top = 42.dp,
-                        bottom = 12.dp,
-                    ),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                SessionSummaryPanel(
-                    snapshot = uiState.snapshot,
-                    state = displayPetState,
+            if (page == MonitorPage.USAGE) {
+                UsageMonitorScreen(
+                    uiState = uiState,
+                    onReturnToStatus = onReturnToStatus,
                     compact = compact || short,
-                    modifier = Modifier
-                        .weight(if (compact) 0.44f else 1.05f)
-                        .fillMaxHeight(),
+                    modifier = Modifier.fillMaxSize(),
                 )
-                if (page == MonitorPage.STATE_CHANGE && stateChange != null) {
-                    StateChangePanel(
-                        status = stateChange.status,
-                        animationState = resolveStateChangeAnimationState(uiState),
-                        completionName = stateChange.completionName,
-                        runningCount = uiState.snapshot.runningCount,
-                        activity = uiState.activity,
+            } else {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(
+                            start = if (compact) 8.dp else 18.dp,
+                            end = if (compact) 8.dp else 18.dp,
+                            top = 42.dp,
+                            bottom = 12.dp,
+                        ),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    SessionSummaryPanel(
+                        snapshot = uiState.snapshot,
+                        state = displayPetState,
                         compact = compact || short,
                         modifier = Modifier
-                            .weight(if (compact) 0.56f else 1.4f)
+                            .weight(if (compact) 0.44f else 1.05f)
                             .fillMaxHeight(),
                     )
-                } else {
-                    ClawdProceduralView(
-                        state = displayPetState,
-                        activity = uiState.activity,
-                        isSilent = displayPetState == PetState.OFFLINE,
-                        modifier = Modifier
-                            .weight(if (compact) 0.56f else 1.4f)
-                            .fillMaxHeight(),
-                    )
+                    if (page == MonitorPage.STATE_CHANGE && stateChange != null) {
+                        StateChangePanel(
+                            status = stateChange.status,
+                            animationState = resolveStateChangeAnimationState(uiState),
+                            completionName = stateChange.completionName,
+                            runningCount = uiState.snapshot.runningCount,
+                            activity = uiState.activity,
+                            compact = compact || short,
+                            modifier = Modifier
+                                .weight(if (compact) 0.56f else 1.4f)
+                                .fillMaxHeight(),
+                        )
+                    } else {
+                        ClawdProceduralView(
+                            state = displayPetState,
+                            activity = uiState.activity,
+                            isSilent = displayPetState == PetState.OFFLINE,
+                            modifier = Modifier
+                                .weight(if (compact) 0.56f else 1.4f)
+                                .fillMaxHeight(),
+                        )
+                    }
                 }
             }
         }
 
-        RelayIndicator(
-            connected = uiState.isConnected,
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(start = 24.dp, top = 20.dp),
-        )
+        if (page != MonitorPage.USAGE) {
+            RelayIndicator(
+                connected = uiState.isConnected,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 24.dp, top = 20.dp),
+            )
+        }
 
         AnimatedVisibility(
-            visible = controlsReady && uiState.controlsVisible,
+            visible = controlsReady && uiState.controlsVisible && page != MonitorPage.USAGE,
             enter = fadeIn(animationSpec = tween(180)),
             exit = fadeOut(animationSpec = tween(140)),
             modifier = Modifier.align(Alignment.BottomCenter),
@@ -355,6 +370,7 @@ private fun MonitorScreen(
             MonitorControls(
                 onReconnect = onReconnect,
                 onHide = onHideControls,
+                onUsage = onOpenUsage,
                 onRePair = { showRePairConfirmation = true },
             )
         }
@@ -577,6 +593,7 @@ private fun RelayIndicator(connected: Boolean, modifier: Modifier = Modifier) {
 private fun MonitorControls(
     onReconnect: () -> Unit,
     onHide: () -> Unit,
+    onUsage: () -> Unit,
     onRePair: () -> Unit,
 ) {
     Row(
@@ -589,6 +606,7 @@ private fun MonitorControls(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         ControlButton(label = "Reconnect", onClick = onReconnect)
+        ControlButton(label = "Usage", onClick = onUsage, emphasized = true)
         ControlButton(label = "Re-pair", onClick = onRePair, emphasized = true)
         ControlButton(label = "Hide", onClick = onHide)
     }

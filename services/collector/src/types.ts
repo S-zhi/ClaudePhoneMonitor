@@ -133,9 +133,43 @@ export type RelayInboundMessage =
 export type RelayOutboundMessage =
   | HelloMessage
   | EventEnvelope
+  | UsageSnapshotMessage
   | HeartbeatMessage
   | ChallengeAckMessage
   | ProbeMessage;
+
+export type UsageQuality = "complete" | "partial" | "unavailable";
+export type UsageCoverageStatus = "ready" | "partial" | "unavailable";
+export interface UsageMetric { value: number | null; quality: UsageQuality }
+export interface UsageProviderCoverage {
+  status: UsageCoverageStatus;
+  observed_responses: number;
+  complete_responses: number;
+}
+export interface UsageAggregate {
+  epoch_id: string;
+  started_at: string;
+  revision: number;
+  observed_responses: number;
+  complete_responses: number;
+  provider_coverage: { claude: UsageProviderCoverage; codex: UsageProviderCoverage };
+  new_input: UsageMetric;
+  cached_input: UsageMetric;
+  output: UsageMetric;
+  actual: UsageMetric;
+  total_input: UsageMetric;
+  cache_hit: { numerator: number | null; denominator: number | null; quality: UsageQuality };
+  quota: { start_remaining: null; current_remaining: null; unit: null; reset_at: null; availability: "unavailable" };
+}
+export interface UsageSnapshotMessage {
+  type: "usage_snapshot";
+  schema_version: 1;
+  event_id: string;
+  installation_id: string;
+  sequence: number;
+  occurred_at: string;
+  usage: UsageAggregate;
+}
 
 export interface EnqueueInput<T> {
   id?: string;

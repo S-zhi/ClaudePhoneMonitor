@@ -204,6 +204,8 @@ data class MonitorUiState(
     val controlsVisible: Boolean = false,
     val eventCount: Int = 0,
     val completedDisplayName: String? = null,
+    /** Local presentation route; it never changes the server-authoritative monitor snapshot. */
+    val usagePageVisible: Boolean = false,
 )
 
 data class StateChangeUi(
@@ -237,6 +239,8 @@ class MonitorViewModel(
 
     fun toggleControls() { _uiState.update { it.copy(controlsVisible = !it.controlsVisible) } }
     fun setControlsVisible(visible: Boolean) { _uiState.update { it.copy(controlsVisible = visible) } }
+    fun showUsagePage() { _uiState.update { it.copy(usagePageVisible = true, controlsVisible = false) } }
+    fun showStatusPage() { _uiState.update { it.copy(usagePageVisible = false, controlsVisible = false) } }
 
     private fun handleEvent(event: MonitorEvent) {
         val previous = _uiState.value

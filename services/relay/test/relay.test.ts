@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
 
 import { JsonLogger } from "../src/logger.js";
 import { Relay } from "../src/relay.js";
-import type { EventEnvelope, ServerMessage } from "../src/types.js";
+import type { EventEnvelope, ServerMessage, UsageAggregate, UsageSnapshotMessage } from "../src/types.js";
 
 function event(overrides: Partial<EventEnvelope> = {}): EventEnvelope {
   return {
@@ -23,6 +24,153 @@ function event(overrides: Partial<EventEnvelope> = {}): EventEnvelope {
 function messages(): ServerMessage[] {
   return [];
 }
+
+function usageSnapshot(overrides: Partial<UsageSnapshotMessage> = {}): UsageSnapshotMessage {
+  const usage: UsageAggregate = {
+    epoch_id: "synthetic-epoch",
+    started_at: "2026-10-07T00:00:00.000Z",
+    revision: 1,
+    observed_responses: 2,
+    complete_responses: 2,
+    provider_coverage: {
+      claude: { status: "ready", observed_responses: 1, complete_responses: 1 },
+      codex: { status: "ready", observed_responses: 1, complete_responses: 1 },
+    },
+    new_input: { value: 90, quality: "complete" },
+    cached_input: { value: 10, quality: "complete" },
+    output: { value: 20, quality: "complete" },
+    actual: { value: 110, quality: "complete" },
+    total_input: { value: 100, quality: "complete" },
+    cache_hit: { numerator: 10, denominator: 100, quality: "complete" },
+    quota: { start_remaining: null, current_remaining: null, unit: null, reset_at: null, availability: "unavailable" },
+  };
+  return {
+    type: "usage_snapshot", schema_version: 1, event_id: "usage-2", installation_id: "install-1",
+    sequence: 2, occurred_at: "2026-10-07T00:00:01.000Z", usage, ...overrides,
+  };
+}
+
+test("usage snapshot only changes ordinary snapshot data and resume falls back across shared sequence", () => {
+  const relay = new Relay({ autoStart: false, now: () => new Date("2026-10-07T00:00:02.000Z") });
+  const collectorMessages = messages();
+  const phoneMessages = messages();
+  const collector = relay.connect({ gateway: "collector", installation_id: "install-1", transport: { send: (message) => collectorMessages.push(message) } });
+  const phone = relay.connect({ gateway: "android", installation_id: "install-1", transport: { send: (message) => phoneMessages.push(message) } });
+  relay.receive(collector.connection_id, JSON.stringify(event()));
+  const stateBefore = relay.snapshot("install-1");
+  phoneMessages.length = 0;
+  relay.receive(collector.connection_id, JSON.stringify(usageSnapshot()));
+
+  const ack = collectorMessages.filter((message) => message.type === "event_ack").at(-1);
+  assert.ok(ack && ack.type === "event_ack");
+  assert.equal(ack.accepted, true);
+  assert.equal(ack.sequence_status, "in_order");
+  assert.equal(phoneMessages.some((message) => (message as { type?: string }).type === "usage_snapshot"), false);
+  const snapshot = phoneMessages.filter((message) => message.type === "snapshot").at(-1);
+  assert.ok(snapshot && snapshot.type === "snapshot");
+  assert.equal(snapshot.usage?.revision, 1);
+  assert.equal(snapshot.last_sequence, 2);
+  assert.equal(snapshot.claude_state, stateBefore.claude_state);
+  assert.deepEqual(snapshot.activity, stateBefore.activity);
+  assert.equal(relay.repository.findEvent("usage-2"), undefined);
+  const serializedUsage = JSON.stringify(snapshot.usage);
+  for (const privateKey of ["session_id", "response_id", "request_id", "model", "file_path", "prompt", "api_key"]) {
+    assert.equal(serializedUsage.includes(privateKey), false);
+  }
+
+  relay.receive(collector.connection_id, JSON.stringify(usageSnapshot({ event_id: "usage-sequence-collision", sequence: 1 })));
+  const rejectedUsageAck = collectorMessages.filter((message) => message.type === "event_ack").at(-1);
+  assert.ok(rejectedUsageAck && rejectedUsageAck.type === "event_ack");
+  assert.equal(rejectedUsageAck.status, "rejected");
+  assert.equal(rejectedUsageAck.duplicate, false);
+  relay.receive(collector.connection_id, JSON.stringify(event({ event_id: "event-sequence-collision", sequence: 2, event_type: "task_finished" })));
+  const rejectedEventAck = collectorMessages.filter((message) => message.type === "event_ack").at(-1);
+  assert.ok(rejectedEventAck && rejectedEventAck.type === "event_ack");
+  assert.equal(rejectedEventAck.status, "rejected");
+  assert.equal(rejectedEventAck.duplicate, false);
+  assert.equal(relay.snapshot("install-1").usage?.revision, 1);
+
+  relay.receive(collector.connection_id, JSON.stringify(usageSnapshot({
+    event_id: "usage-wrong-installation",
+    installation_id: "install-elsewhere",
+    sequence: 3,
+  })));
+  assert.equal(relay.snapshot("install-elsewhere").usage, undefined);
+  assert.ok(collectorMessages.some((message) => message.type === "error" && message.code === "invalid_usage_snapshot"));
+
+  phoneMessages.length = 0;
+  relay.receive(phone.connection_id, JSON.stringify({ type: "resume", schema_version: 1, installation_id: "install-1", last_sequence: 1 }));
+  assert.equal(phoneMessages.some((message) => message.type === "event"), false);
+  assert.equal(phoneMessages.at(-1)?.type, "snapshot");
+  const wire = phoneMessages.at(-1);
+  assert.ok(wire && wire.type === "snapshot");
+  writeFileSync("/private/tmp/claudephone-issue7-relay-wire.json", `${JSON.stringify(wire, null, 2)}\n`);
+  relay.stop();
+});
+
+test("invalid complete usage algebra and unauthorized gateway are rejected before mutation", () => {
+  const logs: string[] = [];
+  const relay = new Relay({ autoStart: false, logger: new JsonLogger({ sink: (line) => logs.push(line) }) });
+  const collectorMessages = messages();
+  const androidMessages = messages();
+  const collector = relay.connect({ gateway: "collector", installation_id: "install-1", transport: { send: (message) => collectorMessages.push(message) } });
+  const android = relay.connect({ gateway: "android", installation_id: "install-1", transport: { send: (message) => androidMessages.push(message) } });
+  const invalid = usageSnapshot({ usage: {
+    ...usageSnapshot().usage,
+    actual: { value: 109, quality: "complete" },
+    cache_hit: { numerator: null, denominator: null, quality: "unavailable" },
+  } });
+  relay.receive(collector.connection_id, JSON.stringify(invalid));
+  assert.equal(relay.snapshot("install-1").usage, undefined);
+  assert.ok(collectorMessages.some((message) => message.type === "error" && message.code === "invalid_usage_snapshot"));
+  const privateField = usageSnapshot({
+    event_id: "usage-private-field",
+    sequence: 2,
+    usage: { ...usageSnapshot().usage, request_id: "must-not-be-stored" } as UsageAggregate,
+  });
+  relay.receive(collector.connection_id, JSON.stringify(privateField));
+  assert.equal(relay.snapshot("install-1").usage, undefined);
+  assert.equal(logs.some((line) => line.includes("must-not-be-stored")), false);
+  const unsupportedCompleteHit = usageSnapshot({
+    event_id: "usage-false-complete-hit",
+    sequence: 3,
+    usage: {
+      ...usageSnapshot().usage,
+      complete_responses: 1,
+      provider_coverage: {
+        claude: { status: "partial", observed_responses: 1, complete_responses: 0 },
+        codex: { status: "ready", observed_responses: 1, complete_responses: 1 },
+      },
+    },
+  });
+  relay.receive(collector.connection_id, JSON.stringify(unsupportedCompleteHit));
+  assert.equal(relay.snapshot("install-1").usage, undefined);
+  const partial = usageSnapshot({
+    sequence: 4,
+    event_id: "usage-partial",
+    usage: {
+      ...usageSnapshot().usage,
+      observed_responses: 2,
+      complete_responses: 0,
+      provider_coverage: {
+        claude: { status: "partial", observed_responses: 1, complete_responses: 0 },
+        codex: { status: "unavailable", observed_responses: 1, complete_responses: 0 },
+      },
+      new_input: { value: 30, quality: "partial" },
+      cached_input: { value: 20, quality: "partial" },
+      output: { value: 5, quality: "partial" },
+      actual: { value: 99, quality: "partial" },
+      total_input: { value: 800, quality: "partial" },
+      cache_hit: { numerator: 20, denominator: 800, quality: "partial" },
+    },
+  });
+  relay.receive(collector.connection_id, JSON.stringify(partial));
+  assert.equal(relay.snapshot("install-1").usage?.actual.value, 99);
+  relay.receive(android.connection_id, JSON.stringify(usageSnapshot({ sequence: 5, event_id: "phone-usage" })));
+  assert.equal(relay.snapshot("install-1").usage?.epoch_id, "synthetic-epoch");
+  assert.ok(androidMessages.some((message) => message.type === "error" && message.code === "forbidden_gateway"));
+  relay.stop();
+});
 
 test("event ingest returns event_ack and broadcasts the canonical snapshot", () => {
   let nowMs = Date.parse("2026-10-02T00:00:00.000Z");
@@ -386,6 +534,54 @@ test("resume replays stored events after a sequence and then sends a snapshot", 
   const replayed = androidMessages.filter((message) => message.type === "event");
   assert.deepEqual(replayed.map((message) => message.type === "event" && message.sequence), [1, 2]);
   assert.equal(androidMessages.at(-1)?.type, "snapshot");
+});
+
+test("resume replays state events after a Usage sequence and finishes with the authoritative snapshot", () => {
+  const base = Date.parse("2026-10-07T00:00:00.000Z");
+  const relay = new Relay({ autoStart: false, now: () => new Date(base + 4_000) });
+  const collectorMessages = messages();
+  const phoneMessages = messages();
+  const collector = relay.connect({ gateway: "collector", installation_id: "install-1", transport: { send: (message) => collectorMessages.push(message) } });
+  const phone = relay.connect({ gateway: "android", installation_id: "install-1", transport: { send: (message) => phoneMessages.push(message) } });
+
+  relay.receive(collector.connection_id, JSON.stringify(event({
+    event_id: "resume-task-start",
+    sequence: 1,
+    event_type: "task_started",
+    task_id: "task-resume",
+    occurred_at: new Date(base + 1_000).toISOString(),
+  })));
+  relay.receive(collector.connection_id, JSON.stringify(usageSnapshot({
+    event_id: "resume-usage",
+    sequence: 2,
+    occurred_at: new Date(base + 2_000).toISOString(),
+  })));
+  relay.receive(collector.connection_id, JSON.stringify(event({
+    event_id: "resume-task-finish",
+    sequence: 3,
+    event_type: "task_finished",
+    task_id: "task-resume",
+    occurred_at: new Date(base + 3_000).toISOString(),
+  })));
+
+  phoneMessages.length = 0;
+  relay.receive(phone.connection_id, JSON.stringify({
+    type: "resume",
+    schema_version: 1,
+    installation_id: "install-1",
+    last_sequence: 1,
+  }));
+
+  const replayed = phoneMessages.filter((message) => message.type === "event");
+  assert.deepEqual(replayed.map((message) => message.type === "event" ? message.sequence : -1), [3]);
+  assert.equal((replayed[0] as EventEnvelope).event_type, "task_finished");
+  assert.equal(phoneMessages.some((message) => (message as { type?: string }).type === "usage_snapshot"), false);
+  const finalSnapshot = phoneMessages.filter((message) => message.type === "snapshot").at(-1);
+  assert.ok(finalSnapshot && finalSnapshot.type === "snapshot");
+  assert.equal(finalSnapshot.usage?.revision, 1);
+  assert.equal(finalSnapshot.last_sequence, 3);
+  assert.equal(finalSnapshot.recent_completion?.sequence, 3);
+  relay.stop();
 });
 
 test("paired phones receive sanitized live events before snapshots only for their installation", () => {

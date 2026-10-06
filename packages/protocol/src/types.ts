@@ -148,8 +148,64 @@ export interface Snapshot {
   readonly running_count?: number;
   readonly session_count?: number;
   readonly recent_completion?: RecentCompletion;
+  /** Optional server-authoritative Usage aggregate; older clients may ignore it. */
+  readonly usage?: UsageAggregate;
   readonly last_sequence: SequenceNumber | null;
   readonly updated_at: WireTimestamp;
+}
+
+export type UsageQuality = "complete" | "partial" | "unavailable";
+export type UsageCoverageStatus = "ready" | "partial" | "unavailable";
+
+export interface UsageMetric {
+  readonly value: number | null;
+  readonly quality: UsageQuality;
+}
+
+export interface UsageProviderCoverage {
+  readonly status: UsageCoverageStatus;
+  readonly observed_responses: number;
+  readonly complete_responses: number;
+}
+
+export interface UsageAggregate {
+  readonly epoch_id: string;
+  readonly started_at: WireTimestamp;
+  readonly revision: SequenceNumber;
+  readonly observed_responses: number;
+  readonly complete_responses: number;
+  readonly provider_coverage: Readonly<{
+    claude: UsageProviderCoverage;
+    codex: UsageProviderCoverage;
+  }>;
+  readonly new_input: UsageMetric;
+  readonly cached_input: UsageMetric;
+  readonly output: UsageMetric;
+  readonly actual: UsageMetric;
+  readonly total_input: UsageMetric;
+  readonly cache_hit: Readonly<{
+    numerator: number | null;
+    denominator: number | null;
+    quality: UsageQuality;
+  }>;
+  readonly quota: Readonly<{
+    start_remaining: null;
+    current_remaining: null;
+    unit: null;
+    reset_at: null;
+    availability: "unavailable";
+  }>;
+}
+
+/** Collector-only absolute aggregate message. Relay never broadcasts this message. */
+export interface UsageSnapshotMessage {
+  readonly type: typeof MESSAGE_TYPES.USAGE_SNAPSHOT;
+  readonly schema_version: ProtocolVersion;
+  readonly event_id: string;
+  readonly installation_id: string;
+  readonly sequence: SequenceNumber;
+  readonly occurred_at: WireTimestamp;
+  readonly usage: UsageAggregate;
 }
 
 export type MonitorSnapshot = Snapshot;
@@ -260,6 +316,7 @@ export type ProtocolMessage =
   | HeartbeatMessage
   | SubscribeMessage
   | Snapshot
+  | UsageSnapshotMessage
   | ResumeMessage
   | ProbeMessage
   | ChallengeMessage
@@ -269,6 +326,7 @@ export type ProtocolMessage =
 export type ClientMessage =
   | HelloMessage
   | EventMessage
+  | UsageSnapshotMessage
   | SubscribeMessage
   | ResumeMessage
   | ProbeMessage

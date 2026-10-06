@@ -15,7 +15,8 @@ import {
   startCodexWatcher,
   type CodexWatcherHandle,
 } from "./codex-watcher.js";
-import type { EventEnvelope } from "./types.js";
+import type { EventEnvelope, RelayOutboundMessage } from "./types.js";
+import { startUsageWatcher, UsageWatcherStartError, type UsageWatcherHandle } from "./usage-watcher.js";
 
 const DEFAULT_DATA_DIR = join(homedir(), ".claude-phone-monitor");
 const DEFAULT_SOCKET_PATH = join(DEFAULT_DATA_DIR, "collector.sock");
@@ -24,6 +25,7 @@ interface ParsedArgs {
   mode?: "event" | "collector";
   socketPath?: string;
   watchCodex?: boolean;
+  watchUsage?: boolean;
   help?: boolean;
 }
 
@@ -36,6 +38,8 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === "--socket" || arg === "--socket-path") parsed.socketPath = argv[++index];
     else if (arg === "--watch-codex") parsed.watchCodex = true;
     else if (arg === "--no-watch-codex") parsed.watchCodex = false;
+    else if (arg === "--watch-usage") parsed.watchUsage = true;
+    else if (arg === "--no-watch-usage") parsed.watchUsage = false;
     else if (arg === "--help" || arg === "-h") parsed.help = true;
   }
   return parsed;
@@ -43,10 +47,11 @@ function parseArgs(argv: string[]): ParsedArgs {
 
 export interface CollectorRuntime {
   collector: Collector;
-  outbox: FileOutbox<EventEnvelope>;
+  outbox: FileOutbox<RelayOutboundMessage>;
   socket: UnixSocketIngestor;
   relay?: RelayClient;
   codexWatcher?: CodexWatcherHandle;
+  usageWatcher?: UsageWatcherHandle;
   stop(): Promise<void>;
 }
 
@@ -60,6 +65,9 @@ export interface CollectorRuntimeOptions {
   watchCodex?: boolean;
   sessionsRoot?: string;
   checkpointFile?: string;
+  watchUsage?: boolean;
+  claudeProjectsRoot?: string;
+  usageDatabaseFile?: string;
 }
 
 function validInstallationId(value: string | undefined): string | undefined {
@@ -75,7 +83,7 @@ export async function createCollectorRuntime(
   const identity = new InstallationIdentity(join(dataDir, "installation_id"));
   const installationId =
     validInstallationId(options.installationId ?? env.COLLECTOR_INSTALLATION_ID) ?? (await identity.get());
-  const outbox = new FileOutbox<EventEnvelope>(outboxFilePath(dataDir));
+  const outbox = new FileOutbox<RelayOutboundMessage>(outboxFilePath(dataDir));
   const collector = new Collector({ installationId, sequence, outbox });
 
   const relayUrl = options.relayUrl ?? env.COLLECTOR_RELAY_URL;
@@ -130,14 +138,39 @@ export async function createCollectorRuntime(
     }
   }
 
+  let usageWatcher: UsageWatcherHandle | undefined;
+  const watchUsage = options.watchUsage ?? env.COLLECTOR_WATCH_USAGE === "1";
+  if (watchUsage) {
+    try {
+      usageWatcher = await startUsageWatcher({
+        claudeProjectsRoot: options.claudeProjectsRoot ?? env.COLLECTOR_CLAUDE_PROJECTS_DIR ?? join(homedir(), ".claude", "projects"),
+        codexSessionsRoot: options.sessionsRoot ?? env.COLLECTOR_CODEX_SESSIONS_DIR ?? (env.CODEX_HOME ? join(env.CODEX_HOME, "sessions") : join(homedir(), ".codex", "sessions")),
+        databaseFile: options.usageDatabaseFile ?? join(dataDir, "usage.sqlite"),
+        installationId,
+        sequence,
+        outbox,
+        emit: async (message) => {
+          await outbox.enqueue({ id: message.event_id, sequence: message.sequence, payload: message, created_at: message.occurred_at });
+          try { await relay?.flushPending(); } catch { /* The outbox retries network failures on reconnect. */ }
+        },
+      });
+    } catch (error) {
+      usageWatcher = undefined;
+      const code = error instanceof UsageWatcherStartError ? error.code : "usage_watch_start_failed";
+      stderr.write(`${code}\n`);
+    }
+  }
+
   return {
     collector,
     outbox,
     socket,
     relay,
     codexWatcher,
+    usageWatcher,
     async stop() {
       await codexWatcher?.stop();
+      await usageWatcher?.stop();
       relay?.stop();
       await socket.stop();
       await outbox.close();
@@ -148,12 +181,15 @@ export async function createCollectorRuntime(
 export async function runCollector(options: CollectorRuntimeOptions = {}): Promise<void> {
   const runtime = await createCollectorRuntime(options);
   let diagnosticSignature = "";
-  const diagnosticsTimer = runtime.codexWatcher
+  const diagnosticsTimer = runtime.codexWatcher || runtime.usageWatcher
     ? setInterval(() => {
-        const diagnostics = runtime.codexWatcher?.getDiagnostics();
-        if (!diagnostics) return;
+        const codexDiagnostics = runtime.codexWatcher?.getDiagnostics();
+        const usageDiagnostics = runtime.usageWatcher?.getDiagnostics();
         const summary = {
-          codes: diagnostics.codes.filter((code) => /^codex_[a-z_]+$/.test(code)),
+          codes: [
+            ...(codexDiagnostics?.codes.filter((code) => /^codex_[a-z_]+$/.test(code)) ?? []),
+            ...(usageDiagnostics?.codes ?? []),
+          ],
         };
         const signature = JSON.stringify(summary);
         if (signature === diagnosticSignature || summary.codes.length === 0) return;
@@ -186,6 +222,8 @@ export function helpText(): string {
     "  --collector   Run the local socket collector and optional WebSocket relay daemon.",
     "  --watch-codex Also watch local Codex session JSONL files (read-only; no Codex config or hooks are changed).",
     "  --no-watch-codex Disable Codex watching even when COLLECTOR_WATCH_CODEX=1.",
+    "  --watch-usage  Read local Claude/Codex usage transcripts (read-only; opt-in).",
+    "  --no-watch-usage Disable Usage watching even when COLLECTOR_WATCH_USAGE=1.",
     "  --socket PATH Override COLLECTOR_SOCKET_PATH for --event mode.",
   ].join("\n");
 }
@@ -205,7 +243,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return 0;
   }
   if (args.mode === "collector") {
-    await runCollector({ watchCodex: args.watchCodex });
+    await runCollector({ watchCodex: args.watchCodex, watchUsage: args.watchUsage });
     return 0;
   }
   process.stdout.write(`${helpText()}\n`);

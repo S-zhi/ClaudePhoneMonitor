@@ -12,6 +12,7 @@ PAIR=0
 INSTALL_HOOKS=0
 OPEN_QR=0
 WATCH_CODEX="${COLLECTOR_WATCH_CODEX:-0}"
+WATCH_USAGE="${COLLECTOR_WATCH_USAGE:-0}"
 RELAY_PID=""
 COLLECTOR_PID=""
 RELAY_STARTED=0
@@ -28,6 +29,8 @@ Options:
   --install-hooks   merge monitor-owned Claude Code Hooks (real settings change)
   --watch-codex     read local Codex session JSONL and send safe lifecycle metadata
   --no-watch-codex  disable Codex watching even when COLLECTOR_WATCH_CODEX=1
+  --watch-usage     opt into local Claude/Codex usage transcript aggregation
+  --no-watch-usage  disable Usage watching even when COLLECTOR_WATCH_USAGE=1
   --open-qr         open pairing.png in Preview after pairing
   --no-build        do not build relay/collector before starting
   -h, --help        show this help
@@ -40,6 +43,8 @@ while [[ $# -gt 0 ]]; do
     --install-hooks) INSTALL_HOOKS=1; shift ;;
     --watch-codex) WATCH_CODEX=1; shift ;;
     --no-watch-codex) WATCH_CODEX=0; shift ;;
+    --watch-usage) WATCH_USAGE=1; shift ;;
+    --no-watch-usage) WATCH_USAGE=0; shift ;;
     --open-qr) OPEN_QR=1; shift ;;
     --no-build) NO_BUILD=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -149,11 +154,15 @@ COLLECTOR_ARGS=(--collector)
 if [[ "$WATCH_CODEX" == "1" ]]; then
   COLLECTOR_ARGS+=(--watch-codex)
 fi
+if [[ "$WATCH_USAGE" == "1" ]]; then
+  COLLECTOR_ARGS+=(--watch-usage)
+fi
 
 COLLECTOR_RELAY_URL="$COLLECTOR_RELAY_URL" \
 COLLECTOR_RELAY_TOKEN="$COLLECTOR_RELAY_TOKEN" \
 COLLECTOR_INSTALLATION_ID="$COLLECTOR_INSTALLATION_ID" \
   COLLECTOR_WATCH_CODEX="$WATCH_CODEX" \
+  COLLECTOR_WATCH_USAGE="$WATCH_USAGE" \
   COLLECTOR_DATA_DIR="${COLLECTOR_DATA_DIR:-$STATE_DIR}" \
   COLLECTOR_SOCKET_PATH="${COLLECTOR_SOCKET_PATH:-$STATE_DIR/collector.sock}" \
   npm --prefix "$ROOT/services/collector" run start -- "${COLLECTOR_ARGS[@]}" \
@@ -162,6 +171,11 @@ COLLECTOR_PID=$!
 
 if [[ "$OPEN_QR" -eq 1 && -f "$STATE_DIR/pairing.png" ]]; then
   open "$STATE_DIR/pairing.png" >/dev/null 2>&1 || true
+fi
+if [[ "$WATCH_USAGE" == "1" ]]; then
+  printf 'Usage monitoring: enabled (local read-only transcripts; private response ledger)\n'
+else
+  printf 'Usage monitoring: disabled\n'
 fi
 
 printf '\nClaude Phone Monitor is running on the trusted LAN.\n'

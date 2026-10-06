@@ -21,6 +21,8 @@ import {
   type ProbeMessage,
   type ServerMessage,
   type SnapshotMessage,
+  type UsageAggregate,
+  type UsageSnapshotMessage,
   type SubscribeMessage,
   type TokenValidation,
 } from "./types.js";
@@ -206,6 +208,96 @@ function safeSequence(value: unknown): number | undefined {
 
 function messageType(value: unknown): string | undefined {
   return isRecord(value) && typeof value.type === "string" ? value.type : undefined;
+}
+
+function isSafeCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(value).every((key) => keys.includes(key));
+}
+
+function validUsageAggregate(value: unknown): value is UsageAggregate {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    "epoch_id", "started_at", "revision", "observed_responses", "complete_responses",
+    "provider_coverage", "new_input", "cached_input", "output", "actual", "total_input", "cache_hit", "quota",
+  ])) return false;
+  if (
+    typeof value.epoch_id !== "string" || value.epoch_id.trim() === "" || value.epoch_id.length > 256 ||
+    typeof value.started_at !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value.started_at) ||
+      !Number.isFinite(Date.parse(value.started_at)) ||
+    !Number.isSafeInteger(value.revision) || (value.revision as number) < 0 ||
+    !isSafeCount(value.observed_responses) || !isSafeCount(value.complete_responses) || value.complete_responses > value.observed_responses ||
+    !isRecord(value.provider_coverage) || !hasOnlyKeys(value.provider_coverage, ["claude", "codex"]) ||
+    !isRecord(value.cache_hit) || !hasOnlyKeys(value.cache_hit, ["numerator", "denominator", "quality"]) ||
+    !isRecord(value.quota) || !hasOnlyKeys(value.quota, ["start_remaining", "current_remaining", "unit", "reset_at", "availability"])
+  ) return false;
+  const validMetric = (metric: unknown): metric is UsageAggregate["new_input"] => {
+    if (!isRecord(metric) || !hasOnlyKeys(metric, ["value", "quality"])) return false;
+    if (!["complete", "partial", "unavailable"].includes(String(metric.quality))) return false;
+    if (metric.quality === "unavailable") return metric.value === null;
+    if (!isSafeCount(metric.value)) return false;
+    return true;
+  };
+  const validCoverage = (coverage: unknown): coverage is UsageAggregate["provider_coverage"]["claude"] => {
+    if (!isRecord(coverage) || !hasOnlyKeys(coverage, ["status", "observed_responses", "complete_responses"])) return false;
+    return ["ready", "partial", "unavailable"].includes(String(coverage.status)) &&
+      isSafeCount(coverage.observed_responses) && isSafeCount(coverage.complete_responses) &&
+      coverage.complete_responses <= coverage.observed_responses;
+  };
+  const providerCoverage = value.provider_coverage;
+  if (!validCoverage(providerCoverage.claude) || !validCoverage(providerCoverage.codex)) return false;
+  const claude = providerCoverage.claude;
+  const codex = providerCoverage.codex;
+  const combinedObserved = claude.observed_responses + codex.observed_responses;
+  const combinedComplete = claude.complete_responses + codex.complete_responses;
+  if (
+    !Number.isSafeInteger(combinedObserved) || !Number.isSafeInteger(combinedComplete) ||
+    combinedObserved !== value.observed_responses || combinedComplete !== value.complete_responses
+  ) return false;
+  const metricKeys = ["new_input", "cached_input", "output", "actual", "total_input"] as const;
+  if (!metricKeys.every((key) => validMetric(value[key]))) return false;
+  const aggregate = value as unknown as UsageAggregate;
+  const cacheHit = value.cache_hit;
+  if (
+    !["complete", "partial", "unavailable"].includes(String(cacheHit.quality)) ||
+    !(cacheHit.numerator === null || isSafeCount(cacheHit.numerator)) ||
+    !(cacheHit.denominator === null || isSafeCount(cacheHit.denominator)) ||
+    (cacheHit.quality === "unavailable" && (cacheHit.numerator !== null || cacheHit.denominator !== null)) ||
+    (cacheHit.quality === "partial" && cacheHit.numerator === null && cacheHit.denominator === null) ||
+    (cacheHit.quality === "complete" && (!isSafeCount(cacheHit.numerator) || !isSafeCount(cacheHit.denominator) || cacheHit.denominator <= 0)) ||
+    (cacheHit.numerator !== null && cacheHit.denominator !== null && cacheHit.numerator > cacheHit.denominator)
+  ) return false;
+  const quota = value.quota;
+  if (
+    quota.start_remaining !== null || quota.current_remaining !== null || quota.unit !== null ||
+    quota.reset_at !== null || quota.availability !== "unavailable"
+  ) return false;
+  const metrics = metricKeys.map((key) => aggregate[key]);
+  const providersComplete = claude.status === "ready" && codex.status === "ready" &&
+    claude.complete_responses === claude.observed_responses && codex.complete_responses === codex.observed_responses;
+  if (metrics.some((metric) => metric.quality === "complete") && !providersComplete) return false;
+  const allMetricsComplete = metrics.every((metric) => metric.quality === "complete");
+  if (allMetricsComplete) {
+    const newInput = aggregate.new_input.value;
+    const cached = aggregate.cached_input.value;
+    const output = aggregate.output.value;
+    const actual = aggregate.actual.value;
+    const total = aggregate.total_input.value;
+    if ([newInput, cached, output, actual, total].some((n) => n === null)) return false;
+    const actualSum = (newInput as number) + (output as number);
+    const totalSum = (newInput as number) + (cached as number);
+    if (!Number.isSafeInteger(actualSum) || !Number.isSafeInteger(totalSum) || actual !== actualSum || total !== totalSum) return false;
+  }
+  if (cacheHit.quality === "complete") {
+    if (cacheHit.denominator === null || cacheHit.denominator <= 0 ||
+      cacheHit.numerator !== aggregate.cached_input.value || cacheHit.denominator !== aggregate.total_input.value ||
+      aggregate.cached_input.quality !== "complete" || aggregate.total_input.quality !== "complete" ||
+      !providersComplete) return false;
+  }
+  return true;
 }
 
 export class Relay {
@@ -420,6 +512,9 @@ export class Relay {
       case "event":
         this.handleEvent(connectionId, parsed);
         return;
+      case "usage_snapshot":
+        this.handleUsageSnapshot(connectionId, parsed);
+        return;
       case "heartbeat":
         this.handleHeartbeat(connectionId, parsed);
         return;
@@ -501,6 +596,7 @@ export class Relay {
       ...(state?.running_count !== undefined ? { running_count: state.running_count } : {}),
       ...(state?.session_count !== undefined ? { session_count: state.session_count } : {}),
       ...(state?.recent_completion ? { recent_completion: state.recent_completion } : {}),
+      ...(state?.usage ? { usage: state.usage } : {}),
     };
   }
 
@@ -779,13 +875,14 @@ export class Relay {
       schema_version: RELAY_SCHEMA_VERSION,
       event_id: safeEvent.event_id,
       sequence: safeEvent.sequence,
-      accepted: !result.duplicate,
+      accepted: !result.duplicate && !result.conflict,
       duplicate: result.duplicate,
-      status: result.duplicate ? "duplicate" : "accepted",
+      status: result.conflict ? "rejected" : result.duplicate ? "duplicate" : "accepted",
       sequence_status: result.sequence_status,
       last_sequence: result.last_sequence,
       next_sequence: result.next_sequence,
       received_at: result.stored.received_at,
+      ...(result.conflict ? { error: "event identity or sequence conflict" } : {}),
     };
     this.send(connectionId, ack);
     this.logger.info("event_received", {
@@ -795,10 +892,60 @@ export class Relay {
       sequence_status: result.sequence_status,
       duplicate: result.duplicate,
     });
-    if (!result.duplicate) {
+    if (!result.duplicate && !result.conflict) {
       this.broadcastEventForInstallation(result.stored.event);
       this.broadcastSnapshotsForInstallation(safeEvent.installation_id);
     }
+  }
+
+  private handleUsageSnapshot(connectionId: string, message: Record<string, unknown>): void {
+    const connection = this.connections.get(connectionId);
+    if (!connection || !this.requireAuthenticated(connectionId)) return;
+    if (connection.gateway !== "collector") {
+      this.sendError(connectionId, "forbidden_gateway", "only collectors may ingest usage snapshots");
+      return;
+    }
+    const usageMessage = this.parseUsageSnapshot(message);
+    if (!usageMessage) {
+      const eventId = optionalString(message.event_id, 256);
+      if (eventId) this.sendRejectedEventAck(connectionId, eventId, "invalid usage snapshot", safeSequence(message.sequence) ?? 0);
+      this.sendError(connectionId, "invalid_usage_snapshot", "invalid usage snapshot envelope");
+      return;
+    }
+    const connectionRecord = this.repository.getConnection(connectionId);
+    if (connectionRecord?.installation_id && connectionRecord.installation_id !== usageMessage.installation_id) {
+      this.sendRejectedEventAck(connectionId, usageMessage.event_id, "installation mismatch", usageMessage.sequence);
+      this.sendError(connectionId, "invalid_usage_snapshot", "installation does not match hello");
+      return;
+    }
+    if (!connectionRecord?.installation_id) {
+      this.repository.updateConnectionIdentity(connectionId, { installation_id: usageMessage.installation_id });
+    }
+
+    this.probeStaleInstallations.delete(usageMessage.installation_id);
+    const result = this.repository.recordUsageSnapshot(usageMessage, this.now().toISOString());
+    this.send(connectionId, {
+      type: "event_ack",
+      schema_version: RELAY_SCHEMA_VERSION,
+      event_id: usageMessage.event_id,
+      sequence: usageMessage.sequence,
+      accepted: !result.duplicate && !result.conflict,
+      duplicate: result.duplicate,
+      status: result.conflict ? "rejected" : result.duplicate ? "duplicate" : "accepted",
+      sequence_status: result.sequence_status,
+      last_sequence: result.last_sequence,
+      next_sequence: result.next_sequence,
+      received_at: this.now().toISOString(),
+      ...(result.conflict ? { error: "event identity or sequence conflict" } : {}),
+    });
+    this.logger.info("usage_snapshot_received", {
+      gateway: connection.gateway,
+      sequence: usageMessage.sequence,
+      sequence_status: result.sequence_status,
+      duplicate: result.duplicate,
+      changed: result.changed,
+    });
+    if (!result.conflict && !result.duplicate && result.changed) this.broadcastSnapshotsForInstallation(usageMessage.installation_id);
   }
 
   private handleHeartbeat(connectionId: string, message: Record<string, unknown>): void {
@@ -1157,6 +1304,33 @@ export class Relay {
       event_type: eventType,
       payload: message.payload,
       ...(correlationId ? { correlation_id: correlationId } : {}),
+    };
+  }
+
+  private parseUsageSnapshot(message: Record<string, unknown>): UsageSnapshotMessage | undefined {
+    const sequence = safeSequence(message.sequence);
+    const eventId = nonEmptyString(message.event_id, 256);
+    const installationId = nonEmptyString(message.installation_id, 256);
+    const occurredAt = nonEmptyString(message.occurred_at, 64);
+    if (
+      message.type !== "usage_snapshot" ||
+      !hasOnlyKeys(message, ["type", "schema_version", "event_id", "installation_id", "sequence", "occurred_at", "usage"]) ||
+      message.schema_version !== RELAY_SCHEMA_VERSION ||
+      sequence === undefined ||
+      !eventId ||
+      !installationId ||
+      !occurredAt ||
+      Number.isNaN(Date.parse(occurredAt)) ||
+      !validUsageAggregate(message.usage)
+    ) return undefined;
+    return {
+      type: "usage_snapshot",
+      schema_version: RELAY_SCHEMA_VERSION,
+      event_id: eventId,
+      installation_id: installationId,
+      sequence,
+      occurred_at: occurredAt,
+      usage: message.usage,
     };
   }
 
