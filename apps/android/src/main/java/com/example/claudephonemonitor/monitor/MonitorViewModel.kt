@@ -20,6 +20,8 @@ internal data class MonitorPresentationState(
     val overlayDeadlineMs: Long? = null,
     val activeStateLabel: String? = null,
     val stateLabelDeadlineMs: Long? = null,
+    val lastCompletionIdentity: String? = null,
+    val workingSessionIds: Set<String>? = null,
 )
 
 internal data class MonitorPresentationReduction(
@@ -52,7 +54,19 @@ internal object MonitorPresentationReducer {
         val outcomeState = event.outcomeState()
         val baseState = when {
             event.type == MonitorEventType.DISCONNECTED -> PetState.OFFLINE
-            outcomeState != null -> PetState.IDLE
+            // A new snapshot's aggregate state covers every active session, while the list only
+            // contains the Top 5. Keep aggregate Working until Relay's next authoritative snapshot
+            // settles whether the completion ended the final running session.
+            outcomeState != null && current.baseState == PetState.WORKING &&
+                current.workingSessionIds != null -> {
+                PetState.WORKING
+            }
+            outcomeState != null && current.baseState == PetState.OFFLINE -> {
+                PetState.OFFLINE
+            }
+            outcomeState != null -> {
+                PetState.IDLE
+            }
             event.snapshot != null || event.type == MonitorEventType.SNAPSHOT ||
                 event.type == MonitorEventType.PROBE_RESULT -> event.snapshot?.toPetState() ?: current.baseState
             event.type == MonitorEventType.EVENT && event.name != MonitorEventName.UNKNOWN ->
@@ -85,6 +99,11 @@ internal object MonitorPresentationReducer {
                 overlayDeadlineMs = nextOverlayDeadlineMs,
                 activeStateLabel = nextLabel,
                 stateLabelDeadlineMs = nextLabelDeadlineMs,
+                lastCompletionIdentity = event.completionIdentity() ?: current.lastCompletionIdentity,
+                workingSessionIds = event.snapshot?.let { snapshot ->
+                    snapshot.sessions?.filter { it.claudeState == ClaudeState.WORKING }
+                        ?.mapTo(linkedSetOf()) { it.sessionId }
+                } ?: if (event.snapshot != null) null else current.workingSessionIds,
             ),
             accepted = true,
         )
@@ -105,16 +124,17 @@ internal object MonitorPresentationReducer {
 
     fun effectivePetState(state: MonitorPresentationState, nowMs: Long): PetState {
         val current = expire(state, nowMs)
-        return if (current.baseState == PetState.OFFLINE) {
-            PetState.OFFLINE
-        } else {
-            current.overlayState ?: current.baseState
+        return when (current.baseState) {
+            PetState.OFFLINE, PetState.WORKING -> current.baseState
+            else -> current.overlayState ?: current.baseState
         }
     }
 
     fun visibleOverlayState(state: MonitorPresentationState, nowMs: Long): PetState? {
         val current = expire(state, nowMs)
-        return current.overlayState.takeUnless { current.baseState == PetState.OFFLINE }
+        return current.overlayState.takeUnless {
+            current.baseState == PetState.OFFLINE || current.baseState == PetState.WORKING
+        }
     }
 
     fun overlayRemainingMs(state: MonitorPresentationState, nowMs: Long): Long =
@@ -137,6 +157,13 @@ internal object MonitorPresentationReducer {
         else -> null
     }
 
+    private fun MonitorEvent.completionIdentity(): String? {
+        if (type != MonitorEventType.EVENT || name != MonitorEventName.TASK_FINISHED) return null
+        val resolvedSessionId = sessionId ?: return null
+        val resolvedSequence = sequence ?: return null
+        return "$resolvedSessionId|${taskId.orEmpty()}|$resolvedSequence"
+    }
+
     private fun PetState.overlayDurationMs(): Long = when (this) {
         PetState.FINISH -> FINISH_DURATION_MS
         PetState.ERROR -> ERROR_DURATION_MS
@@ -154,6 +181,7 @@ data class MonitorUiState(
     val overlayState: PetState? = null,
     val overlayRemainingMs: Long = 0L,
     val eventCount: Int = 0,
+    val completedDisplayName: String? = null,
 )
 
 class MonitorViewModel(
@@ -225,13 +253,31 @@ class MonitorViewModel(
             activity = activityFromEvent ?: previous.snapshot.activity,
             updatedAt = event.updatedAt.ifBlank { previous.snapshot.updatedAt },
         )
+        val completion = when {
+            incomingSnapshot?.recentCompletion != null -> incomingSnapshot.recentCompletion
+            event.type == MonitorEventType.EVENT && event.name == MonitorEventName.TASK_FINISHED &&
+                reduction.state.lastCompletionIdentity != previous.snapshot.recentCompletion?.identity -> {
+                val id = event.sessionId
+                val sequence = event.sequence
+                if (id != null && sequence != null) RecentCompletion(
+                    sessionId = id,
+                    taskId = event.taskId,
+                    sequence = sequence,
+                    occurredAt = event.occurredAt.ifBlank { event.updatedAt },
+                    displayName = event.sessionTitle ?: "未命名会话已完成",
+                ) else null
+            }
+            incomingSnapshot != null -> null
+            else -> previous.snapshot.recentCompletion
+        }
+        val presentationSnapshot = nextSnapshot.copy(recentCompletion = completion)
         val activity = (activityFromEvent ?: nextSnapshot.activity ?: event.name.wireValue)
             .toActivityVariation()
         val detail = event.detail.ifBlank { defaultMessage(event, nextSnapshot) }
         val visibleOverlay = MonitorPresentationReducer.visibleOverlayState(presentationState, nowMs)
         _uiState.update {
             it.copy(
-                snapshot = nextSnapshot,
+                snapshot = presentationSnapshot,
                 petState = MonitorPresentationReducer.effectivePetState(presentationState, nowMs),
                 activity = activity,
                 message = detail,
@@ -293,9 +339,10 @@ class MonitorViewModel(
 
 private fun MonitorSnapshot.toPetState(): PetState = when {
     computerState == ComputerState.OFFLINE -> PetState.OFFLINE
+    sessions?.any { it.claudeState == ClaudeState.WORKING } == true -> PetState.WORKING
+    claudeState == ClaudeState.WORKING -> PetState.WORKING
     computerState == ComputerState.STALE -> PetState.WAITING
     claudeState == ClaudeState.WAITING -> PetState.WAITING
-    claudeState == ClaudeState.WORKING -> PetState.WORKING
     else -> PetState.IDLE
 }
 

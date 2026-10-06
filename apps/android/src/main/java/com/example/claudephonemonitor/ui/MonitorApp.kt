@@ -2,10 +2,8 @@ package com.example.claudephonemonitor.ui
 
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -49,6 +47,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModelProvider
@@ -64,7 +63,6 @@ import com.example.claudephonemonitor.monitor.PetState
 import com.example.claudephonemonitor.monitor.WebSocketMonitorClient
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private val StageColor = Color(0xFF1B1816)
@@ -269,8 +267,6 @@ private fun MonitorScreen(
     onReconnect: () -> Unit,
     onRePair: () -> Unit,
 ) {
-    var previousPetState by remember { mutableStateOf(uiState.petState) }
-    var transitionState by remember { mutableStateOf<PetState?>(null) }
     var showRePairConfirmation by remember { mutableStateOf(false) }
     var controlsReady by remember { mutableStateOf(!uiState.controlsVisible) }
 
@@ -278,38 +274,11 @@ private fun MonitorScreen(
         if (!uiState.controlsVisible) controlsReady = true
     }
 
-    LaunchedEffect(uiState.petState, uiState.overlayState) {
-        val changed = previousPetState != uiState.petState
-        previousPetState = uiState.petState
-
-        val outcomeIsActive = uiState.overlayRemainingMs > 0L &&
-            (uiState.overlayState == PetState.FINISH || uiState.overlayState == PetState.ERROR)
-        if (outcomeIsActive) {
-            transitionState = null
-            return@LaunchedEffect
-        }
-        if (!changed) return@LaunchedEffect
-
-        val nextState = uiState.petState
-        transitionState = nextState
-        delay(2_500L)
-        if (transitionState == nextState) transitionState = null
-    }
-
-    val outcomeState = uiState.overlayState?.takeIf {
-        uiState.overlayRemainingMs > 0L && it in setOf(PetState.FINISH, PetState.ERROR)
-    }
-    val editorialState = outcomeState ?: transitionState
-    val displayPetState = outcomeState ?: uiState.petState
-    val displayActivity = when (outcomeState) {
-        PetState.FINISH -> ActivityVariation.CELEBRATE
-        PetState.ERROR -> ActivityVariation.ALERT
+    val displayPetState = uiState.petState
+    val displayActivity = when {
+        uiState.overlayState == PetState.ERROR && uiState.overlayRemainingMs > 0L -> ActivityVariation.ALERT
+        uiState.overlayState == PetState.FINISH && uiState.overlayRemainingMs > 0L && displayPetState != PetState.WORKING -> ActivityVariation.CELEBRATE
         else -> uiState.activity
-    }
-    val labelColor = when (editorialState) {
-        PetState.ERROR -> AlertColor
-        PetState.FINISH -> TerracottaColor
-        else -> InkColor
     }
 
     Box(
@@ -321,80 +290,43 @@ private fun MonitorScreen(
                 contentDescription = "Claude phone monitor. Tap anywhere to show or hide controls."
             },
     ) {
-        AnimatedContent(
-            targetState = editorialState,
-            transitionSpec = {
-                fadeIn(animationSpec = tween(280)) togetherWith fadeOut(animationSpec = tween(180))
-            },
-            label = "clawd-editorial-state",
-        ) { displayedState ->
-            if (displayedState == null) {
-                ClawdProceduralView(
-                    state = displayPetState,
-                        activity = displayActivity,
-                        isSilent = displayPetState == PetState.OFFLINE,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                )
-            } else {
-                Row(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 28.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 18.dp, vertical = 12.dp),
+        ) {
+            if (maxWidth < 500.dp) {
+                Column(
+                    modifier = Modifier.fillMaxSize().padding(top = 30.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    Column(
-                        modifier = Modifier
-                            .weight(0.9f)
-                            .padding(start = 16.dp, end = 4.dp),
-                        verticalArrangement = Arrangement.spacedBy(11.dp),
-                    ) {
-                        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                            val title = displayedState.title
-                            val glyphCount = title.length.coerceAtLeast(1)
-                            val pixelGap = 1.dp
-                            val charSpacing = 1
-                            val horizontalStepsBeforeLastPixel =
-                                (glyphCount - 1) * (5 + charSpacing) + 4
-                            val pixelSize = (
-                                (maxWidth - pixelGap * horizontalStepsBeforeLastPixel.toFloat()) /
-                                    (horizontalStepsBeforeLastPixel + 1).toFloat()
-                                ).coerceIn(1.dp, 12.dp)
-
-                            LargePixelText(
-                                text = title,
-                                color = labelColor,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(pixelSize * 7f + pixelGap * 6f),
-                                pixelSize = pixelSize,
-                                gap = pixelGap,
-                                charSpacing = charSpacing,
-                            )
-                        }
-                        Text(
-                            text = when (displayedState) {
-                                PetState.IDLE -> "AT REST"
-                                PetState.WORKING -> "IN PROGRESS"
-                                PetState.WAITING -> "AWAITING INPUT"
-                                PetState.FINISH -> "TASK COMPLETE"
-                                PetState.ERROR -> "NEEDS ATTENTION"
-                                PetState.OFFLINE -> "MAC OFFLINE"
-                            },
-                            color = MutedInkColor,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                            letterSpacing = 1.4.sp,
-                        )
-                    }
+                    SessionSummaryPanel(
+                        snapshot = uiState.snapshot,
+                        state = displayPetState,
+                        modifier = Modifier.fillMaxWidth().weight(0.8f),
+                    )
                     ClawdProceduralView(
                         state = displayPetState,
                         activity = displayActivity,
                         isSilent = displayPetState == PetState.OFFLINE,
-                        modifier = Modifier
-                            .weight(1.35f)
-                            .fillMaxHeight(),
+                        modifier = Modifier.fillMaxWidth().weight(1.2f),
+                    )
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxSize().padding(top = 30.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    SessionSummaryPanel(
+                        snapshot = uiState.snapshot,
+                        state = displayPetState,
+                        modifier = Modifier.weight(1.05f).fillMaxHeight(),
+                    )
+                    ClawdProceduralView(
+                        state = displayPetState,
+                        activity = displayActivity,
+                        isSilent = displayPetState == PetState.OFFLINE,
+                        modifier = Modifier.weight(1.4f).fillMaxHeight(),
                     )
                 }
             }
@@ -449,6 +381,93 @@ private fun MonitorScreen(
             titleContentColor = InkColor,
             textContentColor = MutedInkColor,
         )
+    }
+}
+
+@Composable
+private fun SessionSummaryPanel(
+    snapshot: com.example.claudephonemonitor.monitor.MonitorSnapshot,
+    state: PetState,
+    modifier: Modifier = Modifier,
+) {
+    val stateLabel = when (state) {
+        PetState.IDLE -> "空闲"
+        PetState.WORKING -> "运行中"
+        PetState.WAITING -> "等待输入"
+        PetState.FINISH -> "已完成"
+        PetState.ERROR -> "需要处理"
+        PetState.OFFLINE -> "离线"
+    }
+    Column(
+        modifier = modifier.padding(start = 8.dp, end = 6.dp, top = 4.dp, bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        Text(
+            text = state.title,
+            color = when (state) {
+                PetState.WORKING -> Color(0xFF8DE6A8)
+                PetState.ERROR -> AlertColor
+                else -> InkColor
+            },
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.2.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(stateLabel, color = MutedInkColor, fontSize = 12.sp, letterSpacing = 0.7.sp)
+
+        val sessions = snapshot.sessions
+        if (sessions != null) {
+            Text(
+                text = "运行中 ${snapshot.runningCount?.toString() ?: "—"} · 会话 ${snapshot.sessionCount?.toString() ?: "—"}",
+                color = TerracottaColor,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            sessions.take(5).forEach { session ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = session.title,
+                        color = InkColor,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        text = when (session.claudeState) {
+                            com.example.claudephonemonitor.monitor.ClaudeState.IDLE -> "空闲"
+                            com.example.claudephonemonitor.monitor.ClaudeState.WORKING -> "运行中"
+                            com.example.claudephonemonitor.monitor.ClaudeState.WAITING -> "等待"
+                        },
+                        color = when (session.claudeState) {
+                            com.example.claudephonemonitor.monitor.ClaudeState.WORKING -> Color(0xFF8DE6A8)
+                            com.example.claudephonemonitor.monitor.ClaudeState.WAITING -> Color(0xFFF6C76D)
+                            else -> MutedInkColor
+                        },
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
+
+        snapshot.recentCompletion?.let { completion ->
+            Text(
+                text = "已完成：${completion.displayName}",
+                color = TerracottaColor,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 

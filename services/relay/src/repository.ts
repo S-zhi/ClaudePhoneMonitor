@@ -10,6 +10,8 @@ import type {
   DeviceTokenRecord,
   EventEnvelope,
   InstallationState,
+  SessionSummary,
+  RecentCompletion,
   PairingCreateInput,
   PairingRecord,
   SequenceStatus,
@@ -64,7 +66,7 @@ export interface RelayRepository {
   recordEvent(event: EventEnvelope, receivedAt: string): RecordEventResult;
   listEventsAfter(installationId: string, sequence: number): StoredEvent[];
   listInstallationIds(): string[];
-  getInstallationState(installationId: string): InstallationState | undefined;
+  getInstallationState(installationId: string, now?: string): InstallationState | undefined;
 
   createPairing(
     now: string,
@@ -87,6 +89,140 @@ export interface RelayRepository {
   /** A stable label used by health/readiness reporting. */
   readonly storageKind?: "memory" | "sqlite";
   close?(): void;
+}
+
+interface SessionState {
+  installation_id: string;
+  session_id: string;
+  title?: string;
+  claude_state: ClaudeState;
+  last_sequence: number;
+  last_activity_at: string;
+  updated_at: string;
+  task_id?: string;
+  ended: boolean;
+  completion?: RecentCompletion;
+}
+
+const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
+const COMPLETION_TTL_MS = 5_000;
+
+function applySessionEvent(
+  previous: SessionState | undefined,
+  event: EventEnvelope,
+): SessionState | undefined {
+  if (event.session_id === "unknown") return previous;
+  if (
+    previous &&
+    (event.sequence <= previous.last_sequence ||
+      (previous.ended && event.event_type !== "session_started"))
+  ) {
+    return previous;
+  }
+  const next: SessionState = previous ? { ...previous } : {
+    installation_id: event.installation_id,
+    session_id: event.session_id,
+    claude_state: "idle",
+    last_sequence: -1,
+    last_activity_at: event.occurred_at,
+    updated_at: event.occurred_at,
+    ended: false,
+  };
+  next.last_sequence = event.sequence;
+  next.updated_at = event.occurred_at;
+  next.last_activity_at = event.occurred_at;
+  if (event.event_type === "session_started" && event.session_title) next.title = event.session_title;
+  switch (event.event_type) {
+    case "session_started":
+      next.claude_state = "idle";
+      next.ended = false;
+      next.task_id = undefined;
+      next.completion = undefined;
+      break;
+    case "task_started":
+      next.claude_state = "working";
+      next.task_id = event.task_id;
+      next.completion = undefined;
+      break;
+    case "tool_started":
+      if (event.task_id && next.task_id && event.task_id !== next.task_id) break;
+      next.claude_state = "working";
+      break;
+    case "waiting":
+      next.claude_state = "waiting";
+      break;
+    case "tool_finished":
+      if (event.task_id && next.task_id && event.task_id !== next.task_id) break;
+      next.claude_state = "working";
+      break;
+    case "task_finished":
+    case "task_failed": {
+      const staleTaskFinish = Boolean(
+        event.task_id && next.task_id && event.task_id !== next.task_id,
+      );
+      if (!staleTaskFinish) {
+        next.claude_state = "idle";
+        next.task_id = undefined;
+        if (event.event_type === "task_finished") {
+          next.completion = {
+            session_id: event.session_id,
+            ...(event.task_id ? { task_id: event.task_id } : {}),
+            sequence: event.sequence,
+            occurred_at: event.occurred_at,
+            display_name: next.title ?? "未命名会话已完成",
+          };
+        } else {
+          next.completion = undefined;
+        }
+      }
+      break;
+    }
+    case "session_ended":
+      next.ended = true;
+      next.claude_state = "idle";
+      break;
+    case "tool_failed":
+      if (event.task_id && next.task_id && event.task_id !== next.task_id) break;
+      next.claude_state = "idle";
+      break;
+  }
+  return next;
+}
+
+function aggregatedState(
+  records: SessionState[],
+  now: string,
+): Pick<
+  InstallationState,
+  "claude_state" | "sessions" | "running_count" | "session_count" | "recent_completion"
+> {
+  const nowMs = Date.parse(now);
+  const active = records.filter((record) => !record.ended && nowMs - Date.parse(record.last_activity_at) < SESSION_TTL_MS);
+  const ordered = active.sort((a, b) =>
+    b.last_sequence - a.last_sequence ||
+    (a.session_id < b.session_id ? -1 : a.session_id > b.session_id ? 1 : 0),
+  );
+  const working = active.some((record) => record.claude_state === "working");
+  const mostRecent = ordered[0];
+  const completion = records
+    .map((record) => record.completion)
+    .filter(
+      (item): item is RecentCompletion =>
+        item !== undefined && nowMs - Date.parse(item.occurred_at) <= COMPLETION_TTL_MS,
+    )
+    .sort((a, b) => b.sequence - a.sequence)[0];
+  return {
+    claude_state: working ? "working" : mostRecent?.claude_state ?? "idle",
+    sessions: ordered.slice(0, 5).map((record) => ({
+      session_id: record.session_id,
+      title: record.title ?? `会话 ${record.session_id.slice(-4)}`,
+      claude_state: record.claude_state,
+      last_activity_sequence: record.last_sequence,
+    })),
+    running_count: active.filter((record) => record.claude_state === "working").length,
+    session_count: active.length,
+    ...(completion ? { recent_completion: completion } : {}),
+  };
 }
 
 export function hashOpaqueToken(token: string): string {
@@ -173,6 +309,7 @@ export class InMemoryRelayRepository implements RelayRepository {
   private readonly eventOrder: string[] = [];
   private readonly eventsByInstallation = new Map<string, StoredEvent[]>();
   private readonly installations = new Map<string, InstallationState>();
+  private readonly sessions = new Map<string, SessionState>();
   private readonly pairings = new Map<string, PairingRecord>();
   private readonly deviceTokens = new Map<string, DeviceTokenRecord>();
   private readonly maxStoredEvents: number;
@@ -324,6 +461,10 @@ export class InMemoryRelayRepository implements RelayRepository {
             updated_at: event.occurred_at,
           };
     this.installations.set(event.installation_id, nextState);
+    const sessionKey = `${event.installation_id}\u0000${event.session_id}`;
+    const priorSession = this.sessions.get(sessionKey);
+    const updatedSession = applySessionEvent(priorSession, event);
+    if (updatedSession) this.sessions.set(sessionKey, updatedSession);
     this.pruneEvents();
 
     return {
@@ -353,9 +494,11 @@ export class InMemoryRelayRepository implements RelayRepository {
     return [...ids].sort();
   }
 
-  getInstallationState(installationId: string): InstallationState | undefined {
+  getInstallationState(installationId: string, now = new Date().toISOString()): InstallationState | undefined {
     const state = this.installations.get(installationId);
-    return state ? clone(state) : undefined;
+    if (!state) return undefined;
+    const records = [...this.sessions.values()].filter((record) => record.installation_id === installationId);
+    return clone(records.length ? { ...state, ...aggregatedState(records, now) } : state);
   }
 
   createPairing(now: string, ttlMs: number, input?: PairingCreateInput): PairingRecord {
@@ -538,6 +681,12 @@ export class SqliteRelayRepository implements RelayRepository {
         activity_json TEXT,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS relay_sessions (
+        installation_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        session_json TEXT NOT NULL,
+        PRIMARY KEY (installation_id, session_id)
+      );
       CREATE TABLE IF NOT EXISTS relay_pairings (
         pairing_id TEXT PRIMARY KEY,
         code TEXT NOT NULL,
@@ -568,6 +717,37 @@ export class SqliteRelayRepository implements RelayRepository {
       CREATE INDEX IF NOT EXISTS relay_device_tokens_lookup
         ON relay_device_tokens (role, token_hash);
     `);
+    this.migrateSessionState();
+  }
+
+  private migrateSessionState(): void {
+    const existing = this.db.prepare("SELECT 1 FROM relay_sessions LIMIT 1").get();
+    if (existing) return;
+    const rows = this.db
+      .prepare("SELECT event_json FROM relay_events ORDER BY installation_id, sequence")
+      .all() as SqlRow[];
+    if (rows.length === 0) return;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const sessions = new Map<string, SessionState>();
+      for (const row of rows) {
+        const event = optionalJson<EventEnvelope>(row.event_json);
+        if (!event) continue;
+        const key = `${event.installation_id}\u0000${event.session_id}`;
+        const updated = applySessionEvent(sessions.get(key), event);
+        if (updated) sessions.set(key, updated);
+      }
+      const insert = this.db.prepare(
+        "INSERT INTO relay_sessions (installation_id, session_id, session_json) VALUES (?, ?, ?)",
+      );
+      for (const state of sessions.values()) {
+        insert.run(state.installation_id, state.session_id, JSON.stringify(state));
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   close(): void {
@@ -715,9 +895,12 @@ export class SqliteRelayRepository implements RelayRepository {
             },
             updated_at: event.occurred_at,
           };
-
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const sessionRow = this.db
+        .prepare("SELECT session_json FROM relay_sessions WHERE installation_id = ? AND session_id = ?")
+        .get(event.installation_id, event.session_id) as SqlRow | undefined;
+      const updatedSession = applySessionEvent(optionalJson<SessionState>(sessionRow?.session_json), event);
       this.db
         .prepare(
           "INSERT INTO relay_events (event_id, installation_id, sequence, event_json, received_at) VALUES (?, ?, ?, ?, ?)",
@@ -746,6 +929,12 @@ export class SqliteRelayRepository implements RelayRepository {
           nextState.activity ? JSON.stringify(nextState.activity) : null,
           nextState.updated_at,
         );
+      if (updatedSession) {
+        this.db.prepare(
+          `INSERT INTO relay_sessions (installation_id, session_id, session_json) VALUES (?, ?, ?)
+           ON CONFLICT(installation_id, session_id) DO UPDATE SET session_json = excluded.session_json`,
+        ).run(event.installation_id, event.session_id, JSON.stringify(updatedSession));
+      }
       this.pruneEvents();
       this.db.exec("COMMIT");
     } catch (error) {
@@ -793,7 +982,7 @@ export class SqliteRelayRepository implements RelayRepository {
     return [...ids].sort();
   }
 
-  getInstallationState(installationId: string): InstallationState | undefined {
+  getInstallationState(installationId: string, now = new Date().toISOString()): InstallationState | undefined {
     const row = this.db
       .prepare("SELECT * FROM relay_installations WHERE installation_id = ?")
       .get(installationId) as SqlRow | undefined;
@@ -809,7 +998,7 @@ export class SqliteRelayRepository implements RelayRepository {
     ) {
       return undefined;
     }
-    return {
+    const state: InstallationState = {
       installation_id: installationId,
       last_sequence: lastSequence,
       claude_state: claudeState as ClaudeState,
@@ -818,6 +1007,11 @@ export class SqliteRelayRepository implements RelayRepository {
         : {}),
       updated_at: updatedAt,
     };
+    const sessionRows = this.db
+      .prepare("SELECT session_json FROM relay_sessions WHERE installation_id = ?")
+      .all(installationId) as SqlRow[];
+    const sessions = sessionRows.map((sessionRow) => optionalJson<SessionState>(sessionRow.session_json)).filter((item): item is SessionState => Boolean(item));
+    return sessions.length ? { ...state, ...aggregatedState(sessions, now) } : state;
   }
 
   createPairing(now: string, ttlMs: number, input?: PairingCreateInput): PairingRecord {

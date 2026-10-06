@@ -19,6 +19,15 @@ const sequenceSchema: JsonSchema = {
   maximum: Number.MAX_SAFE_INTEGER,
 };
 
+const safeTitleSchema: JsonSchema = {
+  type: "string",
+  minLength: 1,
+  maxLength: 64,
+  // No control characters, URLs, absolute paths, or credential assignments.
+  pattern: "^(?!.*(?:[Hh][Tt][Tt][Pp][Ss]?://|(?:^|\\s)(?:/|\\\\|~[/\\\\]|[A-Za-z]:[/\\\\])|(?:[Aa][Pp][Ii][- _]?[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn])\\s*[:=]|[Bb][Ee][Aa][Rr][Ee][Rr]\\s+[A-Za-z0-9_-]{16,}|(?:[Ss][Kk]-|[Gg][Hh][Pp]_|[Gg][Hh][Oo]_|[Gg][Ii][Tt][Hh][Uu][Bb]_[Pp][Aa][Tt]_|[Xx][Oo][Xx][BbAaPpRrSs]-)[A-Za-z0-9_-]{8,}))[^\\u0000-\\u001F\\u007F]+$",
+};
+const identifiedSessionIdSchema: JsonSchema = { ...idSchema, pattern: "^(?!unknown$).+" };
+
 const wireTimestampSchema: JsonSchema = {
   type: "string",
   minLength: 1,
@@ -90,6 +99,7 @@ const eventProperties = (
   installation_id: idSchema,
   session_id: idSchema,
   task_id: idSchema,
+  ...(eventType === EVENT_TYPES.SESSION_STARTED ? { session_title: safeTitleSchema } : {}),
   sequence: sequenceSchema,
   occurred_at: wireTimestampSchema,
   event_type: { const: eventType },
@@ -153,6 +163,31 @@ export const SNAPSHOT_SCHEMA: JsonSchema = {
           ),
         ],
       },
+      sessions: {
+        type: "array",
+        maxItems: 5,
+        items: strictObject(
+          {
+            session_id: identifiedSessionIdSchema,
+            title: safeTitleSchema,
+            claude_state: { enum: ["idle", "working", "waiting"] },
+            last_activity_sequence: sequenceSchema,
+          },
+          ["session_id", "title", "claude_state", "last_activity_sequence"],
+        ),
+      },
+      running_count: sequenceSchema,
+      session_count: sequenceSchema,
+      recent_completion: strictObject(
+        {
+          session_id: identifiedSessionIdSchema,
+          task_id: idSchema,
+          sequence: sequenceSchema,
+          occurred_at: wireTimestampSchema,
+          display_name: safeTitleSchema,
+        },
+        ["session_id", "sequence", "occurred_at", "display_name"],
+      ),
       last_sequence: { oneOf: [sequenceSchema, { type: "null" }] },
       updated_at: wireTimestampSchema,
     },

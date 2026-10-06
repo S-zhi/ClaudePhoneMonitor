@@ -59,6 +59,8 @@ const SAFE_TOOL_NAMES = new Map<string, string>([
 const EVENT_TYPE_SET = new Set<string>(EVENT_TYPES);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SENSITIVE_ID = /(?:^|[-_.:])(secret|token|password|api[_-]?key|authorization)(?:$|[-_.:])/i;
+const SENSITIVE_TITLE = /(?:api[_ -]?key|token|secret|password|authorization)\s*[:=]|\bbearer\s+[A-Za-z0-9_-]{16,}|\b(?:sk-|ghp_|gho_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{8,}/i;
+const UNSAFE_TITLE_PATH_OR_URL = /https?:\/\/|(?:^|\s)(?:\/|\\\\|~[\\/]|[A-Za-z]:[\\/])/i;
 const SAFE_NONCE = /^[A-Za-z0-9._:-]{1,256}$/;
 const MAX_DURATION_MS = 24 * 60 * 60 * 1000;
 const MIN_TIMESTAMP_MS = Date.UTC(2000, 0, 1);
@@ -86,6 +88,16 @@ function getString(record: Record<string, unknown>, ...keys: string[]): string |
 function safeIdentifier(value: unknown): string | undefined {
   if (typeof value !== "string" || !SAFE_ID.test(value) || SENSITIVE_ID.test(value)) return undefined;
   return value;
+}
+
+function safeSessionTitle(value: unknown): string | undefined {
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/.test(value)) return undefined;
+  const title = value.trim().replace(/\s+/g, " ");
+  if (
+    title.length < 1 || title.length > 64 ||
+    UNSAFE_TITLE_PATH_OR_URL.test(title) || SENSITIVE_TITLE.test(title)
+  ) return undefined;
+  return title;
 }
 
 function safeNumber(
@@ -204,7 +216,13 @@ export function normalizeHookEvent(
 
   const now = currentDate(options);
   const rawSessionId = getString(record, "session_id", "sessionId");
-  const taskId = safeIdentifier(getString(record, "task_id", "taskId"));
+  const taskId = safeIdentifier(getString(record, "task_id", "taskId"))
+    ?? safeIdentifier(getString(record, "prompt_id", "promptId"));
+  // Claude only documents session_title on SessionStart. Other hook metadata
+  // and user content are deliberately not considered as title sources.
+  const sessionTitle = eventType === "session_started"
+    ? safeSessionTitle(getString(record, "session_title", "sessionTitle"))
+    : undefined;
   const correlationId = safeIdentifier(
     getString(record, "correlation_id", "correlationId", "tool_use_id", "toolUseId"),
   );
@@ -250,6 +268,7 @@ export function normalizeHookEvent(
     event_type: eventType,
     session_id: safeSession,
     ...(taskId ? { task_id: taskId } : {}),
+    ...(sessionTitle ? { session_title: sessionTitle } : {}),
     occurred_at: safeOccurredAt(record, now),
     payload,
     ...(correlationId ? { correlation_id: correlationId } : {}),

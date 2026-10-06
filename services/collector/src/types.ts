@@ -33,6 +33,7 @@ export interface EventEnvelope {
   installation_id: string;
   session_id: string;
   task_id?: string;
+  session_title?: string;
   sequence: number;
   occurred_at: string;
   event_type: EventType;
@@ -167,6 +168,7 @@ export interface NormalizedHookEvent {
   event_type: EventType;
   session_id: string;
   task_id?: string;
+  session_title?: string;
   occurred_at: string;
   payload: SafeEventPayload;
   correlation_id?: string;

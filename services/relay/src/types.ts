@@ -28,6 +28,7 @@ export interface EventEnvelope {
   event_id: string;
   installation_id: string;
   session_id: string;
+  session_title?: string;
   task_id?: string;
   sequence: number;
   occurred_at: string;
@@ -48,6 +49,21 @@ export interface SnapshotActivity {
   occurred_at: string;
 }
 
+export interface SessionSummary {
+  session_id: string;
+  title: string;
+  claude_state: ClaudeState;
+  last_activity_sequence: number;
+}
+
+export interface RecentCompletion {
+  session_id: string;
+  task_id?: string;
+  sequence: number;
+  occurred_at: string;
+  display_name: string;
+}
+
 export interface SnapshotMessage {
   type: "snapshot";
   schema_version: typeof RELAY_SCHEMA_VERSION;
@@ -57,6 +73,10 @@ export interface SnapshotMessage {
   activity?: string | SnapshotActivity;
   last_sequence: number | null;
   updated_at: string;
+  sessions?: SessionSummary[];
+  running_count?: number;
+  session_count?: number;
+  recent_completion?: RecentCompletion;
 }
 
 export interface HelloMessage {
@@ -220,6 +240,10 @@ export interface InstallationState {
   claude_state: ClaudeState;
   activity?: SnapshotActivity;
   updated_at: string;
+  sessions?: SessionSummary[];
+  running_count?: number;
+  session_count?: number;
+  recent_completion?: RecentCompletion;
 }
 
 export interface PairingRecord {

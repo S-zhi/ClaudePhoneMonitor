@@ -33,4 +33,4 @@ The exact launchd template is in `launchd/com.claude.phone-monitor.collector.pli
 
 ## Privacy boundary
 
-The normalizer is an allowlist. It retains only canonical lifecycle metadata, safe tool names, bounded duration/exit code, waiting reason, safe IDs, and timestamps. Prompt text, tool input/result, command arguments, paths, stdout/stderr, secrets and unknown fields are discarded before the local outbox.
+The normalizer is an allowlist. It retains only canonical lifecycle metadata, safe tool names, bounded duration/exit code, waiting reason, safe IDs, and timestamps. On `SessionStart`, it may also retain Claude's explicit `session_title` after rejecting paths, URLs, control characters, credential-like values, and titles longer than 64 characters. `prompt_id` is used as `task_id` only when an explicit `task_id` is absent. Prompt text, assistant messages, tool input/result, command arguments, paths, stdout/stderr, secrets and unknown fields are discarded before the local outbox.

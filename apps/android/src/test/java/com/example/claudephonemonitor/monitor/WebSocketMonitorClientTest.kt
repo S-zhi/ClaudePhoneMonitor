@@ -97,7 +97,7 @@ class WebSocketMonitorClientTest {
 
     private fun newClient(factory: WebSocket.Factory): WebSocketMonitorClient =
         WebSocketMonitorClient(
-            endpoint = "ws://example.test/monitor",
+            endpoint = "ws://example.test/ws/android",
             installationId = "install-1",
             token = "token",
             webSocketFactory = factory,
@@ -156,7 +156,7 @@ class WebSocketMonitorClientTest {
 
         override fun send(bytes: okio.ByteString): Boolean = true
 
-        override fun close(code: Int, reason: String): Boolean {
+        override fun close(code: Int, reason: String?): Boolean {
             closeCalls += 1
             return true
         }
