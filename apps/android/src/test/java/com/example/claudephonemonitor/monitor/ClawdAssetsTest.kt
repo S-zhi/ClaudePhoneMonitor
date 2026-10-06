@@ -8,9 +8,12 @@ import com.example.claudephonemonitor.ui.PixelFont
 import com.example.claudephonemonitor.ui.calculateClawdGridLayout
 import com.example.claudephonemonitor.ui.resolveClawdAnimation
 import com.example.claudephonemonitor.ui.resolveClawdPose
+import com.example.claudephonemonitor.ui.resolvePixelColor
+import androidx.compose.ui.graphics.Color
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -23,6 +26,7 @@ class ClawdAssetsTest {
 
         val spriteSets = listOf(
             ClawdSpriteData.STILL_POSES to ClawdSpriteData.STILL_SEQUENCE,
+            ClawdSpriteData.TYPING_POSES to ClawdSpriteData.TYPING_SEQUENCE,
             ClawdSpriteData.WALK_POSES to ClawdSpriteData.WALK_SEQUENCE,
             ClawdSpriteData.CRAB_POSES to ClawdSpriteData.CRAB_SEQUENCE,
             ClawdSpriteData.WAVE_POSES to ClawdSpriteData.WAVE_SEQUENCE,
@@ -38,7 +42,7 @@ class ClawdAssetsTest {
                 assertEquals("Frame $setIndex/$poseIndex row count", ClawdSpriteData.ROWS, frame.size)
                 frame.forEachIndexed { rowIndex, row ->
                     assertTrue("Frame $setIndex/$poseIndex/$rowIndex exceeds the 28-cell POINT width", row.length <= 28)
-                    assertTrue("Frame $setIndex/$poseIndex/$rowIndex contains an unknown pixel", row.all { it in ".ODBW" })
+                    assertTrue("Frame $setIndex/$poseIndex/$rowIndex contains an unknown pixel", row.all { it in ".ODBWHKL" })
                 }
             }
             sequence.forEachIndexed { sequenceIndex, poseIndex ->
@@ -50,7 +54,28 @@ class ClawdAssetsTest {
         }
 
         assertEquals(24, ClawdSpriteData.STILL_POSES.single().maxOf(String::length))
+        assertEquals(28, ClawdSpriteData.TYPING_POSES.first().maxOf(String::length))
         assertEquals(28, ClawdSpriteData.POINT_POSES.maxOf { frame -> frame.maxOf(String::length) })
+        assertNotEquals(ClawdSpriteData.TYPING_POSES[0][16], ClawdSpriteData.TYPING_POSES[1][16])
+        assertTrue(ClawdSpriteData.TYPING_POSES.all { it[16].contains('H') })
+        assertEquals('H', ClawdSpriteData.TYPING_POSES[0][14][9])
+        assertEquals('H', ClawdSpriteData.TYPING_POSES[0][16][18])
+        assertEquals('H', ClawdSpriteData.TYPING_POSES[1][14][18])
+        assertEquals('H', ClawdSpriteData.TYPING_POSES[1][16][9])
+        assertEquals(
+            ClawdSpriteData.TYPING_POSES[0].mapIndexed { row, pixels ->
+                pixels.replace('H', if (row == 14) 'K' else 'L')
+            },
+            ClawdSpriteData.TYPING_POSES[1].mapIndexed { row, pixels ->
+                pixels.replace('H', if (row == 14) 'K' else 'L')
+            },
+        )
+        assertEquals(ClawdSpriteData.TYPING_POSES[0].drop(18), ClawdSpriteData.TYPING_POSES[1].drop(18))
+        assertEquals("BB", ClawdSpriteData.TYPING_POSES[0][8].substring(10, 12))
+        assertEquals('B', ClawdSpriteData.TYPING_POSES[0][9][12])
+        assertEquals('B', ClawdSpriteData.TYPING_POSES[0][11][12])
+        assertEquals('B', ClawdSpriteData.TYPING_POSES[0][11][15])
+        assertEquals(320, resolveClawdAnimation(PetState.WORKING, ActivityVariation.TOOL).frameDurationMs)
     }
 
     @Test
@@ -94,8 +119,9 @@ class ClawdAssetsTest {
         assertSame(ClawdSpriteData.STILL_POSES, idle.poses)
 
         val working = resolveClawdAnimation(PetState.WORKING, ActivityVariation.TOOL)
-        assertEquals(ClawdFrameSet.CRAB, working.frameSet)
-        assertSame(ClawdSpriteData.CRAB_POSES, working.poses)
+        assertEquals(ClawdFrameSet.TYPING, working.frameSet)
+        assertSame(ClawdSpriteData.TYPING_POSES, working.poses)
+        assertEquals(320, working.frameDurationMs)
 
         val waiting = resolveClawdAnimation(PetState.WAITING, ActivityVariation.THINK)
         assertEquals(ClawdFrameSet.POINT, waiting.frameSet)
@@ -111,20 +137,38 @@ class ClawdAssetsTest {
 
         val alert = resolveClawdAnimation(PetState.ERROR, ActivityVariation.ALERT)
         assertEquals(ClawdFrameSet.ALERT, alert.frameSet)
-        assertSame("Error keeps the same Clawd body frames as working", working.poses, alert.poses)
-        assertSame(working.sequence, alert.sequence)
+        assertSame(ClawdSpriteData.CRAB_POSES, alert.poses)
+        assertSame(ClawdSpriteData.CRAB_SEQUENCE, alert.sequence)
 
         val offline = resolveClawdAnimation(PetState.OFFLINE, ActivityVariation.BREATH)
         assertEquals(ClawdFrameSet.STILL, offline.frameSet)
         assertSame(ClawdSpriteData.STILL_POSES, offline.poses)
         assertSame(offline.poses, resolveClawdAnimation(PetState.WORKING, ActivityVariation.TOOL, isSilent = true).poses)
 
-        listOf(working, waiting, dancing, jumping, alert).forEach { animation ->
+        listOf(waiting, dancing, jumping, alert).forEach { animation ->
             assertTrue(
                 "${animation.frameSet} frame interval must stay between 85 and 100 ms",
                 animation.frameDurationMs in 85..100,
             )
         }
+    }
+
+    @Test
+    fun typingRendererUsesStableLaptopAndAlternatingHandsWithDedicatedColors() {
+        assertEquals(2, ClawdSpriteData.TYPING_POSES.size)
+        ClawdSpriteData.TYPING_POSES.forEach { frame ->
+            assertEquals(22, frame.size)
+            assertTrue(frame.all { it.length == 28 })
+            assertTrue(frame.flattenPixels().all { it in ".ODBWHKL" })
+            assertTrue(frame.joinToString().contains('L'))
+            assertTrue(frame.joinToString().contains('K'))
+        }
+        assertNotEquals(ClawdSpriteData.TYPING_POSES[0][14], ClawdSpriteData.TYPING_POSES[1][14])
+        assertNotEquals(ClawdSpriteData.TYPING_POSES[0][16], ClawdSpriteData.TYPING_POSES[1][16])
+        assertEquals(ClawdSpriteData.TYPING_POSES[0].drop(18), ClawdSpriteData.TYPING_POSES[1].drop(18))
+        assertEquals(Color(0xFFE89A72), resolvePixelColor('H', false, PetState.WORKING))
+        assertEquals(Color(0xFF74808B), resolvePixelColor('L', false, PetState.WORKING))
+        assertEquals(Color(0xFF454D56), resolvePixelColor('K', false, PetState.WORKING))
     }
 
     @Test
@@ -157,3 +201,5 @@ class ClawdAssetsTest {
         }
     }
 }
+
+private fun List<String>.flattenPixels(): String = joinToString(separator = "")

@@ -118,8 +118,10 @@ apps/android/build/outputs/apk/debug/android-debug.apk
 - 隐藏系统栏；
 - 使用 `update_clawd_assets` 分支提供的 Clawd 帧矩阵作为主角，Compose Canvas 原生渲染；
 - 横屏沉浸式暖炭黑舞台，待机居中，状态变化短暂以大字和 Clawd 分屏展示；
-- `FINISH` overlay 5 秒；
-- `ERROR` overlay 10 秒；
+- 有意义的状态变化与任务结果显示 15 秒改变状态页，倒计时由单调时钟截止；重复事件、心跳及同状态工具事件不会重置计时；
+- 连接后常态展示状态页；真实状态变化或任务结果会切换到改变状态页 15 秒，然后回到最新状态页；
+- 多会话中单个任务完成时保留全局 `WORKING` 聚合状态，同时显示该任务的 `FINISH` 提示与完成会话名称；
+- `WORKING` 使用 Clawd 坐在灰色笔记本电脑后打字的动作；
 - 首次启动 QR 配对页；
 - Android Keystore 加密保存令牌；
 - 真实 WebSocket snapshot/event；
@@ -162,7 +164,7 @@ scripts/start-lan-monitor.sh
 - LAN MVP 的 `ws://` 未加密，只能运行在可信局域网；生产公网需要 WSS/TLS。
 - FCM 后台推送尚未接入，前台 WebSocket 已可用。
 - 真实 Claude Hook payload 仍需针对目标 Claude Code 版本做脱敏 fixture 验证；未知字段会被忽略。
-- 当前没有连接 Android 真机，APK 已完成构建和 JVM 单元测试，但还未执行 `adb install` 和真机扫码联调。
+- 本轮明确跳过 Android 真机验收；设备上的 Compose 页面选择和 15 秒可见时长仍待后续录屏复验。JVM 测试验证 wire JSON、fake client、ViewModel 状态流及纯页面选择逻辑，不代表真机验收。
 
 ## 目录
 

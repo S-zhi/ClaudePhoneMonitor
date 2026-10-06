@@ -87,7 +87,11 @@ fun ClawdProceduralView(
         val spriteWidth = layout.width.toFloat()
         val spriteHeight = layout.height.toFloat()
         val isStill = animation.frameSet == ClawdFrameSet.STILL
-        val bobY = sin(breathPhase.toDouble()).toFloat() * tile * if (isStill) 0.04f else 0.12f
+        val bobY = if (animation.frameSet == ClawdFrameSet.TYPING) {
+            0f
+        } else {
+            sin(breathPhase.toDouble()).toFloat() * tile * if (isStill) 0.04f else 0.12f
+        }
         val startX = layout.left.toFloat()
         // Round the gentle bob to a whole physical pixel so the sprite stays crisp.
         val startY = (layout.top + bobY).roundToInt().toFloat()
@@ -177,7 +181,7 @@ internal fun calculateClawdGridLayout(
     )
 }
 
-private fun resolvePixelColor(char: Char, isSilent: Boolean, state: PetState): Color? = when (char) {
+internal fun resolvePixelColor(char: Char, isSilent: Boolean, state: PetState): Color? = when (char) {
     'O' -> when {
         state == PetState.OFFLINE -> Color(0xFF6C7685)
         isSilent -> Color(0xFF9E5640)
@@ -194,5 +198,8 @@ private fun resolvePixelColor(char: Char, isSilent: Boolean, state: PetState): C
 
     'B' -> Color(0xFF1E1917)
     'W' -> Color(0xFFFFFFFF)
+    'H' -> if (isSilent) Color(0xFF8B4A37) else Color(0xFFE89A72)
+    'L' -> Color(0xFF74808B)
+    'K' -> Color(0xFF454D56)
     else -> null
 }

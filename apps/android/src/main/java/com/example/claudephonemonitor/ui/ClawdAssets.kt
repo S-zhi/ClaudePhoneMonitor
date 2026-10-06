@@ -54,6 +54,7 @@ enum class ClawdPersona(val label: String, val icon: String, val pose: ClawdPose
 /** Names the procedural frame sequence used for a monitor state. */
 enum class ClawdFrameSet {
     STILL,
+    TYPING,
     CRAB,
     POINT,
     DANCE,
@@ -75,6 +76,12 @@ private val STILL_ANIMATION = ClawdAnimation(
     poses = ClawdSpriteData.STILL_POSES,
     sequence = ClawdSpriteData.STILL_SEQUENCE,
     frameDurationMs = FRAME_DURATION_MS,
+)
+private val TYPING_ANIMATION = ClawdAnimation(
+    frameSet = ClawdFrameSet.TYPING,
+    poses = ClawdSpriteData.TYPING_POSES,
+    sequence = ClawdSpriteData.TYPING_SEQUENCE,
+    frameDurationMs = 320,
 )
 private val CRAB_ANIMATION = ClawdAnimation(
     frameSet = ClawdFrameSet.CRAB,
@@ -109,8 +116,8 @@ private val ALERT_ANIMATION = ClawdAnimation(
 )
 
 /**
- * Resolves a monitor state to its local sprite sequence. Every animated sequence advances at 90 ms
- * per frame; idle and offline share the single STILL frame, with idle blink handled separately.
+ * Resolves a monitor state to its local sprite sequence. Typing advances slowly at 320 ms per pose;
+ * other animated sequences advance at 90 ms per frame. Idle and offline share STILL.
  */
 fun resolveClawdAnimation(
     petState: PetState,
@@ -118,7 +125,7 @@ fun resolveClawdAnimation(
     isSilent: Boolean = false,
 ): ClawdAnimation = when {
     isSilent || petState == PetState.OFFLINE || petState == PetState.IDLE -> STILL_ANIMATION
-    petState == PetState.WORKING -> CRAB_ANIMATION
+    petState == PetState.WORKING -> TYPING_ANIMATION
     petState == PetState.WAITING -> POINT_ANIMATION
     petState == PetState.FINISH && activity == ActivityVariation.CELEBRATE -> DANCE_ANIMATION
     petState == PetState.FINISH -> JUMP_ANIMATION
