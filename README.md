@@ -181,6 +181,26 @@ Codex 会话记录格式随版本变化。当前投影只报告可核实的 WORK
 `codex_source_read_failed`；这些代码提示本机来源格式或可读性需要复查，不代表任务失败，
 也不包含计数、路径或源数据。
 
+需要在 Usage 页汇总本机 Claude Code 与 Codex 的 token 用量时，可另外显式开启只读账本：
+
+```bash
+scripts/start-lan-monitor.sh --watch-usage
+```
+
+等价开关为 `COLLECTOR_WATCH_USAGE=1` 或直接运行 Collector 时使用
+`--collector --watch-usage`；默认关闭，`--no-watch-usage` 可覆盖环境开关。采集器读取
+`~/.claude/projects` 与 `$CODEX_HOME/sessions`（默认 `~/.codex/sessions`），可分别用
+`COLLECTOR_CLAUDE_PROJECTS_DIR` 和 `COLLECTOR_CODEX_SESSIONS_DIR` 指定来源。首次启用时
+建立并持久化统计起点，不回填之前的历史；之后重启从本地游标追读。去重按 Claude 消息或
+Codex response 身份，页面请求数表示“已观测模型响应”，不包括来源不可见的内部重试。
+私有 `usage.sqlite` 只保存匿名身份散列、用量数字与游标，不保存 transcript 正文或完整路径；
+Relay 只收到绝对汇总。缓存字段缺失或来源不可用会标记部分/不可用，剩余额度无真实来源时
+保持不可用。诊断只输出固定代码，不输出原始数据。
+
+口径按响应来源区分：Claude 新增输入为 `input_tokens + cache_creation_input_tokens`，Codex
+新增输入为 `input_tokens - cached_input_tokens`；实际消耗为新增输入加输出，总输入再加缓存命中
+Tokens。只有缓存分子、分母和两个来源覆盖都完整时才给完整命中率；缺失字段不会填零。
+
 ## 当前限制
 
 - LAN MVP 的 `ws://` 未加密，只能运行在可信局域网；生产公网需要 WSS/TLS。

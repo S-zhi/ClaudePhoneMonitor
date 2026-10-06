@@ -31,6 +31,61 @@ class MonitorModelsTest {
     }
 
     @Test
+    fun parsesServerUsageSnapshotAndRoundTripsOptionalAggregate() {
+        val parsed = requireNotNull(
+            MonitorEvent.fromWireJson(
+                usageSnapshotJson(revision = 3, cacheHitQuality = "complete"),
+            ),
+        ).snapshot
+
+        requireNotNull(parsed)
+        val usage = requireNotNull(parsed.usage)
+        assertEquals("epoch-1", usage.epochId)
+        assertEquals(3L, usage.revision)
+        assertEquals(3L, usage.observedResponses)
+        assertEquals(2L, usage.completeResponses)
+        assertEquals(120L, usage.newInput.value)
+        assertEquals(UsageQuality.PARTIAL, usage.actual.quality)
+        assertEquals(35L, usage.cacheHit.numerator)
+        assertEquals(155L, usage.cacheHit.denominator)
+        assertEquals("unavailable", usage.quota.availability)
+        assertEquals(null, usage.quota.currentRemaining)
+
+        val roundTrip = requireNotNull(
+            MonitorEvent.fromWireJson(
+                MonitorEvent(
+                    type = MonitorEventType.SNAPSHOT,
+                    snapshot = parsed,
+                ).toWireJson(),
+            ),
+        ).snapshot?.usage
+        assertEquals(usage, roundTrip)
+    }
+
+    @Test
+    fun malformedUsageDoesNotInvalidateTheAuthoritativeMonitorSnapshot() {
+        val tooLarge = usageSnapshotJson(revision = 9_007_199_254_740_992L, cacheHitQuality = "complete")
+        val parsed = requireNotNull(MonitorEvent.fromWireJson(tooLarge)).snapshot
+        requireNotNull(parsed)
+        assertEquals(ComputerState.ONLINE, parsed.computerState)
+        assertEquals(null, parsed.usage)
+
+        val impossibleRatio = usageSnapshotJson(cacheHitQuality = "complete").replace(
+            "\"denominator\":155",
+            "\"denominator\":0",
+        )
+        assertEquals(null, requireNotNull(MonitorEvent.fromWireJson(impossibleRatio)).snapshot?.usage)
+    }
+
+    @Test
+    fun oldSnapshotWithoutUsageKeepsUsageUnavailable() {
+        val parsed = requireNotNull(
+            MonitorEvent.fromWireJson("""{"type":"snapshot","computer_state":"online","claude_state":"idle","last_sequence":2}"""),
+        ).snapshot
+        assertEquals(null, parsed?.usage)
+    }
+
+    @Test
     fun relayEventInstallationIdAloneDoesNotMasqueradeAsAnIdleSnapshot() {
         val event = requireNotNull(
             MonitorEvent.fromWireJson(
@@ -141,4 +196,34 @@ class MonitorModelsTest {
         assertEquals(PetState.IDLE, MonitorEventName.SESSION_ENDED.toPetState())
         assertEquals(ActivityVariation.THINK, "task_started".toActivityVariation())
     }
+
+    private fun usageSnapshotJson(
+        revision: Long = 3L,
+        cacheHitQuality: String,
+    ) = """
+        {
+          "type":"snapshot",
+          "computer_state":"online",
+          "claude_state":"idle",
+          "last_sequence":42,
+          "usage":{
+            "epoch_id":"epoch-1",
+            "started_at":"2026-10-07T00:00:00Z",
+            "revision":$revision,
+            "observed_responses":3,
+            "complete_responses":2,
+            "provider_coverage":{
+              "claude":{"status":"partial","observed_responses":1,"complete_responses":0},
+              "codex":{"status":"ready","observed_responses":2,"complete_responses":2}
+            },
+            "new_input":{"value":120,"quality":"partial"},
+            "cached_input":{"value":35,"quality":"partial"},
+            "output":{"value":65,"quality":"partial"},
+            "actual":{"value":185,"quality":"partial"},
+            "total_input":{"value":155,"quality":"partial"},
+            "cache_hit":{"numerator":35,"denominator":155,"quality":"$cacheHitQuality"},
+            "quota":{"start_remaining":null,"current_remaining":null,"unit":null,"reset_at":null,"availability":"unavailable"}
+          }
+        }
+    """.trimIndent()
 }

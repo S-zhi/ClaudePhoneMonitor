@@ -138,9 +138,16 @@ export class FileOutbox<T> implements Outbox<T> {
       if (this.records.some((existing) => existing.id === record.id || existing.sequence === record.sequence)) {
         throw new Error("outbox_duplicate_id_or_sequence");
       }
-      this.records.push(record);
-      this.records.sort((left, right) => left.sequence - right.sequence);
-      await this.persist();
+      const previousRecords = this.records;
+      this.records = [...previousRecords, record].sort((left, right) => left.sequence - right.sequence);
+      try {
+        await this.persist();
+      } catch (error) {
+        // Do not retain a record that was never durably written. Callers such
+        // as UsageWatcher retry the same stable id and sequence in-process.
+        this.records = previousRecords;
+        throw error;
+      }
       return { ...record };
     });
   }

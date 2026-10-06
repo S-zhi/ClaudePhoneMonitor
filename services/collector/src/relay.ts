@@ -2,7 +2,6 @@ import { challengeResponderFromSecret, isChallengeMessage, respondToChallenge, t
 import type {
   ChallengeMessage,
   EventAckMessage,
-  EventEnvelope,
   HeartbeatMessage,
   HelloMessage,
   Outbox,
@@ -36,7 +35,7 @@ export interface RelayTimerApi {
 export interface RelayClientOptions {
   url: string;
   installationId: string;
-  outbox: Outbox<EventEnvelope>;
+  outbox: Outbox<RelayOutboundMessage>;
   websocketFactory?: WebSocketFactory;
   challengeResponder?: ChallengeResponder;
   challengeSecret?: string;
@@ -298,7 +297,7 @@ export class RelayClient {
 
   private async flush(): Promise<void> {
     if (this.stopped || this.socket?.readyState !== OPEN) return;
-    let records: OutboxRecord<EventEnvelope>[];
+    let records: OutboxRecord<RelayOutboundMessage>[];
     try {
       records = await this.options.outbox.peek(this.maxBatchSize);
     } catch {
@@ -375,7 +374,7 @@ export class RelayClient {
     const sequence = finiteInteger(message.sequence)
       ? message.sequence
       : pendingSequence;
-    const rejected = message.accepted === false || message.status === "rejected";
+    const rejected = message.status === "rejected" || message.accepted === false && message.status !== "duplicate" && message.duplicate !== true;
     if (rejected) {
       await this.options.outbox.retry(message.event_id, new Error("event_rejected"));
     } else {

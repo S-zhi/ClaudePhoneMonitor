@@ -18,12 +18,24 @@ import type {
   StoredEvent,
   TokenRole,
   TokenValidation,
+  UsageAggregate,
+  UsageSnapshotMessage,
 } from "./types.js";
 import { isConnectionStatus } from "./types.js";
 
 export interface RecordEventResult {
   stored: StoredEvent;
   duplicate: boolean;
+  conflict: boolean;
+  sequence_status: SequenceStatus;
+  last_sequence: number | null;
+  next_sequence: number | null;
+}
+
+export interface RecordUsageResult {
+  duplicate: boolean;
+  conflict: boolean;
+  changed: boolean;
   sequence_status: SequenceStatus;
   last_sequence: number | null;
   next_sequence: number | null;
@@ -64,6 +76,7 @@ export interface RelayRepository {
 
   findEvent(eventId: string): StoredEvent | undefined;
   recordEvent(event: EventEnvelope, receivedAt: string): RecordEventResult;
+  recordUsageSnapshot(message: UsageSnapshotMessage, receivedAt: string): RecordUsageResult;
   listEventsAfter(installationId: string, sequence: number): StoredEvent[];
   listInstallationIds(): string[];
   getInstallationState(installationId: string, now?: string): InstallationState | undefined;
@@ -250,6 +263,20 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
+function isNewerUsage(previous: UsageAggregate | undefined, incoming: UsageAggregate): boolean {
+  if (!previous) return true;
+  return previous.epoch_id === incoming.epoch_id &&
+    previous.started_at === incoming.started_at &&
+    incoming.revision > previous.revision;
+}
+
+function sequenceStatusForSequence(sequence: number, previous: number | null): SequenceStatus {
+  if (previous === null) return "initial";
+  if (sequence === previous + 1) return "in_order";
+  if (sequence > previous + 1) return "gap";
+  return "out_of_order";
+}
+
 function stateForEvent(eventType: EventEnvelope["event_type"], previous: ClaudeState): ClaudeState {
   switch (eventType) {
     case "task_started":
@@ -316,6 +343,8 @@ export class InMemoryRelayRepository implements RelayRepository {
   private readonly eventOrder: string[] = [];
   private readonly eventsByInstallation = new Map<string, StoredEvent[]>();
   private readonly installations = new Map<string, InstallationState>();
+  private readonly usageSequences = new Map<string, Set<number>>();
+  private readonly usageEventIds = new Map<string, { installation_id: string; sequence: number }>();
   private readonly sessions = new Map<string, SessionState>();
   private readonly pairings = new Map<string, PairingRecord>();
   private readonly deviceTokens = new Map<string, DeviceTokenRecord>();
@@ -424,19 +453,30 @@ export class InMemoryRelayRepository implements RelayRepository {
   }
 
   recordEvent(event: EventEnvelope, receivedAt: string): RecordEventResult {
-    const existing =
-      this.eventsById.get(event.event_id) ??
-      this.eventsByInstallation
-        .get(event.installation_id)
-        ?.find((stored) => stored.event.sequence === event.sequence);
     const current = this.installations.get(event.installation_id);
-    if (existing) {
+    const byId = this.eventsById.get(event.event_id);
+    const byEventSequence = this.eventsByInstallation
+      .get(event.installation_id)
+      ?.find((stored) => stored.event.sequence === event.sequence);
+    const usageById = this.usageEventIds.get(event.event_id);
+    const usageSequenceConflict = this.usageSequences.get(event.installation_id)?.has(event.sequence) ?? false;
+    if (byId && byId.event.installation_id === event.installation_id && byId.event.sequence === event.sequence) {
       return {
-        stored: clone(existing),
+        stored: clone(byId),
         duplicate: true,
-        sequence_status: this.sequenceStatusForDuplicate(existing.event, current),
-        last_sequence: current?.last_sequence ?? existing.event.sequence,
-        next_sequence: current ? this.nextSequence(current.last_sequence) : existing.event.sequence + 1,
+        conflict: false,
+        sequence_status: this.sequenceStatusForDuplicate(byId.event, current),
+        last_sequence: current?.last_sequence ?? byId.event.sequence,
+        next_sequence: current ? this.nextSequence(current.last_sequence) : byId.event.sequence + 1,
+      };
+    }
+    if (byId || byEventSequence || usageById || usageSequenceConflict) {
+      const stored = byId ?? byEventSequence ?? { event: clone(event), received_at: receivedAt };
+      return {
+        stored: clone(stored), duplicate: false, conflict: true,
+        sequence_status: sequenceStatusForSequence(event.sequence, current?.last_sequence ?? null),
+        last_sequence: current?.last_sequence ?? null,
+        next_sequence: current ? this.nextSequence(current.last_sequence) : null,
       };
     }
 
@@ -466,6 +506,7 @@ export class InMemoryRelayRepository implements RelayRepository {
               occurred_at: event.occurred_at,
             },
             updated_at: event.occurred_at,
+            ...(current?.usage ? { usage: current.usage } : {}),
           };
     this.installations.set(event.installation_id, nextState);
     const sessionKey = `${event.installation_id}\u0000${event.session_id}`;
@@ -477,9 +518,58 @@ export class InMemoryRelayRepository implements RelayRepository {
     return {
       stored: clone(stored),
       duplicate: false,
+      conflict: false,
       sequence_status,
       last_sequence: nextState.last_sequence,
       next_sequence: this.nextSequence(nextState.last_sequence),
+    };
+  }
+
+  recordUsageSnapshot(message: UsageSnapshotMessage, _receivedAt: string): RecordUsageResult {
+    const current = this.installations.get(message.installation_id);
+    const existingUsageId = this.usageEventIds.get(message.event_id);
+    const exactDuplicate = existingUsageId?.installation_id === message.installation_id && existingUsageId.sequence === message.sequence;
+    const conflict = Boolean(existingUsageId || this.eventsById.has(message.event_id) ||
+      (this.eventsByInstallation.get(message.installation_id) ?? []).some((item) => item.event.sequence === message.sequence) ||
+      (this.usageSequences.get(message.installation_id)?.has(message.sequence) ?? false));
+    if (exactDuplicate || conflict) return {
+      duplicate: exactDuplicate,
+      conflict: !exactDuplicate,
+      changed: false,
+      sequence_status: sequenceStatusForSequence(message.sequence, current?.last_sequence ?? null),
+      last_sequence: current?.last_sequence ?? message.sequence,
+      next_sequence: current ? this.nextSequence(current.last_sequence) : message.sequence + 1,
+    };
+    const previousSequence = current?.last_sequence ?? null;
+    const sequence_status = sequenceStatusForSequence(message.sequence, previousSequence);
+    this.usageEventIds.set(message.event_id, { installation_id: message.installation_id, sequence: message.sequence });
+    const sequences = this.usageSequences.get(message.installation_id) ?? new Set<number>();
+    sequences.add(message.sequence);
+    this.usageSequences.set(message.installation_id, sequences);
+    // A delayed outbox snapshot may follow a newer state event. Usage revision
+    // ordering is independent from the shared event sequence; sequence only
+    // advances the installation cursor and never gates an absolute summary.
+    const acceptedUsage = isNewerUsage(current?.usage, message.usage);
+    const changed = acceptedUsage;
+    this.installations.set(message.installation_id, {
+      installation_id: message.installation_id,
+      last_sequence: previousSequence === null ? message.sequence : Math.max(previousSequence, message.sequence),
+      claude_state: current?.claude_state ?? "idle",
+      ...(current?.activity ? { activity: current.activity } : {}),
+      updated_at: current?.updated_at ?? message.occurred_at,
+      ...(current?.sessions ? { sessions: current.sessions } : {}),
+      ...(current?.running_count !== undefined ? { running_count: current.running_count } : {}),
+      ...(current?.session_count !== undefined ? { session_count: current.session_count } : {}),
+      ...(current?.recent_completion ? { recent_completion: current.recent_completion } : {}),
+      ...(acceptedUsage ? { usage: clone(message.usage) } : current?.usage ? { usage: current.usage } : {}),
+    });
+    return {
+      duplicate: false,
+      conflict: false,
+      changed,
+      sequence_status,
+      last_sequence: this.installations.get(message.installation_id)?.last_sequence ?? message.sequence,
+      next_sequence: this.nextSequence(this.installations.get(message.installation_id)?.last_sequence ?? message.sequence),
     };
   }
 
@@ -686,8 +776,18 @@ export class SqliteRelayRepository implements RelayRepository {
         last_sequence INTEGER,
         claude_state TEXT NOT NULL,
         activity_json TEXT,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        usage_json TEXT
       );
+      CREATE TABLE IF NOT EXISTS relay_usage_sequences (
+        installation_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        event_id TEXT NOT NULL,
+        PRIMARY KEY (installation_id, sequence),
+        UNIQUE (event_id)
+      );
+      CREATE INDEX IF NOT EXISTS relay_usage_sequences_lookup
+        ON relay_usage_sequences (installation_id, sequence);
       CREATE TABLE IF NOT EXISTS relay_sessions (
         installation_id TEXT NOT NULL,
         session_id TEXT NOT NULL,
@@ -724,6 +824,10 @@ export class SqliteRelayRepository implements RelayRepository {
       CREATE INDEX IF NOT EXISTS relay_device_tokens_lookup
         ON relay_device_tokens (role, token_hash);
     `);
+    const installationColumns = this.db.prepare("PRAGMA table_info(relay_installations)").all() as SqlRow[];
+    if (!installationColumns.some((column) => stringValue(column, "name") === "usage_json")) {
+      this.db.exec("ALTER TABLE relay_installations ADD COLUMN usage_json TEXT");
+    }
     this.migrateSessionState();
   }
 
@@ -869,15 +973,32 @@ export class SqliteRelayRepository implements RelayRepository {
         "SELECT event_json, received_at FROM relay_events WHERE installation_id = ? AND sequence = ?",
       )
       .get(event.installation_id, event.sequence) as SqlRow | undefined;
-    const existing = byId ?? this.rowToStoredEvent(bySequence);
+    const usageById = this.db.prepare(
+      "SELECT installation_id, sequence FROM relay_usage_sequences WHERE event_id = ?",
+    ).get(event.event_id) as SqlRow | undefined;
+    const usageBySequence = this.db.prepare(
+      "SELECT event_id FROM relay_usage_sequences WHERE installation_id = ? AND sequence = ?",
+    ).get(event.installation_id, event.sequence) as SqlRow | undefined;
     const current = this.getInstallationState(event.installation_id);
-    if (existing) {
+    if (byId && byId.event.installation_id === event.installation_id && byId.event.sequence === event.sequence) {
       return {
-        stored: clone(existing),
+        stored: clone(byId),
         duplicate: true,
-        sequence_status: this.sequenceStatusForDuplicate(existing.event, current),
-        last_sequence: current?.last_sequence ?? existing.event.sequence,
-        next_sequence: current ? this.nextSequence(current.last_sequence) : existing.event.sequence + 1,
+        conflict: false,
+        sequence_status: this.sequenceStatusForDuplicate(byId.event, current),
+        last_sequence: current?.last_sequence ?? byId.event.sequence,
+        next_sequence: current ? this.nextSequence(current.last_sequence) : byId.event.sequence + 1,
+      };
+    }
+    const sequenceEvent = this.rowToStoredEvent(bySequence);
+    if (byId || sequenceEvent || usageById || usageBySequence) {
+      return {
+        stored: clone(byId ?? sequenceEvent ?? { event: clone(event), received_at: receivedAt }),
+        duplicate: false,
+        conflict: true,
+        sequence_status: sequenceStatusForSequence(event.sequence, current?.last_sequence ?? null),
+        last_sequence: current?.last_sequence ?? null,
+        next_sequence: current ? this.nextSequence(current.last_sequence) : null,
       };
     }
 
@@ -952,9 +1073,74 @@ export class SqliteRelayRepository implements RelayRepository {
     return {
       stored: clone(stored),
       duplicate: false,
+      conflict: false,
       sequence_status,
       last_sequence: nextState.last_sequence,
       next_sequence: this.nextSequence(nextState.last_sequence),
+    };
+  }
+
+  recordUsageSnapshot(message: UsageSnapshotMessage, receivedAt: string): RecordUsageResult {
+    const usageById = this.db.prepare(
+      "SELECT installation_id, sequence FROM relay_usage_sequences WHERE event_id = ?",
+    ).get(message.event_id) as SqlRow | undefined;
+    const usageBySequence = this.db.prepare(
+      "SELECT event_id FROM relay_usage_sequences WHERE installation_id = ? AND sequence = ?",
+    ).get(message.installation_id, message.sequence) as SqlRow | undefined;
+    const byEvent = this.findEvent(message.event_id);
+    const bySequence = this.db.prepare(
+      "SELECT event_id FROM relay_events WHERE installation_id = ? AND sequence = ?",
+    ).get(message.installation_id, message.sequence) as SqlRow | undefined;
+    const current = this.getInstallationState(message.installation_id);
+    const exactDuplicate = usageById && stringValue(usageById, "installation_id") === message.installation_id &&
+      numberValue(usageById, "sequence") === message.sequence;
+    if (exactDuplicate || usageById || usageBySequence || byEvent || bySequence) return {
+      duplicate: Boolean(exactDuplicate),
+      conflict: !exactDuplicate,
+      changed: false,
+      sequence_status: sequenceStatusForSequence(message.sequence, current?.last_sequence ?? null),
+      last_sequence: current?.last_sequence ?? message.sequence,
+      next_sequence: current ? this.nextSequence(current.last_sequence) : message.sequence + 1,
+    };
+    const previousSequence = current?.last_sequence ?? null;
+    const sequence_status = sequenceStatusForSequence(message.sequence, previousSequence);
+    const canReplaceUsage = isNewerUsage(current?.usage, message.usage);
+    const updated = canReplaceUsage;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare(
+        "INSERT INTO relay_usage_sequences (installation_id, sequence, event_id) VALUES (?, ?, ?)",
+      ).run(message.installation_id, message.sequence, message.event_id);
+      const nextSequence = previousSequence === null ? message.sequence : Math.max(previousSequence, message.sequence);
+      const stateUpdatedAt = current?.updated_at ?? message.occurred_at;
+      this.db.prepare(
+        `INSERT INTO relay_installations (installation_id, last_sequence, claude_state, activity_json, updated_at, usage_json)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(installation_id) DO UPDATE SET
+           last_sequence = excluded.last_sequence,
+           usage_json = CASE WHEN ? THEN excluded.usage_json ELSE relay_installations.usage_json END`,
+      ).run(
+        message.installation_id,
+        nextSequence,
+        current?.claude_state ?? "idle",
+        current?.activity ? JSON.stringify(current.activity) : null,
+        stateUpdatedAt,
+        canReplaceUsage ? JSON.stringify(message.usage) : null,
+        canReplaceUsage ? 1 : 0,
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    void receivedAt;
+    return {
+      duplicate: false,
+      conflict: false,
+      changed: updated,
+      sequence_status,
+      last_sequence: previousSequence === null ? message.sequence : Math.max(previousSequence, message.sequence),
+      next_sequence: this.nextSequence(previousSequence === null ? message.sequence : Math.max(previousSequence, message.sequence)),
     };
   }
 
@@ -1013,6 +1199,7 @@ export class SqliteRelayRepository implements RelayRepository {
         ? { activity: optionalJson<InstallationState["activity"]>(row.activity_json) }
         : {}),
       updated_at: updatedAt,
+      ...(optionalJson<UsageAggregate>(row.usage_json) ? { usage: optionalJson<UsageAggregate>(row.usage_json) } : {}),
     };
     const sessionRows = this.db
       .prepare("SELECT session_json FROM relay_sessions WHERE installation_id = ?")

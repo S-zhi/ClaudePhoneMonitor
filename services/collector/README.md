@@ -26,7 +26,7 @@ printf '%s\n' '{"hook_event_name":"UserPromptSubmit","session_id":"demo-session"
 ```bash
 COLLECTOR_RELAY_URL=ws://127.0.0.1:8787/ws/collector \
 COLLECTOR_DATA_DIR="$HOME/.claude-phone-monitor" \
-npm --prefix services/collector run start -- --collector --watch-codex
+npm --prefix services/collector run start -- --collector --watch-codex --watch-usage
 ```
 
 Codex watching is opt-in. Use `COLLECTOR_WATCH_CODEX=1` instead of the CLI flag
@@ -36,6 +36,28 @@ that environment setting. The watcher reads `$CODEX_HOME/sessions`, or
 `COLLECTOR_CODEX_SESSIONS_DIR` to use another local sessions directory. Its
 checkpoint is stored as `codex-checkpoint.json` under `COLLECTOR_DATA_DIR` with
 hashed identities and offsets, not transcript content.
+
+Usage collection is a separate opt-in from lifecycle monitoring. Enable it with
+`--watch-usage` or `COLLECTOR_WATCH_USAGE=1`; `--no-watch-usage` disables it.
+It reads `~/.claude/projects` and the Codex sessions root above (override the
+Claude root with `COLLECTOR_CLAUDE_PROJECTS_DIR`). First enable creates a
+persistent start epoch after recording existing file high-water marks; those
+historical rows are not backfilled. The private `usage.sqlite` ledger is kept in
+`COLLECTOR_DATA_DIR`, mode-restricted, and stores only provider, hashed
+session/response/path identities, allowlisted numeric usage, and file cursors.
+After restart, it catches up appended rows without resetting the epoch. The
+wire sends only a versioned absolute aggregate using the existing sequence and
+durable outbox; it does not create lifecycle events. Fixed `usage_*` diagnostic
+codes indicate unavailable sources, changed shapes, oversized rows, or local
+storage/queue trouble without exposing counts, paths, or source contents.
+The page counts deduplicated source response identities, not hidden provider
+retries. Claude new input is `input_tokens + cache_creation_input_tokens`;
+Codex new input is `input_tokens - cached_input_tokens`. Actual use is new input
+plus output, total input adds cached input, and cache-hit tokens use Claude's
+cache-read or Codex's cached-input counter. Missing cache fields stay unknown,
+including 0/0 assistant messages; only the explicit `<synthetic>` model marker
+is filtered. No real remaining-token quota is exposed by these sources, so the
+quota fields remain unavailable.
 
 The verified versions were Codex Desktop app 26.930.61225 with embedded runtime
 0.160.0, and standalone CLI binary 0.159.3. These are distinct execution forms

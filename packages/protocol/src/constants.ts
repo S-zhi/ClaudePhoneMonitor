@@ -14,6 +14,7 @@ export const MESSAGE_TYPES = {
   PROBE: "probe",
   CHALLENGE: "challenge",
   CHALLENGE_ACK: "challenge_ack",
+  USAGE_SNAPSHOT: "usage_snapshot",
   ERROR: "error",
 } as const;
 

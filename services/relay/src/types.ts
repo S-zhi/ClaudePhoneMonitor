@@ -37,6 +37,43 @@ export interface EventEnvelope {
   correlation_id?: string;
 }
 
+export type UsageQuality = "complete" | "partial" | "unavailable";
+export type UsageCoverageStatus = "ready" | "partial" | "unavailable";
+
+export interface UsageMetric {
+  value: number | null;
+  quality: UsageQuality;
+}
+
+export interface UsageAggregate {
+  epoch_id: string;
+  started_at: string;
+  revision: number;
+  observed_responses: number;
+  complete_responses: number;
+  provider_coverage: {
+    claude: { status: UsageCoverageStatus; observed_responses: number; complete_responses: number };
+    codex: { status: UsageCoverageStatus; observed_responses: number; complete_responses: number };
+  };
+  new_input: UsageMetric;
+  cached_input: UsageMetric;
+  output: UsageMetric;
+  actual: UsageMetric;
+  total_input: UsageMetric;
+  cache_hit: { numerator: number | null; denominator: number | null; quality: UsageQuality };
+  quota: { start_remaining: null; current_remaining: null; unit: null; reset_at: null; availability: "unavailable" };
+}
+
+export interface UsageSnapshotMessage {
+  type: "usage_snapshot";
+  schema_version: typeof RELAY_SCHEMA_VERSION;
+  event_id: string;
+  installation_id: string;
+  sequence: number;
+  occurred_at: string;
+  usage: UsageAggregate;
+}
+
 export interface StoredEvent {
   event: EventEnvelope;
   received_at: string;
@@ -77,6 +114,7 @@ export interface SnapshotMessage {
   running_count?: number;
   session_count?: number;
   recent_completion?: RecentCompletion;
+  usage?: UsageAggregate;
 }
 
 export interface HelloMessage {
@@ -204,6 +242,7 @@ export interface ErrorMessage {
 export type ClientMessage =
   | HelloMessage
   | EventEnvelope
+  | UsageSnapshotMessage
   | HeartbeatMessage
   | SubscribeMessage
   | ResumeMessage
@@ -244,6 +283,7 @@ export interface InstallationState {
   running_count?: number;
   session_count?: number;
   recent_completion?: RecentCompletion;
+  usage?: UsageAggregate;
 }
 
 export interface PairingRecord {
