@@ -23,88 +23,160 @@ class WebSocketMonitorClient(
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .build(),
+    private val webSocketFactory: WebSocket.Factory = httpClient,
 ) : MonitorClient {
     private val eventFlow = MutableSharedFlow<MonitorEvent>(extraBufferCapacity = 32)
     private val connectionState = MutableStateFlow(false)
+    private val lock = Any()
     private var socket: WebSocket? = null
+    private var generationCounter = 0L
+    private var activeGeneration: Long? = null
 
     override val events: Flow<MonitorEvent> = eventFlow.asSharedFlow()
     override val isConnected = connectionState
 
     override fun connect() {
-        if (socket != null) return
-        val request = androidWebSocketRequest(endpoint)
-        socket = httpClient.newWebSocket(
-            request,
-            object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    connectionState.value = true
-                    webSocket.send(
-                        MonitorCommand.Hello(
-                            installationId = installationId,
-                            clientId = clientId,
-                            token = token,
-                            lastSequence = lastSequence,
-                        ).toWireJson(),
-                    )
-                    webSocket.send(
-                        MonitorCommand.Subscribe(
-                            installationId = installationId,
-                            token = token,
-                            lastSequence = lastSequence,
-                        ).toWireJson(),
-                    )
-                    eventFlow.tryEmit(MonitorEvent(type = MonitorEventType.CONNECTED))
-                }
-
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    val event = MonitorEvent.fromWireJson(text)
-                    if (event == null) {
-                        eventFlow.tryEmit(
-                            MonitorEvent(
-                                type = MonitorEventType.EVENT,
-                                detail = "Unrecognized monitor message",
-                            ),
-                        )
-                        return
+        val (generation, request) = synchronized(lock) {
+            if (activeGeneration != null) return
+            val request = androidWebSocketRequest(endpoint)
+            val newGeneration = ++generationCounter
+            activeGeneration = newGeneration
+            newGeneration to request
+        }
+        val createdSocket = try {
+            webSocketFactory.newWebSocket(
+                request,
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        val accepted = synchronized(lock) {
+                            if (!claimSocketLocked(generation, webSocket)) {
+                                false
+                            } else {
+                                connectionState.value = true
+                                webSocket.send(
+                                    MonitorCommand.Hello(
+                                        installationId = installationId,
+                                        clientId = clientId,
+                                        token = token,
+                                        lastSequence = lastSequence,
+                                    ).toWireJson(),
+                                )
+                                webSocket.send(
+                                    MonitorCommand.Subscribe(
+                                        installationId = installationId,
+                                        token = token,
+                                        lastSequence = lastSequence,
+                                    ).toWireJson(),
+                                )
+                                eventFlow.tryEmit(MonitorEvent(type = MonitorEventType.CONNECTED))
+                                true
+                            }
+                        }
+                        if (!accepted) webSocket.close(1000, "stale monitor connection")
                     }
-                    event.sequence?.let { lastSequence = maxOf(lastSequence, it) }
-                    event.snapshot?.lastSequence?.let { lastSequence = maxOf(lastSequence, it) }
-                    eventFlow.tryEmit(event)
-                }
 
-                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    socket = null
-                    connectionState.value = false
-                    eventFlow.tryEmit(
-                        MonitorEvent(
-                            type = MonitorEventType.DISCONNECTED,
-                            detail = t.message ?: "WebSocket connection failed",
-                        ),
-                    )
-                }
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        synchronized(lock) {
+                            if (!claimSocketLocked(generation, webSocket)) return
+                            val event = MonitorEvent.fromWireJson(text)
+                            if (event == null) {
+                                eventFlow.tryEmit(
+                                    MonitorEvent(
+                                        type = MonitorEventType.EVENT,
+                                        detail = "Unrecognized monitor message",
+                                    ),
+                                )
+                                return
+                            }
+                            event.sequence?.let { lastSequence = maxOf(lastSequence, it) }
+                            event.snapshot?.lastSequence?.let { lastSequence = maxOf(lastSequence, it) }
+                            eventFlow.tryEmit(event)
+                        }
+                    }
 
-                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    socket = null
+                    override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                        synchronized(lock) {
+                            if (!claimSocketLocked(generation, webSocket)) return
+                            terminateLocked(t.message ?: "WebSocket connection failed")
+                        }
+                    }
+
+                    override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                        synchronized(lock) {
+                            if (!claimSocketLocked(generation, webSocket)) return
+                            terminateLocked(reason.ifBlank { "WebSocket closed" })
+                        }
+                    }
+                },
+            )
+        } catch (failure: Throwable) {
+            val failedSocket = synchronized(lock) {
+                if (activeGeneration == generation) {
+                    activeGeneration = null
                     connectionState.value = false
-                    eventFlow.tryEmit(
-                        MonitorEvent(
-                            type = MonitorEventType.DISCONNECTED,
-                            detail = reason.ifBlank { "WebSocket closed" },
-                        ),
-                    )
+                    socket.also { socket = null }
+                } else {
+                    null
                 }
-            },
-        )
+            }
+            failedSocket?.cancel()
+            throw failure
+        }
+
+        val stale = synchronized(lock) {
+            if (activeGeneration != generation) {
+                true
+            } else if (socket == null) {
+                socket = createdSocket
+                false
+            } else {
+                socket !== createdSocket
+            }
+        }
+        if (stale) createdSocket.cancel()
     }
 
     override fun disconnect() {
-        socket?.close(1000, "monitor closed")
-        socket = null
-        connectionState.value = false
+        val oldSocket = synchronized(lock) {
+            if (activeGeneration == null) {
+                connectionState.value = false
+                null
+            } else {
+                activeGeneration = null
+                val old = socket
+                socket = null
+                connectionState.value = false
+                eventFlow.tryEmit(
+                    MonitorEvent(type = MonitorEventType.DISCONNECTED, detail = "monitor closed"),
+                )
+                old
+            }
+        }
+        oldSocket?.close(1000, "monitor closed")
     }
 
     override fun send(command: MonitorCommand) {
-        socket?.send(command.toWireJson())
+        synchronized(lock) {
+            if (activeGeneration != null) socket?.send(command.toWireJson())
+        }
+    }
+
+    /** Caller holds [lock]. The first callback may arrive before newWebSocket returns. */
+    private fun claimSocketLocked(generation: Long, callbackSocket: WebSocket): Boolean {
+        if (activeGeneration != generation) return false
+        val currentSocket = socket
+        if (currentSocket == null) {
+            socket = callbackSocket
+            return true
+        }
+        return currentSocket === callbackSocket
+    }
+
+    /** Caller holds [lock]. */
+    private fun terminateLocked(detail: String) {
+        activeGeneration = null
+        socket = null
+        connectionState.value = false
+        eventFlow.tryEmit(MonitorEvent(type = MonitorEventType.DISCONNECTED, detail = detail))
     }
 }

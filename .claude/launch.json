@@ -16,6 +16,15 @@
         "set -a; . \"$HOME/.claude-phone-monitor/monitor.env\"; set +a; exec npm --prefix services/relay run start"
       ],
       "port": 8787
+    },
+    {
+      "name": "relay-test-8788",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        "-c",
+        "set -a; . \"$HOME/.claude-phone-monitor/monitor.env\"; set +a; [ -n \"${RELAY_BOOTSTRAP_SECRET:-}\" ] || { printf 'Missing RELAY_BOOTSTRAP_SECRET in monitor.env\\n' >&2; exit 1; }; export RELAY_HOST=0.0.0.0 RELAY_PORT=8788 RELAY_PUBLIC_URL=http://192.168.1.9:8788; export RELAY_DB_PATH=\"${RELAY_DB_PATH:-$HOME/.claude-phone-monitor/relay.sqlite}\"; exec npm --prefix services/relay run start"
+      ],
+      "port": 8788
     }
   ]
 }
