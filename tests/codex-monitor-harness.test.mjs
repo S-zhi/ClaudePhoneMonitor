@@ -149,7 +149,8 @@ async function runSharedDaemonRelayCase(t, storageKind) {
     assert.equal(completedSnapshot.sessions.find((session) => session.session_id === codexSessionIdA)?.claude_state, "idle");
     assert.equal(completedSnapshot.recent_completion.session_id, codexSessionIdA);
     assert.equal(completedSnapshot.recent_completion.task_id, codexTaskIdA);
-    assert.equal(completedSnapshot.recent_completion.display_name, "Codex");
+    assert.match(completedSnapshot.recent_completion.display_name, /^Codex [0-9a-f]{6}$/);
+    assert.equal(completedSnapshot.recent_completion.display_name, completedSnapshot.sessions.find((session) => session.session_id === codexSessionIdA)?.title);
 
     const rolloutB = join(sessionsRoot, "rollout-aborted.jsonl");
     const startB = rolloutRow("event_msg", {
@@ -176,7 +177,7 @@ async function runSharedDaemonRelayCase(t, storageKind) {
     assert.equal(finalSnapshot.sessions.find((session) => session.session_id === claudeSessionId)?.claude_state, "working");
     assert.equal(finalSnapshot.recent_completion.session_id, codexSessionIdA, "the completed Codex turn remains visible after an unrelated interruption");
     assert.equal(finalSnapshot.recent_completion.task_id, codexTaskIdA);
-    assert.equal(finalSnapshot.recent_completion.display_name, "Codex");
+    assert.equal(finalSnapshot.recent_completion.display_name, completedSnapshot.recent_completion.display_name);
     await waitFor(() => snapshots.some((snapshot) =>
       snapshot?.claude_state === "working" &&
       snapshot.sessions?.some((session) => session.session_id === claudeSessionId && session.claude_state === "working")));

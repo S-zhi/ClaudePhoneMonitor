@@ -141,7 +141,7 @@ export function codexEvent(
     event_type,
     session_id: codexSessionId(sessionHash),
     ...(turnHash ? { task_id: codexTaskId(turnHash) } : {}),
-    ...(sessionStarted ? { session_title: "Codex" } : {}),
+    ...(sessionStarted ? { session_title: `Codex ${sessionHash.slice(-6)}` } : {}),
     occurred_at,
     payload: {},
   };

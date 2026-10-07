@@ -21,6 +21,8 @@ internal data class MonitorPresentationState(
     val changeIdentity: String? = null,
     val changeDeadlineMs: Long? = null,
     val completionName: String? = null,
+    val recentSessionCompletion: RecentCompletion? = null,
+    val sessionCompletionDeadlineMs: Long? = null,
     val lastOutcomeIdentity: String? = null,
     val lastCompletionIdentity: String? = null,
     val finishTailSequence: Long? = null,
@@ -56,9 +58,17 @@ internal object MonitorPresentationReducer {
         val outcomeIdentity = event.outcomeIdentity()
         val duplicateOutcome = outcomeIdentity != null && outcomeIdentity == current.lastOutcomeIdentity
         val completion = event.snapshot?.recentCompletion
+        val matchingEventCompletion = completion?.takeIf {
+            event.type == MonitorEventType.EVENT && event.name == MonitorEventName.TASK_FINISHED &&
+                it.sessionId == event.sessionId && it.sequence == event.sequence &&
+                (it.taskId == null || event.taskId == null || it.taskId == event.taskId)
+        }?.let { it.copy(taskId = it.taskId ?: event.taskId) }
+        val matchingCompletion = completion?.takeIf {
+            it.matchesCompletion(current.recentSessionCompletion)
+        }?.let { it.copy(taskId = it.taskId ?: current.recentSessionCompletion?.taskId) }
         val snapshotConfirmsCurrentFinish = current.changeStatus == PetState.FINISH &&
             current.changeDeadlineMs?.let { nowMs < it } == true &&
-            (completion?.identity == current.changeIdentity ||
+            (matchingCompletion != null || completion?.identity == current.changeIdentity ||
                 (event.snapshot?.activity == MonitorEventName.TASK_FINISHED.wireValue &&
                     incomingSequence != null && incomingSequence == current.lastSequence))
         val activeFinishParts = current.changeIdentity?.split('|')
@@ -71,16 +81,24 @@ internal object MonitorPresentationReducer {
             current.changeDeadlineMs?.let { nowMs < it } == true && incomingSequence != null &&
             incomingSequence == current.finishTailSequence
 
-        var baseState = when {
+        val baseState = when {
             event.type == MonitorEventType.DISCONNECTED -> PetState.OFFLINE
             current.baseState == PetState.OFFLINE && event.snapshot == null -> PetState.OFFLINE
+            event.snapshot != null -> event.snapshot.aggregatePetState()
             outcome != null && current.baseState == PetState.WORKING -> PetState.WORKING
             outcome != null && current.baseState == PetState.OFFLINE -> PetState.OFFLINE
             outcome != null -> PetState.IDLE
-            event.snapshot != null -> event.snapshot.toPetState()
             event.type == MonitorEventType.EVENT && event.name == MonitorEventName.TASK_STARTED -> PetState.WORKING
             event.type == MonitorEventType.EVENT && event.name == MonitorEventName.WAITING && current.baseState != PetState.WORKING -> PetState.WAITING
             else -> current.baseState
+        }
+
+        // Relay only retains recent_completion for five seconds. Restore an unseen result on
+        // connection, but never extend a result already shown, even after its local deadline.
+        val lastCompletionSequence = current.lastCompletionIdentity?.substringAfterLast('|')?.toLongOrNull()
+        val newSnapshotCompletion = completion?.takeIf {
+            event.type != MonitorEventType.EVENT && baseState != PetState.OFFLINE &&
+                (lastCompletionSequence == null || it.sequence > lastCompletionSequence)
         }
 
         val disconnectChanged = event.type == MonitorEventType.DISCONNECTED &&
@@ -88,7 +106,9 @@ internal object MonitorPresentationReducer {
         val eventStatus = when {
             current.baseState == PetState.OFFLINE && event.snapshot == null -> null
             outcome != null -> outcome
-            event.type == MonitorEventType.EVENT && event.name == MonitorEventName.TASK_STARTED && current.baseState != PetState.WORKING -> PetState.WORKING
+            event.type == MonitorEventType.EVENT && event.name == MonitorEventName.TASK_STARTED &&
+                (current.baseState != PetState.WORKING ||
+                    (current.changeStatus == PetState.FINISH && activeFinishParts?.getOrNull(0) == event.sessionId)) -> PetState.WORKING
             event.type == MonitorEventType.EVENT && event.name == MonitorEventName.WAITING && current.baseState !in setOf(PetState.WORKING, PetState.WAITING) -> PetState.WAITING
             else -> null
         }
@@ -102,6 +122,7 @@ internal object MonitorPresentationReducer {
         var completionName = current.completionName
         val startsChange = when {
             disconnectChanged -> true
+            newSnapshotCompletion != null -> true
             eventStatus != null && !(outcome != null && duplicateOutcome) && !suppressFinishTail -> true
             snapshotStatusChanged && !suppressFinishTail -> true
             else -> false
@@ -109,10 +130,13 @@ internal object MonitorPresentationReducer {
         if (startsChange) {
             val status = when {
                 disconnectChanged -> PetState.OFFLINE
+                newSnapshotCompletion != null -> PetState.FINISH
                 eventStatus != null -> eventStatus
                 else -> baseState
             }
-            val identity = if (status == PetState.FINISH) event.completionIdentity() ?: outcomeIdentity else outcomeIdentity
+            val identity = if (status == PetState.FINISH) {
+                newSnapshotCompletion?.identity ?: matchingEventCompletion?.identity ?: event.completionIdentity() ?: outcomeIdentity
+            } else outcomeIdentity
                 ?: when {
                 disconnectChanged -> "disconnect:${nowMs}"
                 incomingSequence != null -> "snapshot:$incomingSequence:${status.name}"
@@ -122,14 +146,54 @@ internal object MonitorPresentationReducer {
             changeIdentity = identity
             changeDeadlineMs = nowMs + STATE_CHANGE_DURATION_MS
             completionName = if (status == PetState.FINISH) {
-                event.sessionTitle?.takeIf { it.isNotBlank() }
+                newSnapshotCompletion?.displayName?.takeIf { it.isNotBlank() }
+                    ?: matchingEventCompletion?.displayName?.takeIf { it.isNotBlank() }
+                    ?: event.sessionTitle?.takeIf { it.isNotBlank() }
                     ?: event.sessionId?.let { id -> event.snapshot?.sessions?.firstOrNull { it.sessionId == id }?.title }
                     ?: current.completionName?.takeIf { current.changeIdentity == identity }
-                    ?: "未命名会话已完成"
+                    ?: event.sessionId?.let(::fallbackSessionTitle)
+                    ?: "未命名会话"
             } else null
-        } else if (snapshotConfirmsCurrentFinish && completion != null && completion.displayName.isNotBlank()) {
+        } else if (current.changeStatus == PetState.FINISH && matchingCompletion != null &&
+            matchingCompletion.displayName.isNotBlank()
+        ) {
             // Fill in a better label within the existing local deadline; never restart it.
-            completionName = completion.displayName
+            completionName = matchingCompletion.displayName
+            changeIdentity = matchingCompletion.identity
+        }
+
+        var recentSessionCompletion = current.recentSessionCompletion
+        var sessionCompletionDeadlineMs = current.sessionCompletionDeadlineMs
+        if (startsChange && changeStatus == PetState.FINISH && newSnapshotCompletion != null) {
+            recentSessionCompletion = newSnapshotCompletion
+            sessionCompletionDeadlineMs = nowMs + STATE_CHANGE_DURATION_MS
+        } else if (startsChange && changeStatus == PetState.FINISH && event.sessionId != null && event.sequence != null) {
+            recentSessionCompletion = matchingEventCompletion ?: RecentCompletion(
+                sessionId = event.sessionId,
+                taskId = event.taskId,
+                sequence = event.sequence,
+                occurredAt = event.occurredAt.ifBlank { event.updatedAt },
+                displayName = requireNotNull(completionName),
+            )
+            sessionCompletionDeadlineMs = nowMs + STATE_CHANGE_DURATION_MS
+        } else if (matchingCompletion != null) {
+            recentSessionCompletion = matchingCompletion
+        }
+        val completedSession = recentSessionCompletion?.let { result ->
+            event.snapshot?.sessions?.firstOrNull { it.sessionId == result.sessionId }
+        }
+        val completedSessionRestarted = event.type == MonitorEventType.EVENT &&
+            (event.name == MonitorEventName.TASK_STARTED || event.name == MonitorEventName.SESSION_STARTED) &&
+            event.sessionId == recentSessionCompletion?.sessionId
+        val snapshotShowsRestart = completedSession != null && completedSession.claudeState != ClaudeState.IDLE &&
+            completedSession.lastActivitySequence > (recentSessionCompletion?.sequence ?: Long.MAX_VALUE)
+        val snapshotRenamedSession = completedSession != null &&
+            completedSession.lastActivitySequence > (recentSessionCompletion?.sequence ?: Long.MAX_VALUE) &&
+            completedSession.title != recentSessionCompletion?.displayName && event.snapshot?.recentCompletion == null
+        val lastCompletionIdentity = recentSessionCompletion?.identity ?: current.lastCompletionIdentity
+        if (event.type == MonitorEventType.DISCONNECTED || completedSessionRestarted || snapshotShowsRestart || snapshotRenamedSession) {
+            recentSessionCompletion = null
+            sessionCompletionDeadlineMs = null
         }
 
         val state = current.copy(
@@ -140,8 +204,10 @@ internal object MonitorPresentationReducer {
             changeIdentity = changeIdentity,
             changeDeadlineMs = changeDeadlineMs,
             completionName = completionName,
+            recentSessionCompletion = recentSessionCompletion,
+            sessionCompletionDeadlineMs = sessionCompletionDeadlineMs,
             lastOutcomeIdentity = if (outcomeIdentity != null && !duplicateOutcome) outcomeIdentity else current.lastOutcomeIdentity,
-            lastCompletionIdentity = event.completionIdentity() ?: completion?.identity ?: current.lastCompletionIdentity,
+            lastCompletionIdentity = lastCompletionIdentity,
             finishTailSequence = when {
                 startsChange -> null
                 toolFinishedClosesCurrentFinish -> incomingSequence
@@ -155,10 +221,19 @@ internal object MonitorPresentationReducer {
         return MonitorPresentationReduction(state, accepted = true)
     }
 
-    fun expire(state: MonitorPresentationState, nowMs: Long): MonitorPresentationState =
-        if (state.changeDeadlineMs?.let { nowMs >= it } == true) {
-            state.copy(changeStatus = null, changeIdentity = null, changeDeadlineMs = null, completionName = null)
-        } else state
+    fun expire(state: MonitorPresentationState, nowMs: Long): MonitorPresentationState {
+        val changeExpired = state.changeDeadlineMs?.let { nowMs >= it } == true
+        val completionExpired = state.sessionCompletionDeadlineMs?.let { nowMs >= it } == true
+        if (!changeExpired && !completionExpired) return state
+        return state.copy(
+            changeStatus = if (changeExpired) null else state.changeStatus,
+            changeIdentity = if (changeExpired) null else state.changeIdentity,
+            changeDeadlineMs = if (changeExpired) null else state.changeDeadlineMs,
+            completionName = if (changeExpired) null else state.completionName,
+            recentSessionCompletion = if (completionExpired) null else state.recentSessionCompletion,
+            sessionCompletionDeadlineMs = if (completionExpired) null else state.sessionCompletionDeadlineMs,
+        )
+    }
 
     fun stateChange(state: MonitorPresentationState, nowMs: Long): StateChangeUi? {
         val current = expire(state, nowMs)
@@ -203,7 +278,8 @@ data class MonitorUiState(
     val isConnected: Boolean = false,
     val controlsVisible: Boolean = false,
     val eventCount: Int = 0,
-    val completedDisplayName: String? = null,
+    /** Identity-bound local result, retained for 15 seconds even after Relay clears its result. */
+    val recentSessionCompletion: RecentCompletion? = null,
     /** Local presentation route; it never changes the server-authoritative monitor snapshot. */
     val usagePageVisible: Boolean = false,
 )
@@ -222,6 +298,7 @@ class MonitorViewModel(
     val uiState: StateFlow<MonitorUiState> = _uiState.asStateFlow()
     private var presentationState = MonitorPresentationState()
     private var presentationTimerJob: Job? = null
+    private val sessionTitles = linkedMapOf<String, String>()
 
     init {
         viewModelScope.launch { client.events.collect(::handleEvent) }
@@ -254,10 +331,9 @@ class MonitorViewModel(
             event.sessionTitle.isNullOrBlank()
         ) {
             event.sessionId?.let { sessionId ->
-                previous.snapshot.sessions
-                    ?.firstOrNull { it.sessionId == sessionId }
-                    ?.title
+                event.snapshot?.sessions?.firstOrNull { it.sessionId == sessionId }?.title
                     ?.takeIf { it.isNotBlank() }
+                    ?: sessionTitles[sessionId]
             }
         } else null
         // Relay task_finished envelopes do not carry a title. Reuse only the
@@ -271,6 +347,11 @@ class MonitorViewModel(
         if (!reduction.accepted) {
             publishPresentation(nowMs)
             return
+        }
+
+        presentationEvent.snapshot?.sessions?.forEach { rememberSessionTitle(it.sessionId, it.title) }
+        if (presentationEvent.name == MonitorEventName.SESSION_STARTED && presentationEvent.sessionId != null) {
+            presentationEvent.sessionTitle?.let { rememberSessionTitle(presentationEvent.sessionId, it) }
         }
 
         val activityFromEvent = if (presentationEvent.type == MonitorEventType.EVENT && presentationEvent.name != MonitorEventName.UNKNOWN) {
@@ -293,7 +374,7 @@ class MonitorViewModel(
                 taskId = presentationEvent.taskId,
                 sequence = presentationEvent.sequence,
                 occurredAt = presentationEvent.occurredAt.ifBlank { presentationEvent.updatedAt },
-                displayName = presentationEvent.sessionTitle ?: "未命名会话已完成",
+                displayName = presentationEvent.sessionTitle ?: fallbackSessionTitle(presentationEvent.sessionId),
             )
             incomingSnapshot != null -> null
             else -> previous.snapshot.recentCompletion
@@ -314,7 +395,7 @@ class MonitorViewModel(
                     else -> current.isConnected
                 },
                 eventCount = if (presentationEvent.type == MonitorEventType.CONNECTED || presentationEvent.type == MonitorEventType.DISCONNECTED) current.eventCount else current.eventCount + 1,
-                completedDisplayName = completion?.displayName ?: current.completedDisplayName,
+                recentSessionCompletion = presentationState.recentSessionCompletion,
             )
         }
     }
@@ -328,9 +409,22 @@ class MonitorViewModel(
     private fun publishPresentation(nowMs: Long) {
         val change = MonitorPresentationReducer.stateChange(presentationState, nowMs)
         _uiState.update { current ->
-            if (current.petState == presentationState.baseState && current.stateChange == change) current
-            else current.copy(petState = presentationState.baseState, stateChange = change)
+            if (current.petState == presentationState.baseState && current.stateChange == change &&
+                current.recentSessionCompletion == presentationState.recentSessionCompletion
+            ) current
+            else current.copy(
+                petState = presentationState.baseState,
+                stateChange = change,
+                recentSessionCompletion = presentationState.recentSessionCompletion,
+            )
         }
+    }
+
+    private fun rememberSessionTitle(sessionId: String, title: String) {
+        if (title.isBlank()) return
+        sessionTitles.remove(sessionId)
+        sessionTitles[sessionId] = title
+        while (sessionTitles.size > 64) sessionTitles.remove(sessionTitles.keys.first())
     }
 
     private fun defaultMessage(event: MonitorEvent, snapshot: MonitorSnapshot): String = when {
@@ -347,13 +441,4 @@ class MonitorViewModel(
         client.disconnect()
         super.onCleared()
     }
-}
-
-private fun MonitorSnapshot.toPetState(): PetState = when {
-    computerState == ComputerState.OFFLINE -> PetState.OFFLINE
-    sessions?.any { it.claudeState == ClaudeState.WORKING } == true -> PetState.WORKING
-    claudeState == ClaudeState.WORKING || runningCount?.let { it > 0 } == true -> PetState.WORKING
-    computerState == ComputerState.STALE -> PetState.WAITING
-    claudeState == ClaudeState.WAITING -> PetState.WAITING
-    else -> PetState.IDLE
 }

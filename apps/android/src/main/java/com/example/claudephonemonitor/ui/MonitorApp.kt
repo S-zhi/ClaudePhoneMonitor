@@ -11,6 +11,8 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -45,6 +47,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -63,6 +67,11 @@ import com.example.claudephonemonitor.monitor.PairingConfig
 import com.example.claudephonemonitor.monitor.PairingPayload
 import com.example.claudephonemonitor.monitor.PairingRepository
 import com.example.claudephonemonitor.monitor.PairingStore
+import com.example.claudephonemonitor.monitor.MonitorSnapshot
+import com.example.claudephonemonitor.monitor.RecentCompletion
+import com.example.claudephonemonitor.monitor.SessionDisplayState
+import com.example.claudephonemonitor.monitor.displayState
+import com.example.claudephonemonitor.monitor.sortedTopSessions
 import com.example.claudephonemonitor.monitor.PetState
 import com.example.claudephonemonitor.monitor.WebSocketMonitorClient
 import com.journeyapps.barcodescanner.ScanContract
@@ -267,7 +276,7 @@ private fun PairingScreen(onPaired: (PairingConfig) -> Unit) {
 }
 
 @Composable
-private fun MonitorScreen(
+internal fun MonitorScreen(
     uiState: com.example.claudephonemonitor.monitor.MonitorUiState,
     onToggleControls: () -> Unit,
     onHideControls: () -> Unit,
@@ -290,6 +299,7 @@ private fun MonitorScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .testTag("monitor-stage")
             .background(StageColor)
             .pointerInput(page) { detectTapGestures { if (page != MonitorPage.USAGE) onToggleControls() } }
             .semantics {
@@ -300,8 +310,10 @@ private fun MonitorScreen(
             modifier = Modifier
                 .fillMaxSize(),
         ) {
-            val compact = maxWidth < 500.dp
+            val stageWidth = maxWidth
+            val compact = stageWidth < 500.dp
             val short = maxHeight < 360.dp
+            val stageScale = (stageWidth.value / 930f).coerceIn(0.72f, 1.5f)
             if (page == MonitorPage.USAGE) {
                 UsageMonitorScreen(
                     uiState = uiState,
@@ -314,20 +326,21 @@ private fun MonitorScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(
-                            start = if (compact) 8.dp else 18.dp,
-                            end = if (compact) 8.dp else 18.dp,
+                            start = stageWidth * 0.04f,
+                            end = stageWidth * 0.04f,
                             top = 42.dp,
-                            bottom = 12.dp,
+                            bottom = 42.dp,
                         ),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     SessionSummaryPanel(
                         snapshot = uiState.snapshot,
-                        state = displayPetState,
-                        compact = compact || short,
+                        completion = uiState.recentSessionCompletion,
+                        scale = stageScale,
                         modifier = Modifier
-                            .weight(if (compact) 0.44f else 1.05f)
-                            .fillMaxHeight(),
+                            .weight(0.44f)
+                            .fillMaxHeight()
+                            .padding(start = if (compact) 0.dp else stageWidth * 0.078f),
                     )
                     if (page == MonitorPage.STATE_CHANGE && stateChange != null) {
                         StateChangePanel(
@@ -338,7 +351,7 @@ private fun MonitorScreen(
                             activity = uiState.activity,
                             compact = compact || short,
                             modifier = Modifier
-                                .weight(if (compact) 0.56f else 1.4f)
+                                .weight(0.56f)
                                 .fillMaxHeight(),
                         )
                     } else {
@@ -347,8 +360,10 @@ private fun MonitorScreen(
                             activity = uiState.activity,
                             isSilent = displayPetState == PetState.OFFLINE,
                             modifier = Modifier
-                                .weight(if (compact) 0.56f else 1.4f)
-                                .fillMaxHeight(),
+                                .weight(0.56f)
+                                .fillMaxHeight()
+                                .testTag("clawd")
+                                .semantics { contentDescription = "Clawd animation: ${displayPetState.title}" },
                         )
                     }
                 }
@@ -430,13 +445,11 @@ private fun StateChangePanel(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Text(
+        PixelText(
             text = status.title,
-            color = Color(status.color),
-            fontSize = if (compact) 28.sp else 42.sp,
-            fontWeight = FontWeight.ExtraBold,
-            letterSpacing = if (compact) 1.2.sp else 2.sp,
-            maxLines = 1,
+            color = statusColor(status),
+            textHeight = if (compact) 24.sp else 30.sp,
+            modifier = Modifier.testTag("state-change-title"),
         )
         if (status == PetState.FINISH && !completionName.isNullOrBlank()) {
             Text(
@@ -462,111 +475,125 @@ private fun StateChangePanel(
             isSilent = animationState == PetState.OFFLINE,
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f),
+                .weight(1f)
+                .testTag("clawd")
+                .semantics { contentDescription = "Clawd animation: ${animationState.title}" },
         )
     }
 }
 
+private fun statusColor(state: PetState): Color = when (state) {
+    PetState.WORKING -> TerracottaColor
+    PetState.WAITING -> Color(0xFFF2BF69)
+    PetState.FINISH -> Color(0xFF93BE81)
+    PetState.ERROR -> AlertColor
+    PetState.IDLE -> Color(0xFFB6B1AB)
+    PetState.OFFLINE -> MutedInkColor
+}
+
+private fun statusColor(state: SessionDisplayState): Color = when (state) {
+    SessionDisplayState.WORKING -> TerracottaColor
+    SessionDisplayState.WAITING -> Color(0xFFF2BF69)
+    SessionDisplayState.DONE -> Color(0xFF93BE81)
+    SessionDisplayState.IDLE -> Color(0xFFB6B1AB)
+}
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SessionSummaryPanel(
-    snapshot: com.example.claudephonemonitor.monitor.MonitorSnapshot,
-    state: PetState,
-    compact: Boolean,
+    snapshot: MonitorSnapshot,
+    completion: RecentCompletion?,
+    scale: Float,
     modifier: Modifier = Modifier,
 ) {
-    val stateLabel = when (state) {
-        PetState.IDLE -> "空闲"
-        PetState.WORKING -> "运行中"
-        PetState.WAITING -> "等待输入"
-        PetState.FINISH -> "已完成"
-        PetState.ERROR -> "需要处理"
-        PetState.OFFLINE -> "离线"
-    }
-    Column(
-        modifier = modifier.padding(
-            start = if (compact) 2.dp else 8.dp,
-            end = if (compact) 3.dp else 6.dp,
-            top = 4.dp,
-            bottom = 8.dp,
-        ),
-        verticalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 7.dp),
-    ) {
-        Text(
-            text = state.title,
-            color = when (state) {
-                PetState.WORKING -> Color(0xFF8DE6A8)
-                PetState.ERROR -> AlertColor
-                else -> InkColor
-            },
-            fontSize = if (compact) 18.sp else 22.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 1.2.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(stateLabel, color = MutedInkColor, fontSize = if (compact) 10.sp else 12.sp, letterSpacing = 0.7.sp)
-
-        val sessions = snapshot.sessions
-        if (sessions != null) {
-            Text(
-                text = "运行中 ${snapshot.runningCount?.toString() ?: "—"} · 会话 ${snapshot.sessionCount?.toString() ?: "—"}",
-                color = TerracottaColor,
-                fontSize = if (compact) 9.sp else 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(if (compact) 2.dp else 5.dp),
+    val sessions = snapshot.sortedTopSessions()
+    val density = LocalDensity.current
+    val titleSize = (13f * scale).sp
+    val statusSize = (12f * scale).sp
+    // Natural row height follows the user's font scale; only overflowing lists scroll.
+    val rowHeight = maxOf((31f * scale).dp, with(density) { titleSize.toDp() * 1.9f })
+    val statusWidth = maxOf((81f * scale).dp, with(density) { statusSize.toDp() * 6.0f })
+    val markerSpace = (18f * scale).dp
+    Box(modifier = modifier, contentAlignment = Alignment.CenterStart) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .testTag("session-list"),
+        ) {
+            FlowRow(
+                modifier = Modifier.padding(start = markerSpace, bottom = (9f * scale).dp),
+                horizontalArrangement = Arrangement.spacedBy((16f * scale).dp),
+                verticalArrangement = Arrangement.spacedBy((4f * scale).dp),
             ) {
-                sessions.take(5).forEach { session ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 6.dp),
-                    ) {
-                        Text(
-                            text = session.title,
-                            color = InkColor,
-                            fontSize = if (compact) 10.sp else 11.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Text(
-                            text = when (session.claudeState) {
-                                com.example.claudephonemonitor.monitor.ClaudeState.IDLE -> "空闲"
-                                com.example.claudephonemonitor.monitor.ClaudeState.WORKING -> "运行中"
-                                com.example.claudephonemonitor.monitor.ClaudeState.WAITING -> "等待"
-                            },
-                            color = when (session.claudeState) {
-                                com.example.claudephonemonitor.monitor.ClaudeState.WORKING -> Color(0xFF8DE6A8)
-                                com.example.claudephonemonitor.monitor.ClaudeState.WAITING -> Color(0xFFF6C76D)
-                                else -> MutedInkColor
-                            },
-                            fontSize = if (compact) 9.sp else 10.sp,
-                            maxLines = 1,
-                        )
+                Text(
+                    text = "SESSIONS · ${formatSessionCount(snapshot.sessionCount ?: snapshot.sessions?.size)}",
+                    color = MutedInkColor,
+                    fontSize = (8f * scale).sp,
+                    letterSpacing = (1.7f * scale).sp,
+                    maxLines = 1,
+                    modifier = Modifier.testTag("session-count"),
+                )
+                Text(
+                    text = "RUNNING · ${formatSessionCount(snapshot.runningCount)}",
+                    color = MutedInkColor,
+                    fontSize = (8f * scale).sp,
+                    letterSpacing = (1.1f * scale).sp,
+                    maxLines = 1,
+                    modifier = Modifier.testTag("running-count"),
+                )
+            }
+            sessions.forEachIndexed { index, session ->
+                val state = session.displayState(completion)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = rowHeight)
+                        .testTag("session-${session.sessionId}")
+                        .semantics(mergeDescendants = true) { contentDescription = "Session ${index + 1}: ${state.label}" },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(modifier = Modifier.width(markerSpace)) {
+                        if (index == 0) {
+                            Box(
+                                Modifier
+                                    .width((1.5f * scale).dp)
+                                    .height(with(density) { statusSize.toDp() })
+                                    .background(statusColor(state)),
+                            )
+                        }
                     }
+                    PixelText(
+                        text = state.label,
+                        color = statusColor(state),
+                        textHeight = statusSize,
+                        modifier = Modifier.width(statusWidth),
+                    )
+                    Text(
+                        text = session.title,
+                        color = InkColor,
+                        fontSize = titleSize,
+                        fontWeight = FontWeight.Normal,
+                        letterSpacing = (0.35f * scale).sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
                 }
             }
-        }
-
-        snapshot.recentCompletion?.let { completion ->
-            Text(
-                text = "已完成：${completion.displayName}",
-                color = TerracottaColor,
-                fontSize = if (compact) 9.sp else 11.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            if (sessions.isEmpty()) {
+                Text(
+                    text = if (snapshot.sessions == null) "Waiting for sessions" else "No active sessions",
+                    color = MutedInkColor,
+                    fontSize = titleSize,
+                    modifier = Modifier.padding(start = markerSpace, top = (8f * scale).dp),
+                )
+            }
         }
     }
 }
+
+internal fun formatSessionCount(count: Int?): String = count?.toString()?.padStart(2, '0') ?: "—"
 
 @Composable
 private fun RelayIndicator(connected: Boolean, modifier: Modifier = Modifier) {

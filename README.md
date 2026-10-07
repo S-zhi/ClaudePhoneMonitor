@@ -214,7 +214,7 @@ Tokens。只有缓存分子、分母和两个来源覆盖都完整时才给完�
 - Codex 监听需要显式启用。已核实桌面应用版本为 26.930.61225（内嵌 runtime 0.160.0），
   独立 CLI 二进制为 0.159.3；两种执行形态不可混称。当前 Codex 会话 JSONL 格式不稳定。
   本项不假定可观察显式等待、全部工具活动或所有错误。
-- 本轮明确跳过 Android 真机验收；设备上的 Compose 页面选择和 15 秒可见时长仍待后续录屏复验。JVM 测试验证 wire JSON、fake client、ViewModel 状态流及纯页面选择逻辑，不代表真机验收。
+- Android 真机上的原生 Compose fixture 四项测试已通过，覆盖多 Session 列表、完成名称、Working 优先、短横屏和大字号布局，见 [issue #4 验证记录](docs/device-testing/issue4-reimplementation-2026-10-07.md)。15 秒截止逻辑由 JVM 测试验证；真实连接截图使用原有运行中的 Relay，新版后端未在该服务重新部署，真实 Relay 事件的完整 15 秒可见时长尚未录屏验收。
 
 ## 目录
 

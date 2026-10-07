@@ -912,7 +912,7 @@ export class Relay {
       duplicate: result.duplicate,
     });
     if (!result.duplicate && !result.conflict) {
-      this.broadcastEventForInstallation(result.stored.event);
+      if (result.activity_applied) this.broadcastEventForInstallation(result.stored.event);
       this.broadcastSnapshotsForInstallation(safeEvent.installation_id);
     }
   }
@@ -1074,7 +1074,12 @@ export class Relay {
     }
 
     for (const stored of this.repository.listEventsAfter(installationId, lastSequence)) {
-      this.send(connectionId, stored.event);
+      // Older databases default presentation eligibility to true, but unknown
+      // completions still cannot identify a session or task to present.
+      if (stored.activity_applied !== false &&
+          !(stored.event.session_id === "unknown" && stored.event.event_type === "task_finished")) {
+        this.send(connectionId, stored.event);
+      }
     }
     this.sendSnapshotIfSubscribed(connectionId, installationId);
   }

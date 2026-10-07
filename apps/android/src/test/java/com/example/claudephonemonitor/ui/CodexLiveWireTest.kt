@@ -63,7 +63,8 @@ class CodexLiveWireTest {
                 snapshot.optString("computer_state") == "online" &&
                 snapshot.optLong("last_sequence") < startedSequence &&
                 snapshot.optJSONArray("sessions")?.jsonObjects()?.any {
-                    it.optString("session_id") == sessionId && it.optString("title") == "Codex"
+                    it.optString("session_id") == sessionId &&
+                        it.optString("title").matches(Regex("^Codex [0-9a-f]{6}$"))
                 } == true
         }
         val workingSnapshot = snapshots.firstOrNull { snapshot ->
@@ -87,6 +88,11 @@ class CodexLiveWireTest {
         assertNotNull("live Android wire must include an online pre-turn snapshot for the matching Codex session", baselineSnapshot)
         assertNotNull("live Android wire must include the Relay WORKING snapshot after the matching start event", workingSnapshot)
         assertNotNull("live Android wire must include this turn's matching completion snapshot", finalSnapshot)
+        val sessionTitle = baselineSnapshot!!.getJSONArray("sessions").jsonObjects()
+            .first { it.getString("session_id") == sessionId }.getString("title")
+        assertEquals("Codex ${sessionId.takeLast(6)}", sessionTitle)
+        val completedTitle = finalSnapshot!!.getJSONObject("recent_completion").getString("display_name")
+        assertEquals(sessionTitle, completedTitle)
 
         val dispatcher = StandardTestDispatcher(testScheduler)
         Dispatchers.setMain(dispatcher)
@@ -97,7 +103,7 @@ class CodexLiveWireTest {
             val vm = MonitorViewModel(client) { monotonicMs }.also { store.put("codex-live-wire", it) }
             runCurrent()
 
-            client.emit(snapshotWire(baselineSnapshot!!))
+            client.emit(snapshotWire(baselineSnapshot))
             runCurrent()
             client.emit(JSONObject(started.toString()).put("type", "event").toString())
             runCurrent()
@@ -119,13 +125,13 @@ class CodexLiveWireTest {
             assertEquals(sessionId, vm.uiState.value.snapshot.recentCompletion?.sessionId)
             assertEquals(taskId, vm.uiState.value.snapshot.recentCompletion?.taskId)
             assertEquals(finishedSequence, vm.uiState.value.snapshot.recentCompletion?.sequence)
-            assertEquals("Codex", vm.uiState.value.stateChange?.completionName)
+            assertEquals(sessionTitle, vm.uiState.value.stateChange?.completionName)
             assertEquals(MonitorPage.STATE_CHANGE, selectMonitorPage(vm.uiState.value))
 
-            client.emit(snapshotWire(finalSnapshot!!))
+            client.emit(snapshotWire(finalSnapshot))
             runCurrent()
             assertEquals(PetState.FINISH, vm.uiState.value.stateChange?.status)
-            assertEquals("Codex", vm.uiState.value.stateChange?.completionName)
+            assertEquals(completedTitle, vm.uiState.value.stateChange?.completionName)
             assertEquals(sessionId, vm.uiState.value.snapshot.recentCompletion?.sessionId)
             assertEquals(taskId, vm.uiState.value.snapshot.recentCompletion?.taskId)
             assertEquals(finishedSequence, vm.uiState.value.snapshot.recentCompletion?.sequence)

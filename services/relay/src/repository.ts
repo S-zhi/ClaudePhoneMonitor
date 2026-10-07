@@ -27,6 +27,8 @@ export interface RecordEventResult {
   stored: StoredEvent;
   duplicate: boolean;
   conflict: boolean;
+  /** Frontend presentation eligibility, independent of legacy installation-state updates. */
+  activity_applied: boolean;
   sequence_status: SequenceStatus;
   last_sequence: number | null;
   next_sequence: number | null;
@@ -110,6 +112,8 @@ interface SessionState {
   title?: string;
   claude_state: ClaudeState;
   last_sequence: number;
+  /** Activity ordering is independent of the accepted event watermark. */
+  last_activity_sequence?: number;
   last_activity_at: string;
   updated_at: string;
   task_id?: string;
@@ -122,6 +126,14 @@ interface SessionState {
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
 const COMPLETION_TTL_MS = 5_000;
 
+function sessionDisplayName(record: SessionState): string {
+  const codexHash = /^codex:sess:([0-9a-f]{64})$/.exec(record.session_id)?.[1];
+  if (codexHash && (!record.title || record.title === "Codex")) return `Codex ${codexHash.slice(-6)}`;
+  if (record.title) return record.title;
+  const suffix = createHash("sha256").update(record.session_id).digest("hex").slice(-6);
+  return `会话 ${suffix}`;
+}
+
 function applySessionEvent(
   previous: SessionState | undefined,
   event: EventEnvelope,
@@ -129,8 +141,7 @@ function applySessionEvent(
   if (event.session_id === "unknown") return previous;
   if (
     previous &&
-    (event.sequence <= previous.last_sequence ||
-      (previous.ended && event.event_type !== "session_started"))
+    event.sequence <= previous.last_sequence
   ) {
     return previous;
   }
@@ -139,11 +150,22 @@ function applySessionEvent(
     session_id: event.session_id,
     claude_state: "idle",
     last_sequence: -1,
+    last_activity_sequence: -1,
     last_activity_at: event.occurred_at,
     updated_at: event.occurred_at,
     ended: false,
   };
+  next.last_activity_sequence ??= next.last_sequence;
   next.last_sequence = event.sequence;
+  const taskTail = ["tool_started", "tool_finished", "tool_failed", "waiting", "task_finished", "task_failed"].includes(event.event_type);
+  if (
+    (next.ended && event.event_type !== "session_started") ||
+    (taskTail && (
+      Boolean(event.task_id && next.task_id && event.task_id !== next.task_id) ||
+      (next.terminalTask ?? Boolean(next.completion))
+    ))
+  ) return next;
+  next.last_activity_sequence = event.sequence;
   next.updated_at = event.occurred_at;
   next.last_activity_at = event.occurred_at;
   if (event.event_type === "session_started" && event.session_title) next.title = event.session_title;
@@ -180,16 +202,17 @@ function applySessionEvent(
         event.task_id && next.task_id && event.task_id !== next.task_id,
       );
       if (!staleTaskFinish) {
+        const completedTaskId = event.task_id ?? next.task_id;
         next.claude_state = "idle";
         next.task_id = undefined;
         next.terminalTask = true;
         if (event.event_type === "task_finished") {
           next.completion = {
             session_id: event.session_id,
-            ...(event.task_id ? { task_id: event.task_id } : {}),
+            ...(completedTaskId ? { task_id: completedTaskId } : {}),
             sequence: event.sequence,
             occurred_at: event.occurred_at,
-            display_name: next.title ?? "未命名会话已完成",
+            display_name: sessionDisplayName(next),
           };
         } else {
           next.completion = undefined;
@@ -219,7 +242,7 @@ function aggregatedState(
   const nowMs = Date.parse(now);
   const active = records.filter((record) => !record.ended && nowMs - Date.parse(record.last_activity_at) < SESSION_TTL_MS);
   const ordered = active.sort((a, b) =>
-    b.last_sequence - a.last_sequence ||
+    (b.last_activity_sequence ?? b.last_sequence) - (a.last_activity_sequence ?? a.last_sequence) ||
     (a.session_id < b.session_id ? -1 : a.session_id > b.session_id ? 1 : 0),
   );
   const working = active.some((record) => record.claude_state === "working");
@@ -235,9 +258,9 @@ function aggregatedState(
     claude_state: working ? "working" : mostRecent?.claude_state ?? "idle",
     sessions: ordered.slice(0, 5).map((record) => ({
       session_id: record.session_id,
-      title: record.title ?? `会话 ${record.session_id.slice(-4)}`,
+      title: sessionDisplayName(record),
       claude_state: record.claude_state,
-      last_activity_sequence: record.last_sequence,
+      last_activity_sequence: record.last_activity_sequence ?? record.last_sequence,
     })),
     running_count: active.filter((record) => record.claude_state === "working").length,
     session_count: active.length,
@@ -465,6 +488,7 @@ export class InMemoryRelayRepository implements RelayRepository {
         stored: clone(byId),
         duplicate: true,
         conflict: false,
+        activity_applied: false,
         sequence_status: this.sequenceStatusForDuplicate(byId.event, current),
         last_sequence: current?.last_sequence ?? byId.event.sequence,
         next_sequence: current ? this.nextSequence(current.last_sequence) : byId.event.sequence + 1,
@@ -473,7 +497,7 @@ export class InMemoryRelayRepository implements RelayRepository {
     if (byId || byEventSequence || usageById || usageSequenceConflict) {
       const stored = byId ?? byEventSequence ?? { event: clone(event), received_at: receivedAt };
       return {
-        stored: clone(stored), duplicate: false, conflict: true,
+        stored: clone(stored), duplicate: false, conflict: true, activity_applied: false,
         sequence_status: sequenceStatusForSequence(event.sequence, current?.last_sequence ?? null),
         last_sequence: current?.last_sequence ?? null,
         next_sequence: current ? this.nextSequence(current.last_sequence) : null,
@@ -489,9 +513,18 @@ export class InMemoryRelayRepository implements RelayRepository {
     installationEvents.push(stored);
     this.eventsByInstallation.set(event.installation_id, installationEvents);
 
+    const sessionKey = `${event.installation_id}\u0000${event.session_id}`;
+    const priorSession = this.sessions.get(sessionKey);
+    const updatedSession = applySessionEvent(priorSession, event);
+    const changesActivity = event.session_id === "unknown" || updatedSession?.last_activity_sequence === event.sequence;
+    stored.activity_applied = changesActivity && sequence_status !== "out_of_order" &&
+      !(event.session_id === "unknown" && event.event_type === "task_finished");
+
     const nextState: InstallationState =
       current && previousSequence !== null && event.sequence < previousSequence
         ? current
+        : current && !changesActivity
+          ? { ...current, last_sequence: Math.max(current.last_sequence ?? 0, event.sequence) }
         : {
             installation_id: event.installation_id,
             last_sequence:
@@ -509,9 +542,6 @@ export class InMemoryRelayRepository implements RelayRepository {
             ...(current?.usage ? { usage: current.usage } : {}),
           };
     this.installations.set(event.installation_id, nextState);
-    const sessionKey = `${event.installation_id}\u0000${event.session_id}`;
-    const priorSession = this.sessions.get(sessionKey);
-    const updatedSession = applySessionEvent(priorSession, event);
     if (updatedSession) this.sessions.set(sessionKey, updatedSession);
     this.pruneEvents();
 
@@ -519,6 +549,7 @@ export class InMemoryRelayRepository implements RelayRepository {
       stored: clone(stored),
       duplicate: false,
       conflict: false,
+      activity_applied: stored.activity_applied,
       sequence_status,
       last_sequence: nextState.last_sequence,
       next_sequence: this.nextSequence(nextState.last_sequence),
@@ -767,6 +798,7 @@ export class SqliteRelayRepository implements RelayRepository {
         sequence INTEGER NOT NULL,
         event_json TEXT NOT NULL,
         received_at TEXT NOT NULL,
+        activity_applied INTEGER NOT NULL DEFAULT 1,
         UNIQUE (installation_id, sequence)
       );
       CREATE INDEX IF NOT EXISTS relay_events_installation_sequence
@@ -827,6 +859,10 @@ export class SqliteRelayRepository implements RelayRepository {
     const installationColumns = this.db.prepare("PRAGMA table_info(relay_installations)").all() as SqlRow[];
     if (!installationColumns.some((column) => stringValue(column, "name") === "usage_json")) {
       this.db.exec("ALTER TABLE relay_installations ADD COLUMN usage_json TEXT");
+    }
+    const eventColumns = this.db.prepare("PRAGMA table_info(relay_events)").all() as SqlRow[];
+    if (!eventColumns.some((column) => stringValue(column, "name") === "activity_applied")) {
+      this.db.exec("ALTER TABLE relay_events ADD COLUMN activity_applied INTEGER NOT NULL DEFAULT 1");
     }
     this.migrateSessionState();
   }
@@ -958,19 +994,16 @@ export class SqliteRelayRepository implements RelayRepository {
 
   findEvent(eventId: string): StoredEvent | undefined {
     const row = this.db
-      .prepare("SELECT event_json, received_at FROM relay_events WHERE event_id = ?")
+      .prepare("SELECT event_json, received_at, activity_applied FROM relay_events WHERE event_id = ?")
       .get(eventId) as SqlRow | undefined;
-    if (!row) return undefined;
-    const event = optionalJson<EventEnvelope>(row.event_json);
-    const receivedAt = stringValue(row, "received_at");
-    return event && receivedAt ? { event: clone(event), received_at: receivedAt } : undefined;
+    return this.rowToStoredEvent(row);
   }
 
   recordEvent(event: EventEnvelope, receivedAt: string): RecordEventResult {
     const byId = this.findEvent(event.event_id);
     const bySequence = this.db
       .prepare(
-        "SELECT event_json, received_at FROM relay_events WHERE installation_id = ? AND sequence = ?",
+        "SELECT event_json, received_at, activity_applied FROM relay_events WHERE installation_id = ? AND sequence = ?",
       )
       .get(event.installation_id, event.sequence) as SqlRow | undefined;
     const usageById = this.db.prepare(
@@ -985,6 +1018,7 @@ export class SqliteRelayRepository implements RelayRepository {
         stored: clone(byId),
         duplicate: true,
         conflict: false,
+        activity_applied: false,
         sequence_status: this.sequenceStatusForDuplicate(byId.event, current),
         last_sequence: current?.last_sequence ?? byId.event.sequence,
         next_sequence: current ? this.nextSequence(current.last_sequence) : byId.event.sequence + 1,
@@ -996,6 +1030,7 @@ export class SqliteRelayRepository implements RelayRepository {
         stored: clone(byId ?? sequenceEvent ?? { event: clone(event), received_at: receivedAt }),
         duplicate: false,
         conflict: true,
+        activity_applied: false,
         sequence_status: sequenceStatusForSequence(event.sequence, current?.last_sequence ?? null),
         last_sequence: current?.last_sequence ?? null,
         next_sequence: current ? this.nextSequence(current.last_sequence) : null,
@@ -1005,9 +1040,18 @@ export class SqliteRelayRepository implements RelayRepository {
     const previousSequence = current?.last_sequence ?? null;
     const sequence_status = this.sequenceStatus(event.sequence, previousSequence);
     const stored: StoredEvent = { event: clone(event), received_at: receivedAt };
+    const sessionRow = this.db
+      .prepare("SELECT session_json FROM relay_sessions WHERE installation_id = ? AND session_id = ?")
+      .get(event.installation_id, event.session_id) as SqlRow | undefined;
+    const updatedSession = applySessionEvent(optionalJson<SessionState>(sessionRow?.session_json), event);
+    const changesActivity = event.session_id === "unknown" || updatedSession?.last_activity_sequence === event.sequence;
+    stored.activity_applied = changesActivity && sequence_status !== "out_of_order" &&
+      !(event.session_id === "unknown" && event.event_type === "task_finished");
     const nextState: InstallationState =
       current && previousSequence !== null && event.sequence < previousSequence
         ? current
+        : current && !changesActivity
+          ? { ...current, last_sequence: Math.max(current.last_sequence ?? 0, event.sequence) }
         : {
             installation_id: event.installation_id,
             last_sequence:
@@ -1025,13 +1069,9 @@ export class SqliteRelayRepository implements RelayRepository {
           };
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const sessionRow = this.db
-        .prepare("SELECT session_json FROM relay_sessions WHERE installation_id = ? AND session_id = ?")
-        .get(event.installation_id, event.session_id) as SqlRow | undefined;
-      const updatedSession = applySessionEvent(optionalJson<SessionState>(sessionRow?.session_json), event);
       this.db
         .prepare(
-          "INSERT INTO relay_events (event_id, installation_id, sequence, event_json, received_at) VALUES (?, ?, ?, ?, ?)",
+          "INSERT INTO relay_events (event_id, installation_id, sequence, event_json, received_at, activity_applied) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .run(
           event.event_id,
@@ -1039,6 +1079,7 @@ export class SqliteRelayRepository implements RelayRepository {
           event.sequence,
           JSON.stringify(event),
           receivedAt,
+          stored.activity_applied ? 1 : 0,
         );
       this.db
         .prepare(
@@ -1074,6 +1115,7 @@ export class SqliteRelayRepository implements RelayRepository {
       stored: clone(stored),
       duplicate: false,
       conflict: false,
+      activity_applied: stored.activity_applied,
       sequence_status,
       last_sequence: nextState.last_sequence,
       next_sequence: this.nextSequence(nextState.last_sequence),
@@ -1147,7 +1189,7 @@ export class SqliteRelayRepository implements RelayRepository {
   listEventsAfter(installationId: string, sequence: number): StoredEvent[] {
     const rows = this.db
       .prepare(
-        "SELECT event_json, received_at FROM relay_events WHERE installation_id = ? AND sequence > ? ORDER BY sequence ASC",
+        "SELECT event_json, received_at, activity_applied FROM relay_events WHERE installation_id = ? AND sequence > ? ORDER BY sequence ASC",
       )
       .all(installationId, sequence) as SqlRow[];
     return rows
@@ -1356,7 +1398,7 @@ export class SqliteRelayRepository implements RelayRepository {
     if (!row) return undefined;
     const event = optionalJson<EventEnvelope>(row.event_json);
     const receivedAt = stringValue(row, "received_at");
-    return event && receivedAt ? { event, received_at: receivedAt } : undefined;
+    return event && receivedAt ? { event, received_at: receivedAt, activity_applied: row.activity_applied !== 0 } : undefined;
   }
 
   private rowToPairing(row: SqlRow | undefined): PairingRecord | undefined {

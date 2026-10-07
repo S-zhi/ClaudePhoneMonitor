@@ -12,6 +12,7 @@ import {
   classifySnapshot,
   createInitialMonitorState,
   effectiveMonitorStatus,
+  highestPriorityBaseStatus,
   highestPriorityStatus,
   monitorReducer,
   nextOverlayExpiry,
@@ -57,12 +58,12 @@ test("classifies canonical activity events", () => {
   );
 });
 
-test("uses the documented precedence for simultaneous statuses", () => {
+test("keeps Working ahead of Waiting when combining session statuses", () => {
   assert.deepEqual(STATUS_PRECEDENCE, [
     MONITOR_STATUS.OFFLINE,
     MONITOR_STATUS.ERROR,
-    MONITOR_STATUS.WAITING,
     MONITOR_STATUS.WORKING,
+    MONITOR_STATUS.WAITING,
     MONITOR_STATUS.IDLE,
   ]);
   assert.equal(
@@ -77,7 +78,11 @@ test("uses the documented precedence for simultaneous statuses", () => {
   );
   assert.equal(
     highestPriorityStatus([MONITOR_STATUS.IDLE, MONITOR_STATUS.WORKING, MONITOR_STATUS.WAITING]),
-    MONITOR_STATUS.WAITING,
+    MONITOR_STATUS.WORKING,
+  );
+  assert.equal(
+    highestPriorityBaseStatus([MONITOR_STATUS.WAITING, MONITOR_STATUS.WORKING]),
+    MONITOR_STATUS.WORKING,
   );
 });
 

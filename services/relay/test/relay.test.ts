@@ -1,9 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { JsonLogger } from "../src/logger.js";
 import { Relay } from "../src/relay.js";
+import { InMemoryRelayRepository, SqliteRelayRepository } from "../src/repository.js";
 import type { EventEnvelope, ServerMessage, UsageAggregate, UsageSnapshotMessage } from "../src/types.js";
 
 function event(overrides: Partial<EventEnvelope> = {}): EventEnvelope {
@@ -362,7 +366,7 @@ test("Relay accepts only safe SessionStart titles and falls back for sensitive v
     })));
     const current = phoneMessages.filter((message) => message.type === "snapshot").at(-1);
     assert.ok(current && current.type === "snapshot");
-    assert.equal(current.sessions?.find((session) => session.session_id === id)?.title, `会话 ${id.slice(-4)}`);
+    assert.equal(current.sessions?.find((session) => session.session_id === id)?.title, `会话 ${createHash("sha256").update(id).digest("hex").slice(-6)}`);
     assert.equal(relay.repository.findEvent(`title-${index + 1}`)?.event.session_title, undefined);
   });
   relay.receive(collector.connection_id, JSON.stringify(event({
@@ -499,6 +503,120 @@ test("unacknowledged probes mark the installation stale and emit a retryable tim
   relay.disconnect(collector.connection_id);
   relay.disconnect(android.connection_id);
   relay.stop();
+});
+
+test("unknown finishes update legacy state and ACKs without presenting an attributed completion in memory and SQLite", () => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-unknown-finish-"));
+  const now = () => new Date("2026-10-02T00:00:01.000Z");
+  try {
+    for (const repository of [new InMemoryRelayRepository(), new SqliteRelayRepository(join(directory, "relay.sqlite"))]) {
+      const relay = new Relay({ autoStart: false, repository, now });
+      try {
+        const collectorMessages = messages();
+        const phoneMessages = messages();
+        const collector = relay.connect({ gateway: "collector", installation_id: "install-1", transport: { send: (message) => collectorMessages.push(message) } });
+        const phone = relay.connect({ gateway: "android", installation_id: "install-1", transport: { send: (message) => phoneMessages.push(message) } });
+        const records = [
+          event({ event_id: "anonymous-start", sequence: 1, session_id: "unknown", event_type: "task_started" }),
+          event({ event_id: "anonymous-finish", sequence: 2, session_id: "unknown", event_type: "task_finished" }),
+          event({ event_id: "known-start", sequence: 3, event_type: "task_started", task_id: "known-task" }),
+          event({ event_id: "anonymous-background-finish", sequence: 4, session_id: "unknown", event_type: "task_finished" }),
+          event({ event_id: "known-finish", sequence: 5, event_type: "task_finished", task_id: "known-task" }),
+        ];
+        for (const record of records) {
+          relay.receive(collector.connection_id, JSON.stringify(record));
+          const ack = collectorMessages.filter((message) => message.type === "event_ack").at(-1);
+          assert.ok(ack?.type === "event_ack" && ack.accepted);
+          assert.equal(ack.last_sequence, record.sequence);
+          const snapshot = phoneMessages.at(-1);
+          assert.ok(snapshot?.type === "snapshot");
+          assert.equal(snapshot.last_sequence, record.sequence);
+          if (record.sequence === 2) {
+            assert.equal(snapshot.claude_state, "idle", "the anonymous Stop still updates the legacy base");
+            assert.equal(snapshot.sessions, undefined);
+            assert.equal(snapshot.recent_completion, undefined);
+          }
+          if (record.sequence === 4) {
+            assert.equal(snapshot.claude_state, "working", "anonymous completion cannot end the known task");
+            assert.equal(snapshot.running_count, 1);
+            assert.equal(snapshot.recent_completion, undefined);
+          }
+        }
+        assert.deepEqual(phoneMessages.filter((message) => message.type === "event").map((message) => message.type === "event" && message.sequence), [1, 3, 5]);
+        assert.equal(repository.findEvent("anonymous-finish")?.activity_applied, false);
+        assert.equal(repository.findEvent("anonymous-background-finish")?.activity_applied, false);
+        assert.equal(relay.snapshot("install-1").recent_completion?.task_id, "known-task");
+        // Pre-upgrade SQLite records default activity_applied to true.
+        const listEventsAfter = repository.listEventsAfter.bind(repository);
+        repository.listEventsAfter = (installationId, sequence) => listEventsAfter(installationId, sequence)
+          .map((stored) => ({ ...stored, activity_applied: true }));
+        phoneMessages.length = 0;
+        relay.receive(phone.connection_id, JSON.stringify({ type: "resume", schema_version: 1, installation_id: "install-1", last_sequence: 0 }));
+        assert.deepEqual(phoneMessages.filter((message) => message.type === "event").map((message) => message.type === "event" && message.sequence), [1, 3, 5]);
+        assert.equal(phoneMessages.at(-1)?.type, "snapshot");
+      } finally {
+        relay.stop();
+      }
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("ignored task tails never present live or on resume, including SQLite restart", () => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-presentation-"));
+  const dbPath = join(directory, "relay.sqlite");
+  const now = () => new Date("2026-10-02T00:00:01.000Z");
+  let restarted: Relay | undefined;
+  try {
+    for (const repository of [new InMemoryRelayRepository(), new SqliteRelayRepository(dbPath)]) {
+      const relay = new Relay({ autoStart: false, repository, now });
+      try {
+        const collectorMessages = messages();
+        const phoneMessages = messages();
+        const collector = relay.connect({ gateway: "collector", installation_id: "install-1", transport: { send: (message) => collectorMessages.push(message) } });
+        const phone = relay.connect({ gateway: "android", installation_id: "install-1", transport: { send: (message) => phoneMessages.push(message) } });
+        const records = [
+          event({ event_id: "start-old", sequence: 1, event_type: "task_started", task_id: "old" }),
+          event({ event_id: "start-current", sequence: 2, event_type: "task_started", task_id: "current" }),
+          event({ event_id: "stale-finish", sequence: 3, event_type: "task_finished", task_id: "old" }),
+          event({ event_id: "stale-wait", sequence: 4, event_type: "waiting", task_id: "old" }),
+          event({ event_id: "real-finish", sequence: 5, event_type: "task_finished", task_id: "current" }),
+          event({ event_id: "terminal-finish", sequence: 6, event_type: "task_finished", task_id: "current" }),
+          event({ event_id: "terminal-wait", sequence: 7, event_type: "waiting" }),
+        ];
+        for (const record of records) relay.receive(collector.connection_id, JSON.stringify(record));
+        assert.deepEqual(phoneMessages.filter((message) => message.type === "event").map((message) => message.type === "event" && message.sequence), [1, 2, 5]);
+        assert.equal(collectorMessages.filter((message) => message.type === "event_ack").length, 7);
+        const snapshots = phoneMessages.filter((message) => message.type === "snapshot");
+        assert.equal(snapshots.filter((message) => message.type === "snapshot" && message.last_sequence !== null).length, 7);
+        assert.equal(snapshots.find((message) => message.type === "snapshot" && message.last_sequence === 4)?.claude_state, "working");
+        const final = relay.snapshot("install-1");
+        assert.equal(final.last_sequence, 7);
+        assert.equal(final.claude_state, "idle");
+        assert.equal(final.recent_completion?.sequence, 5);
+        assert.equal(repository.findEvent("stale-finish")?.activity_applied, false);
+        assert.equal(repository.findEvent("real-finish")?.activity_applied, true);
+        assert.equal(repository.recordEvent(records[4]!, now().toISOString()).activity_applied, false, "a duplicate cannot be presented twice");
+        phoneMessages.length = 0;
+        relay.receive(phone.connection_id, JSON.stringify({ type: "resume", schema_version: 1, installation_id: "install-1", last_sequence: 2 }));
+        assert.deepEqual(phoneMessages.filter((message) => message.type === "event").map((message) => message.type === "event" && message.sequence), [5]);
+        assert.equal(phoneMessages.at(-1)?.type, "snapshot");
+      } finally {
+        relay.stop();
+      }
+    }
+    restarted = new Relay({ autoStart: false, now, repository: new SqliteRelayRepository(dbPath) });
+    const replay = messages();
+    const phone = restarted.connect({ gateway: "android", installation_id: "install-1", transport: { send: (message) => replay.push(message) } });
+    replay.length = 0;
+    restarted.receive(phone.connection_id, JSON.stringify({ type: "resume", schema_version: 1, installation_id: "install-1", last_sequence: 2 }));
+    assert.deepEqual(replay.filter((message) => message.type === "event").map((message) => message.type === "event" && message.sequence), [5]);
+    assert.equal(restarted.snapshot("install-1").last_sequence, 7);
+  } finally {
+    restarted?.stop();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("resume replays stored events after a sequence and then sends a snapshot", () => {

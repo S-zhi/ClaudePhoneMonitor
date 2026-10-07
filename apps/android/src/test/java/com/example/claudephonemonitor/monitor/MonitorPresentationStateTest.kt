@@ -166,7 +166,7 @@ class MonitorPresentationStateTest {
             taskId = "task-b",
             sequence = 8,
         ), 100L)
-        assertEquals("未命名会话已完成", MonitorPresentationReducer.stateChange(state, 100L)?.completionName)
+        assertEquals(fallbackSessionTitle("s-2"), MonitorPresentationReducer.stateChange(state, 100L)?.completionName)
         val deadline = state.changeDeadlineMs
         state = reduce(state, MonitorEvent(
             type = MonitorEventType.SNAPSHOT,
@@ -278,7 +278,7 @@ class MonitorPresentationStateTest {
     }
 
     @Test
-    fun reconnectSnapshotEstablishesStateWithoutReplayingHistoricalCompletion() {
+    fun reconnectSnapshotRestoresUnseenAuthoritativeCompletion() {
         var state = reduce(MonitorPresentationState(), MonitorEvent(type = MonitorEventType.DISCONNECTED), 0L)
         state = reduce(state, MonitorEvent(type = MonitorEventType.CONNECTED), 100L)
         state = reduce(state, MonitorEvent(
@@ -291,7 +291,8 @@ class MonitorPresentationStateTest {
             ),
         ), 200L)
         assertEquals(PetState.IDLE, state.baseState)
-        assertNull(MonitorPresentationReducer.stateChange(state, 200L))
+        assertEquals(PetState.FINISH, MonitorPresentationReducer.stateChange(state, 200L)?.status)
+        assertEquals("older result", state.recentSessionCompletion?.displayName)
     }
 
     @Test
@@ -385,7 +386,7 @@ class MonitorPresentationStateTest {
                 """{"type":"event","installation_id":"install","session_id":"unknown-session","task_id":"task-3","sequence":3,"occurred_at":"2026-10-07T01:00:01Z","event_type":"task_finished","payload":{}}""",
             )
             runCurrent()
-            assertEquals("未命名会话已完成", vm.uiState.value.stateChange?.completionName)
+            assertEquals(fallbackSessionTitle("unknown-session"), vm.uiState.value.stateChange?.completionName)
             assertEquals("unknown-session", vm.uiState.value.snapshot.recentCompletion?.sessionId)
         } finally {
             store.clear()

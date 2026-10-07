@@ -77,6 +77,8 @@ export interface UsageSnapshotMessage {
 export interface StoredEvent {
   event: EventEnvelope;
   received_at: string;
+  /** Whether the event may present frontend activity; unknown completion can still update legacy base state. */
+  activity_applied?: boolean;
 }
 
 export interface SnapshotActivity {

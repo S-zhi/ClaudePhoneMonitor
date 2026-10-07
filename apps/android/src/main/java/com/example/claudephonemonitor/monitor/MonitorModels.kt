@@ -246,7 +246,7 @@ data class MonitorEvent(
                         add(
                             SessionSummary(
                                 sessionId = id,
-                                title = item.optString("title").ifBlank { "会话 ${id.takeLast(4)}" },
+                                title = item.optString("title").ifBlank { fallbackSessionTitle(id) },
                                 claudeState = state,
                                 lastActivitySequence = item.longOrNull("last_activity_sequence") ?: 0L,
                             ),
@@ -264,7 +264,7 @@ data class MonitorEvent(
                     taskId = completion.stringOrNull("task_id"),
                     sequence = sequence,
                     occurredAt = completion.optString("occurred_at"),
-                    displayName = completion.optString("display_name").ifBlank { "未命名会话已完成" },
+                    displayName = completion.optString("display_name").ifBlank { fallbackSessionTitle(id) },
                 )
             },
             usage = json.optJSONObject("usage")?.let(::usageFromJson),
