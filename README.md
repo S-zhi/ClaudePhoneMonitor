@@ -107,13 +107,13 @@ apps/android/build/outputs/apk/debug/android-debug.apk
 
 - 仅横屏；
 - 隐藏系统栏；
-- 使用 `update_clawd_assets` 分支提供的 Clawd 帧矩阵作为主角，Compose Canvas 原生渲染；
+- 使用 Issue #8 的 7 张已验收关键姿态、独立完整球 PNG，以及按用户要求恢复的旧 4×4 代码手样式，Compose Canvas 执行局部图层动画；
 - 横屏沉浸式暖炭黑舞台；常态显示会话列表和 Clawd，强提醒的 15 秒改变状态页以左侧大字、右侧 Clawd 分屏展示；
 - 执行超过 5 分钟的任务完成、任务失败、明确需要用户操作的等待，以及长任务运行中断连，会显示 15 秒改变状态页；短任务与普通状态变化仅在当前页面内提示 5 秒；
 - 任务时长从 `task_started` 起算，等待时间计入；恰好 5 分钟或既无可靠起点、也无合法事件时长时采用弱提醒。重复事件、心跳与快照刷新不会重置提醒倒计时；
 - 多主会话中单个任务完成时保留其他主任务的 `WORKING` 聚合状态，同时显示该任务的 `FINISH` 提示与完成会话名称；
 - 主列表先过滤已识别子代理，再展示最近的五个主会话；`Main Running` 与 `Main Sessions` 统计全部有效主会话，`Total Running` 统计主会话及子代理的独立运行线程，旁边显示 `Includes subagents`。旧服务缺少明确统计时显示 `—`；
-- `WORKING` 使用 Clawd 坐在灰色笔记本电脑后打字的动作；
+- `WORKING` 在固定电脑前使用深描边、橙掌心的旧 4×4 双手，按 320 ms 旧序列敲击、1,920 ms 循环；身体与电脑固定。IDLE 呼吸眨眼，WAITING 指向，FINISH 举臂庆祝，ERROR 原地闪动警示块，OFFLINE 静止；Usage 使用独立完整球，连续走近、蓄脚触球、滚球追逐及越球转向；
 - 首次启动 QR 配对页；
 - Android Keystore 加密保存令牌；
 - 真实 WebSocket snapshot/event；
@@ -122,6 +122,8 @@ apps/android/build/outputs/apk/debug/android-debug.apk
 提醒分级的时长、事件和抢占规则见 [Issue #17 说明](docs/issue-17-reminder-policy.md)。
 
 展示方向见 [Clawd 界面整合设计](docs/clawd-ui-design.md)；[待机构图](docs/clawd-design-idle.png) 和 [完成构图](docs/clawd-design-finish.png) 是按分支 STILL 帧绘制的设计参考，不是 APK 或真机截图。强提醒沿用完成构图的左右分屏，任务名称取实际会话。
+
+三个页面的动作与素材追溯见 [Issue #8 方案](docs/issue-8-pet-actions.md)，[源素材预览](docs/pet-assets/preview.md) 展示 7 个关键姿态及新独立球；原姿态 PNG 保持不变，WORKING 双手在运行时替换，Usage 的球来自 `assets/clawd/props/usage-soccer-ball.png` 和独立道具账本。位图异步加载并由 6 MiB 缓存复用，使用最近邻绘制；Usage 以 32 ms 采样运行连续 8 秒循环，页面离开或生命周期低于 `STARTED` 时停钟。本轮构建、19 项实机回归与最终受控帧检查已通过，视频为“实机受控采样预览”，证据与上轮历史记录见 [实机验证记录](docs/issue-8-device-validation.md)。
 
 ## 事件和隐私
 

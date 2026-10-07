@@ -51,6 +51,7 @@ class MonitorPageTest {
         assertEquals(PetState.WORKING, uiState.petState)
         assertEquals("release prep", uiState.stateChange?.completionName)
         assertEquals(ClawdFrameSet.TYPING, resolveClawdAnimation(resolveStateChangeAnimationState(uiState), uiState.activity).frameSet)
+        assertEquals(ClawdAction.WORKING_TYPING, resolveClawdAction(resolveStateChangeAnimationState(uiState)))
     }
 
     @Test

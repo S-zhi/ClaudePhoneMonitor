@@ -1,37 +1,17 @@
 package com.example.claudephonemonitor.ui
 
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.semantics
 import com.example.claudephonemonitor.monitor.ActivityVariation
 import com.example.claudephonemonitor.monitor.PetState
-import kotlin.math.PI
 import kotlin.math.floor
-import kotlin.math.roundToInt
-import kotlin.math.sin
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 
-/**
- * Procedural Clawd mascot renderer. Idle uses the still frame with an occasional blink; active
- * monitor states select local pixel-frame sequences and never load image or network assets.
- */
+/** Renders the accepted local PNG key poses and small, state-specific pixel-layer motions. */
 @Composable
 fun ClawdProceduralView(
     state: PetState,
@@ -39,100 +19,17 @@ fun ClawdProceduralView(
     isSilent: Boolean = false,
     modifier: Modifier = Modifier.fillMaxSize(),
 ) {
-    var isBlinking by remember { mutableStateOf(false) }
-    LaunchedEffect(state) {
-        isBlinking = false
-        if (state != PetState.IDLE) return@LaunchedEffect
-
-        while (isActive) {
-            delay(5_000L)
-            isBlinking = true
-            delay(180L)
-            isBlinking = false
-        }
-    }
-
-    val animation = resolveClawdAnimation(state, activity, isSilent)
-    var frameIndex by remember(state, activity, isSilent) { mutableIntStateOf(0) }
-    LaunchedEffect(state, activity, isSilent) {
-        frameIndex = 0
-        if (animation.sequence.size <= 1) return@LaunchedEffect
-
-        while (isActive) {
-            delay(animation.frameDurationMs.toLong())
-            frameIndex = (frameIndex + 1) % animation.sequence.size
-        }
-    }
-
-    val transition = rememberInfiniteTransition(label = "clawd-breath-loop")
-    val breathCycleMs = if (isSilent) 4_000 else 3_200
-    val breathPhase by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = (PI * 2f).toFloat(),
-        animationSpec = infiniteRepeatable(
-            animation = tween(breathCycleMs, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "clawd-breath-phase",
-    )
-
-    Canvas(modifier = modifier) {
-        val frameNumber = frameIndex % animation.sequence.size
-        val poseIndex = animation.sequence[frameNumber].coerceIn(animation.poses.indices)
-        val matrix = animation.poses[poseIndex]
-        val layout = calculateClawdGridLayout(size.width, size.height, matrix)
-            ?: return@Canvas
-
-        val tile = layout.pixelSize.toFloat()
-        val spriteWidth = layout.width.toFloat()
-        val spriteHeight = layout.height.toFloat()
-        val isStill = animation.frameSet == ClawdFrameSet.STILL
-        val bobY = if (animation.frameSet == ClawdFrameSet.TYPING) {
-            0f
-        } else {
-            sin(breathPhase.toDouble()).toFloat() * tile * if (isStill) 0.04f else 0.12f
-        }
-        val startX = layout.left.toFloat()
-        // Round the gentle bob to a whole physical pixel so the sprite stays crisp.
-        val startY = (layout.top + bobY).roundToInt().toFloat()
-
-        val shadowWidth = spriteWidth * 0.82f
-        val shadowHeight = tile * 0.8f
-        drawOval(
-            color = Color(0x55000000),
-            topLeft = Offset(startX + (spriteWidth - shadowWidth) / 2f, startY + spriteHeight - shadowHeight * 0.4f),
-            size = Size(shadowWidth, shadowHeight),
-        )
-
-        for (row in matrix.indices) {
-            val rowString = matrix[row]
-            for (column in rowString.indices) {
-                var pixel = rowString[column]
-                if (isBlinking && pixel == 'B') {
-                    pixel = if (row == 8) 'O' else 'D'
-                }
-
-                val color = resolvePixelColor(pixel, isSilent, state) ?: continue
-                drawRect(
-                    color = color,
-                    topLeft = Offset(startX + column * tile, startY + row * tile),
-                    // Full integer-sized squares keep adjacent pixels seamless.
-                    size = Size(tile, tile),
-                )
-            }
-        }
-
-        if (animation.frameSet == ClawdFrameSet.ALERT) {
-            val alertColor = if (sin(breathPhase.toDouble() * 4.0) >= 0.0) {
-                Color(0xFFFF7B85)
-            } else {
-                Color(0xFF7A2636)
-            }
-            val markY = startY + tile * 2f
-            val markSize = Size(tile, tile)
-            drawRect(alertColor, Offset(startX + tile, markY), markSize)
-            drawRect(alertColor, Offset(startX + (layout.columns - 2) * tile, markY), markSize)
-        }
+    val action = resolveClawdAction(state, isSilent)
+    val images by rememberClawdSprite(action)
+    val elapsed = rememberClawdAnimationTime(action, isSilent)
+    Canvas(modifier = modifier.semantics {
+        clawdKeyPose = action.actionId
+        clawdImageReady = images != null
+        clawdAnimationTime = elapsed
+    }) {
+        val sprite = images ?: return@Canvas
+        val motion = sampleClawdMonitorMotion(action, elapsed, activity, isSilent)
+        drawClawdLayers(sprite, clawdMonitorPlacements(size.width.toInt(), size.height.toInt(), sprite.geometry, motion))
     }
 }
 
