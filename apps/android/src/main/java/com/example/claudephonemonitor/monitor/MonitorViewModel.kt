@@ -239,6 +239,10 @@ class MonitorViewModel(
 
     fun toggleControls() { _uiState.update { it.copy(controlsVisible = !it.controlsVisible) } }
     fun setControlsVisible(visible: Boolean) { _uiState.update { it.copy(controlsVisible = visible) } }
+    fun reconnect() {
+        client.disconnect()
+        client.connect()
+    }
     fun showUsagePage() { _uiState.update { it.copy(usagePageVisible = true, controlsVisible = false) } }
     fun showStatusPage() { _uiState.update { it.copy(usagePageVisible = false, controlsVisible = false) } }
 

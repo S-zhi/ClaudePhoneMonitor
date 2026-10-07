@@ -72,6 +72,14 @@ export interface PairingCreateRequest {
   installation_id: string;
   relay_url?: string;
   public_url?: string;
+  collector_token?: string;
+}
+
+export class InvalidCollectorTokenError extends Error {
+  constructor() {
+    super("invalid collector token");
+    this.name = "InvalidCollectorTokenError";
+  }
 }
 
 export interface PairingCreated {
@@ -626,7 +634,11 @@ export class Relay {
       nonEmptyString(request.installation_id) ?? `install_${randomUUID()}`;
     const wsUrl = this.resolveWsUrl(request.public_url ?? request.relay_url);
     const now = this.now().toISOString();
-    const collectorToken = createOpaqueToken("col");
+    const reusingCollectorToken = request.collector_token !== undefined;
+    const collectorToken = reusingCollectorToken ? request.collector_token as string : createOpaqueToken("col");
+    if (reusingCollectorToken && !this.isCollectorTokenValid(installationId, collectorToken)) {
+      throw new InvalidCollectorTokenError();
+    }
     const record = this.repository.createPairing(now, this.config.pairingTtlMs, {
       installation_id: installationId,
       ws_url: wsUrl,
@@ -634,12 +646,14 @@ export class Relay {
       ...(request.public_url ? { public_url: request.public_url } : {}),
       collector_token_hash: hashOpaqueToken(collectorToken),
     });
-    this.repository.createDeviceToken({
-      role: "collector",
-      installation_id: installationId,
-      token: collectorToken,
-      issued_at: now,
-    });
+    if (!reusingCollectorToken) {
+      this.repository.createDeviceToken({
+        role: "collector",
+        installation_id: installationId,
+        token: collectorToken,
+        issued_at: now,
+      });
+    }
     const qrPayload = JSON.stringify({
       version: RELAY_SCHEMA_VERSION,
       relay_http_url: this.resolveHttpUrl(request.public_url ?? request.relay_url),
@@ -658,6 +672,11 @@ export class Relay {
       ws_url: wsUrl,
       mode: this.config.authMode,
     };
+  }
+
+  isCollectorTokenValid(installationId: string, token: string): boolean {
+    const validation = this.repository.validateToken(token, "collector", this.now().toISOString());
+    return validation?.role === "collector" && validation.installation_id === installationId;
   }
 
   getPairing(pairingId: string): PairingStatus | undefined {

@@ -8,7 +8,7 @@ import WebSocket from "ws";
 
 import { loadConfig, type RelayConfig } from "./config.js";
 import { JsonLogger } from "./logger.js";
-import { Relay, type RelayOptions } from "./relay.js";
+import { InvalidCollectorTokenError, Relay, type RelayOptions } from "./relay.js";
 import { RELAY_SCHEMA_VERSION } from "./types.js";
 
 interface GatewayQuery {
@@ -30,6 +30,12 @@ interface PairingBody {
   installation_id: string;
   relay_url: string;
   public_url?: string;
+  collector_token?: string;
+}
+
+interface CollectorTokenValidationBody {
+  installation_id?: string;
+  collector_token?: string;
 }
 
 interface ClaimBody {
@@ -110,6 +116,7 @@ export function createRelayServer(options: RelayServerOptions = {}): {
     schema_version: RELAY_SCHEMA_VERSION,
     auth: { mode: config.authMode },
     storage: relay.repository.storageKind ?? "memory",
+    capabilities: ["usage_snapshot_v1", "pairing_collector_reuse_v1"],
     uptime_ms: Math.round(process.uptime() * 1000),
   }));
 
@@ -140,11 +147,42 @@ export function createRelayServer(options: RelayServerOptions = {}): {
       if (!bearer || !safeEqualText(bearer, config.bootstrapSecret)) {
         return reply.code(401).send({ error: "unauthorized" });
       }
-    } else if (config.authMode === "paired") {
+    } else if (config.authMode === "paired" || request.body?.collector_token !== undefined) {
       return reply.code(503).send({ error: "pairing_unavailable" });
     }
-    const pairing = relay.createPairing(request.body ?? {});
-    return reply.code(201).send(pairing);
+    const body = request.body as PairingBody | undefined;
+    if (body?.collector_token !== undefined &&
+      (typeof body.collector_token !== "string" || !body.collector_token.trim() || body.collector_token.length > 512 ||
+        typeof body.installation_id !== "string" || !body.installation_id.trim())) {
+      return reply.code(400).send({ error: "invalid_request" });
+    }
+    try {
+      const pairing = relay.createPairing(body ?? {} as PairingBody);
+      return reply.code(201).send(pairing);
+    } catch (error) {
+      if (error instanceof InvalidCollectorTokenError) {
+        return reply.code(401).send({ error: "invalid_collector_token" });
+      }
+      throw error;
+    }
+  });
+
+  app.post<{ Body: CollectorTokenValidationBody }>("/v1/collector-token/validate", async (request, reply) => {
+    if (!config.bootstrapSecret) return reply.code(503).send({ error: "pairing_unavailable" });
+    const authorization = request.headers.authorization ?? "";
+    const bearer = authorization.match(/^Bearer (.+)$/i)?.[1];
+    if (!bearer || !safeEqualText(bearer, config.bootstrapSecret)) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    const body = request.body as CollectorTokenValidationBody | undefined;
+    if (
+      typeof body?.installation_id !== "string" || !body.installation_id.trim() || body.installation_id.length > 256 ||
+      typeof body.collector_token !== "string" || !body.collector_token.trim() || body.collector_token.length > 512
+    ) return reply.code(400).send({ error: "invalid_request" });
+    if (!relay.isCollectorTokenValid(body.installation_id, body.collector_token)) {
+      return reply.code(401).send({ error: "invalid_collector_token" });
+    }
+    return reply.send({ valid: true, installation_id: body.installation_id });
   });
 
   app.get<{ Params: PairingParams }>(
