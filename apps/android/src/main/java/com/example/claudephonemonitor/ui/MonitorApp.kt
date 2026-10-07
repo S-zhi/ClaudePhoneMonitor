@@ -324,6 +324,15 @@ internal fun MonitorScreen(
                     compact = compact || short,
                     modifier = Modifier.fillMaxSize(),
                 )
+            } else if (page == MonitorPage.STATE_CHANGE && stateChange != null) {
+                StateChangePanel(
+                    status = stateChange.status,
+                    animationState = resolveStateChangeAnimationState(uiState),
+                    completionName = stateChange.completionName,
+                    runningCount = uiState.snapshot.mainRunningCount,
+                    activity = uiState.activity,
+                    modifier = Modifier.fillMaxSize(),
+                )
             } else {
                 Row(
                     modifier = Modifier
@@ -345,30 +354,16 @@ internal fun MonitorScreen(
                             .fillMaxHeight()
                             .padding(start = if (compact) 0.dp else stageWidth * 0.078f),
                     )
-                    if (page == MonitorPage.STATE_CHANGE && stateChange != null) {
-                        StateChangePanel(
-                            status = stateChange.status,
-                            animationState = resolveStateChangeAnimationState(uiState),
-                            completionName = stateChange.completionName,
-                            runningCount = uiState.snapshot.mainRunningCount,
-                            activity = uiState.activity,
-                            compact = compact || short,
-                            modifier = Modifier
-                                .weight(0.56f)
-                                .fillMaxHeight(),
-                        )
-                    } else {
-                        ClawdProceduralView(
-                            state = displayPetState,
-                            activity = uiState.activity,
-                            isSilent = displayPetState == PetState.OFFLINE,
-                            modifier = Modifier
-                                .weight(0.56f)
-                                .fillMaxHeight()
-                                .testTag("clawd")
-                                .semantics { contentDescription = "Clawd animation: ${displayPetState.title}" },
-                        )
-                    }
+                    ClawdProceduralView(
+                        state = displayPetState,
+                        activity = uiState.activity,
+                        isSilent = displayPetState == PetState.OFFLINE,
+                        modifier = Modifier
+                            .weight(0.56f)
+                            .fillMaxHeight()
+                            .testTag("clawd")
+                            .semantics { contentDescription = "Clawd animation: ${displayPetState.title}" },
+                    )
                 }
             }
         }
@@ -485,7 +480,6 @@ private fun StateChangePanel(
     completionName: String?,
     runningCount: Int?,
     activity: ActivityVariation,
-    compact: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val animationActivity = when {
@@ -493,45 +487,78 @@ private fun StateChangePanel(
         status == PetState.FINISH && animationState != PetState.WORKING -> ActivityVariation.CELEBRATE
         else -> activity
     }
-    Column(
-        modifier = modifier.padding(horizontal = if (compact) 2.dp else 12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        PixelText(
-            text = status.title,
-            color = statusColor(status),
-            textHeight = if (compact) 24.sp else 30.sp,
-            modifier = Modifier.testTag("state-change-title"),
-        )
-        if (status == PetState.FINISH && !completionName.isNullOrBlank()) {
-            Text(
-                text = "任务完成：$completionName",
-                color = InkColor,
-                fontSize = if (compact) 12.sp else 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        if (status == PetState.FINISH && animationState == PetState.WORKING) {
-            Text(
-                text = "仍有 ${runningCount?.toString() ?: "其他"} 项任务运行中",
-                color = MutedInkColor,
-                fontSize = if (compact) 10.sp else 13.sp,
-                maxLines = 1,
-            )
-        }
-        ClawdProceduralView(
-            state = animationState,
-            activity = animationActivity,
-            isSilent = animationState == PetState.OFFLINE,
+    BoxWithConstraints(modifier = modifier) {
+        val stageScale = (maxWidth.value / 930f).coerceIn(0.72f, 1.5f)
+        val typographyScale = minOf(stageScale, (maxHeight.value / 420f).coerceIn(0.72f, 1.5f))
+        val short = maxHeight < 360.dp
+        Row(
             modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .testTag("clawd")
-                .semantics { contentDescription = "Clawd animation: ${animationState.title}" },
-        )
+                .fillMaxSize()
+                .padding(horizontal = maxWidth * 0.045f)
+                .testTag("state-change-poster"),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            BoxWithConstraints(
+                modifier = Modifier
+                    .weight(0.44f)
+                    .fillMaxHeight()
+                    .padding(top = if (short) 42.dp else 56.dp, bottom = if (short) 12.dp else 24.dp)
+                    .testTag("state-change-copy"),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                val maxTitleHeight = maxHeight * 0.30f
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy((18f * typographyScale).dp),
+                ) {
+                    // Fit the display lettering to the left panel; normal text still follows font scale.
+                    LargePixelText(
+                        text = status.title,
+                        color = if (status == PetState.FINISH) TerracottaColor else statusColor(status),
+                        pixelSize = 48.dp,
+                        gap = 0.8.dp,
+                        charSpacing = 1,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = maxTitleHeight)
+                            .testTag("state-change-title"),
+                    )
+                    if (status == PetState.FINISH && !completionName.isNullOrBlank()) {
+                        Text(
+                            text = completionName,
+                            color = MutedInkColor,
+                            fontSize = (26f * typographyScale).sp,
+                            lineHeight = (34f * typographyScale).sp,
+                            fontWeight = FontWeight.Normal,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.testTag("state-change-name"),
+                        )
+                    }
+                    if (status == PetState.FINISH && animationState == PetState.WORKING) {
+                        Text(
+                            text = "仍有 ${runningCount?.toString() ?: "其他"} 项任务运行中",
+                            color = MutedInkColor,
+                            fontSize = (13f * typographyScale).sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+            ClawdProceduralView(
+                state = animationState,
+                activity = animationActivity,
+                isSilent = animationState == PetState.OFFLINE,
+                modifier = Modifier
+                    .weight(0.56f)
+                    .fillMaxHeight()
+                    .testTag("clawd")
+                    .semantics { contentDescription = "Clawd animation: ${animationState.title}" },
+            )
+        }
     }
 }
 

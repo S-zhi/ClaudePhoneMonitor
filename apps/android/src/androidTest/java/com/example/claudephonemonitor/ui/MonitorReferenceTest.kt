@@ -32,6 +32,7 @@ import com.example.claudephonemonitor.monitor.ReminderStrength
 import com.example.claudephonemonitor.monitor.SessionSummary
 import com.example.claudephonemonitor.monitor.StateChangeUi
 import java.io.File
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -79,13 +80,34 @@ class MonitorReferenceTest {
         compose.onNodeWithText("Hidden child").assertDoesNotExist()
     }
 
-    @Test fun completionRetainsWorkingAnimationAndNamesTheMatchingRow() {
+    @Test fun completionPosterNamesFinishedSessionWhileOtherTasksKeepWorking() {
         render(fixture().copy(stateChange = StateChangeUi(PetState.FINISH, 15_000L, titles.last(), ReminderStrength.STRONG)))
-        assertAllTitles()
-        compose.onNodeWithText("任务完成：${titles.last()}").assertIsDisplayed()
-        compose.onNodeWithContentDescription("Session 5: Done").assertIsDisplayed()
+        assertPosterLayout(titles.last())
+        compose.onNodeWithText("仍有 3 项任务运行中").assertIsDisplayed()
         compose.onNodeWithContentDescription("Clawd animation: WORKING").assertIsDisplayed()
         capture("state-change.png")
+    }
+
+    @Test fun completedMainTaskUsesFullPosterAndCelebrates() {
+        render(completedFixture(titles.first()))
+        assertPosterLayout(titles.first())
+        compose.onNodeWithContentDescription("Clawd animation: FINISH").assertIsDisplayed()
+        compose.onNodeWithText("仍有 0 项任务运行中").assertDoesNotExist()
+        capture("finish-poster.png", "strong-reminder-screenshots")
+    }
+
+    @Test fun strongPosterKeepsLongChineseNameVisibleOnShortLandscape() {
+        render(completedFixture(titles[1]), short = true)
+        assertPosterLayout(titles[1])
+        compose.onNodeWithContentDescription("Clawd animation: FINISH").assertIsDisplayed()
+        capture("finish-poster-short.png", "strong-reminder-screenshots")
+    }
+
+    @Test fun strongPosterHandlesLargeFontsWithoutLosingTitleOrName() {
+        render(completedFixture(titles[1]), short = true, fontScale = 2f)
+        assertPosterLayout(titles[1])
+        compose.onNodeWithContentDescription("Clawd animation: FINISH").assertIsDisplayed()
+        capture("finish-poster-large-font.png", "strong-reminder-screenshots")
     }
 
     @Test fun weakCompletionStaysOnStatusPage() {
@@ -113,7 +135,7 @@ class MonitorReferenceTest {
             usagePageVisible = true,
             stateChange = StateChangeUi(PetState.FINISH, 15_000L, titles.last(), ReminderStrength.STRONG),
         ))
-        compose.onNodeWithTag("state-change-title").assertIsDisplayed()
+        assertPosterLayout(titles.last())
         compose.onNodeWithText("Usage 用量消耗").assertDoesNotExist()
         capture("strong-from-usage.png", "issue17-screenshots")
     }
@@ -165,6 +187,23 @@ class MonitorReferenceTest {
 
     private fun assertAllTitles() = titles.forEach { compose.onNodeWithText(it).assertIsDisplayed() }
 
+    private fun assertPosterLayout(completionName: String) {
+        compose.onNodeWithTag("state-change-poster").assertIsDisplayed()
+        compose.onNodeWithTag("state-change-title").assertIsDisplayed()
+        compose.onNodeWithText(completionName).assertIsDisplayed()
+        compose.onNodeWithText("任务完成：$completionName").assertDoesNotExist()
+        compose.onNodeWithTag("session-list").assertDoesNotExist()
+        val stage = compose.onNodeWithTag("monitor-stage").fetchSemanticsNode().boundsInRoot
+        val title = compose.onNodeWithTag("state-change-title").fetchSemanticsNode().boundsInRoot
+        val name = compose.onNodeWithTag("state-change-name").fetchSemanticsNode().boundsInRoot
+        val clawd = compose.onNodeWithTag("clawd").fetchSemanticsNode().boundsInRoot
+        assertTrue("The display title must fill the left side", title.width >= stage.width * 0.30f)
+        assertTrue("Clawd must occupy the full right side", clawd.width >= stage.width * 0.45f)
+        assertTrue("The title and name must sit to the left of Clawd", title.right <= clawd.left && name.right <= clawd.left)
+        assertTrue("The session name must sit below the title", name.top >= title.bottom)
+        assertTrue("The title and name must remain inside the short or scaled stage", title.top >= stage.top && name.bottom <= stage.bottom)
+    }
+
     private fun capture(name: String, directoryName: String = "issue4-screenshots") {
         val bitmap = compose.onNodeWithTag("monitor-stage").captureToImage().asAndroidBitmap()
         val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -202,6 +241,23 @@ class MonitorReferenceTest {
                 ),
                 petState = PetState.WORKING, activity = ActivityVariation.TOOL,
                 isConnected = true, recentSessionCompletion = completion,
+            )
+        }
+
+        private fun completedFixture(name: String): MonitorUiState {
+            val completion = RecentCompletion("finished-main", sequence = 65, occurredAt = "", displayName = name)
+            return MonitorUiState(
+                snapshot = MonitorSnapshot(
+                    computerState = ComputerState.ONLINE,
+                    claudeState = ClaudeState.IDLE,
+                    sessions = listOf(SessionSummary("finished-main", name, ClaudeState.IDLE, 65)),
+                    mainRunningCount = 0, mainSessionCount = 1, totalRunningCount = 0,
+                    recentCompletion = completion,
+                ),
+                petState = PetState.IDLE,
+                stateChange = StateChangeUi(PetState.FINISH, 15_000L, name, ReminderStrength.STRONG),
+                isConnected = true,
+                recentSessionCompletion = completion,
             )
         }
     }
