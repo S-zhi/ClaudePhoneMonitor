@@ -62,8 +62,25 @@ For fixture or CI tests, use:
 skills/claude-monitor/scripts/pair --development --state-dir "$TMP/state" --code TEST1234 --json
 ```
 
-Pairing tokens are never printed. The generated `pairing.png`, `pairing.json`, and
+Pairing and service tokens are never printed. The helper verifies the current
+server-side pairing before reusing a QR, and refreshes a claimed, expired, or
+address-mismatched QR while retaining the installation and collector token.
+A missing server pairing record fails closed so the operator can restore the
+right Relay database. The QR image and pairing metadata are staged and rendered
+before replacement; a rendering failure leaves the previous files untouched
+and does not display their path as current. `pairing.png`, `pairing.json`, and
 `monitor.env` are mode `0600`.
+
+The launcher accepts an existing Relay only when its health response declares
+the required Usage and collector-token-reuse capabilities, paired auth, and
+SQLite storage. A healthy but incompatible process is left running and the
+launcher asks the operator to stop it explicitly. The launcher starts Node
+entry points directly so Ctrl-C only terminates the Relay and Collector child
+processes it started. It does not source `monitor.env` as shell code.
+Before pairing or other state changes, it probes the configured Collector Unix
+socket by connecting and closing without sending data. A live Collector causes
+the launcher to fail closed and leave it and pairing files untouched; the
+socket is checked again immediately before a new Collector is started.
 
 ```bash
 skills/claude-monitor/scripts/install \

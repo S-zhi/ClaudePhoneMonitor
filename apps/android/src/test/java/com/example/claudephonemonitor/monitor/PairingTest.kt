@@ -1,6 +1,7 @@
 package com.example.claudephonemonitor.monitor
 
 import kotlinx.coroutines.runBlocking
+import java.io.IOException
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -8,6 +9,8 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
@@ -92,6 +95,44 @@ class PairingTest {
     }
 
     @Test
+    fun successfulClaimRequiresTheQrInstallationIdentity() {
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            runBlocking {
+                PairingRepository(pairingResponseClient("ws://192.168.1.9:8787/ws/android", "install-other"))
+                    .claim(pairingPayload("ws://192.168.1.9:8787"), "Pixel")
+            }
+        }
+
+        assertTrue(error.message.orEmpty().contains("不匹配"))
+        assertFalse(error.message.orEmpty().contains("token-from-claim"))
+    }
+
+    @Test
+    fun invalidPairingResponseIsClassifiedUsingSafeRelayStatus() {
+        val pending = claimFailureMessage(claimFailureClient(200, """{"status":"pending"}"""))
+        val claimed = claimFailureMessage(claimFailureClient(200, """{"status":"claimed"}"""))
+        val expired = claimFailureMessage(claimFailureClient(200, """{"status":"expired"}"""))
+        val unknown = claimFailureMessage(claimFailureClient(404, """{"error":"not_found"}"""))
+
+        assertTrue(pending.contains("验证码不匹配"))
+        assertTrue(claimed.contains("已使用"))
+        assertTrue(expired.contains("已过期"))
+        assertTrue(unknown.contains("不认识此配对码"))
+        listOf(claimed, expired, unknown).forEach {
+            assertTrue(it.contains("--pair"))
+        }
+    }
+
+    @Test
+    fun pairingStatusLookupFailureShowsOnlySafeRetryAdvice() {
+        val message = claimFailureMessage(claimFailureClient(0, "", failStatus = true))
+
+        assertTrue(message.contains("检查网络后重试"))
+        assertFalse(message.contains("private-response-body"))
+        assertFalse(message.contains("ABCD1234"))
+    }
+
+    @Test
     fun claimRejectsWebSocketUrlFromDifferentOrigin() {
         assertThrows(IllegalArgumentException::class.java) {
             runBlocking {
@@ -110,9 +151,13 @@ class PairingTest {
     )
 
     private fun pairingResponseClient(webSocketUrl: String): OkHttpClient {
+        return pairingResponseClient(webSocketUrl, "install-1")
+    }
+
+    private fun pairingResponseClient(webSocketUrl: String, installationId: String): OkHttpClient {
         val body = JSONObject()
             .put("ws_url", webSocketUrl)
-            .put("installation_id", "install-1")
+            .put("installation_id", installationId)
             .put("android_token", "token-from-claim")
             .toString()
             .toResponseBody("application/json".toMediaType())
@@ -129,4 +174,33 @@ class PairingTest {
             }
             .build()
     }
+
+    private fun claimFailureMessage(client: OkHttpClient): String {
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { PairingRepository(client).claim(pairingPayload("ws://192.168.1.9:8787"), "Pixel") }
+        }
+        return error.message.orEmpty()
+    }
+
+    private fun claimFailureClient(
+        statusCode: Int,
+        statusBody: String,
+        failStatus: Boolean = false,
+    ): OkHttpClient = OkHttpClient.Builder()
+        .addInterceptor { chain ->
+            val request = chain.request()
+            if (request.method == "GET" && failStatus) throw IOException("private-response-body ABCD1234")
+            val code = if (request.method == "POST") 400 else statusCode
+            val body = if (request.method == "POST") {
+                """{"error":"invalid_pairing","private":"private-response-body ABCD1234"}"""
+            } else statusBody
+            Response.Builder()
+                .request(request)
+                .protocol(Protocol.HTTP_1_1)
+                .code(code)
+                .message(if (code == 200) "OK" else "Bad Request")
+                .body(body.toResponseBody("application/json".toMediaType()))
+                .build()
+        }
+        .build()
 }

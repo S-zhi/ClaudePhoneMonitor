@@ -140,7 +140,7 @@ apps/android/build/outputs/apk/debug/android-debug.apk
 - 构建 Relay 和 Collector；
 - 启动同一台 Mac 上的局域网 Relay；
 - 生成或复用 bootstrap secret；
-- 创建一次性 QR pairing；
+- 验证未过期的一次性 QR，或刷新已领取/过期/地址变更的 QR；
 - 生成并打开 `pairing.png`；
 - 安装 monitor-owned Claude Hooks；
 - 启动 Collector。
@@ -151,13 +151,18 @@ apps/android/build/outputs/apk/debug/android-debug.apk
 scripts/start-lan-monitor.sh --pair --install-hooks --open-qr
 ```
 
-脚本会保持前台运行，按 `Ctrl-C` 会停止本次脚本启动的 Relay/Collector。只启动已经配对的服务时可以使用：
+脚本会检查 Relay 的 pairing 与 Usage 兼容能力。过期或已领取的 QR 会自动刷新，同时保留 installation ID、Collector token、Relay 数据库和 Usage 统计起点；要主动换一张新码时使用 `--pair`。如果目标端口运行着旧版或配置不兼容的 Relay，脚本会拒绝复用并提示你先手动停止旧实例，不会自行结束未知进程。
+
+启动前会通过 Collector Unix socket 做一次无数据连接探测；如果已有 Collector 正在监听，脚本会停止并保留现有服务与配对文件，避免重复启动。启动 Collector 前会再次检查。
+
+脚本会保持前台运行，按 `Ctrl-C` 只停止本次脚本启动的 Relay/Collector。只启动已经配对的服务时可以使用：
 
 ```bash
 scripts/start-lan-monitor.sh
 ```
 
 `--install-hooks` 会修改用户级 `~/.claude/settings.json`；如果只想验证服务而不改 Claude 配置，不要传这个选项。
+配对二维码为一次性码，终端会显示到期时间；旧二维码过期后请重新运行启动命令，或显式加 `--pair`。
 
 需要同时观察本机 Codex 桌面应用和 CLI 时，可显式启用只读 sessions 监听：
 

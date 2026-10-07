@@ -53,6 +53,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.claudephonemonitor.monitor.ActivityVariation
@@ -72,6 +74,10 @@ private val InkColor = Color(0xFFF1E8DE)
 private val MutedInkColor = Color(0xFF9B8F84)
 private val TerracottaColor = Color(0xFFD97757)
 private val AlertColor = Color(0xFFE18D7C)
+
+internal class PairingScopedViewModelStoreOwner : ViewModelStoreOwner {
+    override val viewModelStore = ViewModelStore()
+}
 
 @Composable
 fun MonitorApp() {
@@ -103,16 +109,17 @@ fun MonitorApp() {
                         MonitorViewModel(client) as T
                 }
             }
+            val viewModelStoreOwner = remember(config) { PairingScopedViewModelStoreOwner() }
             val viewModel: MonitorViewModel = viewModel(
-                key = "monitor-${config.installationId}",
+                viewModelStoreOwner = viewModelStoreOwner,
                 factory = factory,
             )
             val uiState by viewModel.uiState.collectAsStateWithLifecycle()
             LaunchedEffect(viewModel) {
                 viewModel.setControlsVisible(false)
             }
-            DisposableEffect(config) {
-                onDispose { client.disconnect() }
+            DisposableEffect(viewModelStoreOwner) {
+                onDispose { viewModelStoreOwner.viewModelStore.clear() }
             }
             MonitorScreen(
                 uiState = uiState,
@@ -120,12 +127,8 @@ fun MonitorApp() {
                 onHideControls = { viewModel.setControlsVisible(false) },
                 onOpenUsage = viewModel::showUsagePage,
                 onReturnToStatus = viewModel::showStatusPage,
-                onReconnect = {
-                    client.disconnect()
-                    client.connect()
-                },
+                onReconnect = viewModel::reconnect,
                 onRePair = {
-                    client.disconnect()
                     store.clear()
                     pairing = null
                 },

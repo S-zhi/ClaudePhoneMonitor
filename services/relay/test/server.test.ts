@@ -110,6 +110,7 @@ test("Fastify health, pairing, and WebSocket gateways are runnable", async () =>
     const health = await app.inject({ method: "GET", url: "/healthz" });
     assert.equal(health.statusCode, 200);
     assert.equal(health.json().status, "ok");
+    assert.deepEqual(health.json().capabilities, ["usage_snapshot_v1", "pairing_collector_reuse_v1"]);
 
     const pairing = await app.inject({ method: "POST", url: "/v1/pairing" });
     assert.equal(pairing.statusCode, 201);
@@ -156,8 +157,8 @@ test("Fastify health, pairing, and WebSocket gateways are runnable", async () =>
   }
 });
 
-test("paired mode requires bootstrap and role-scoped device tokens", async () => {
-  const { app } = createRelayServer({
+test("paired bootstrap validates and reuses the existing installation collector token", async () => {
+  const { app, relay } = createRelayServer({
     config: {
       host: "127.0.0.1",
       port: 0,
@@ -173,6 +174,9 @@ test("paired mode requires bootstrap and role-scoped device tokens", async () =>
   let android: TestClient | undefined;
   try {
     await app.ready();
+    const health = await app.inject({ method: "GET", url: "/healthz" });
+    assert.equal(health.json().storage, "memory");
+    assert.deepEqual(health.json().capabilities, ["usage_snapshot_v1", "pairing_collector_reuse_v1"]);
     const unauthorized = await app.inject({
       method: "POST",
       url: "/v1/pairing",
@@ -189,6 +193,43 @@ test("paired mode requires bootstrap and role-scoped device tokens", async () =>
     assert.equal(created.statusCode, 201);
     const pairing = created.json();
     assert.equal(pairing.installation_id, "paired-install");
+
+    const validateHeaders = { authorization: "Bearer bootstrap-secret-for-relay-tests-123456" };
+    const tokenCheck = await app.inject({
+      method: "POST",
+      url: "/v1/collector-token/validate",
+      headers: validateHeaders,
+      payload: { installation_id: "paired-install", collector_token: pairing.collector_token },
+    });
+    assert.equal(tokenCheck.statusCode, 200);
+    assert.deepEqual(tokenCheck.json(), { valid: true, installation_id: "paired-install" });
+    const wrongRoleToken = "synthetic-android-token-for-relay-test";
+    relay.repository.createDeviceToken({
+      role: "android",
+      installation_id: "paired-install",
+      token: wrongRoleToken,
+      issued_at: new Date().toISOString(),
+    });
+    for (const invalidPayload of [
+      { installation_id: "paired-install", collector_token: "synthetic-invalid-token" },
+      { installation_id: "other-install", collector_token: pairing.collector_token },
+      { installation_id: "paired-install", collector_token: wrongRoleToken },
+    ]) {
+      const rejected = await app.inject({
+        method: "POST",
+        url: "/v1/collector-token/validate",
+        headers: validateHeaders,
+        payload: invalidPayload,
+      });
+      assert.equal(rejected.statusCode, 401);
+      assert.deepEqual(rejected.json(), { error: "invalid_collector_token" });
+    }
+    const unauthenticatedCheck = await app.inject({
+      method: "POST",
+      url: "/v1/collector-token/validate",
+      payload: { installation_id: "paired-install", collector_token: pairing.collector_token },
+    });
+    assert.equal(unauthenticatedCheck.statusCode, 401);
     const qr = JSON.parse(pairing.qr_payload);
     assert.deepEqual(
       Object.keys(qr).sort(),
@@ -207,6 +248,33 @@ test("paired mode requires bootstrap and role-scoped device tokens", async () =>
     const phone = claimed.json();
     assert.equal(phone.installation_id, "paired-install");
     assert.notEqual(phone.android_token, pairing.collector_token);
+
+    const reused = await app.inject({
+      method: "POST",
+      url: "/v1/pairing",
+      headers: validateHeaders,
+      payload: {
+        installation_id: "paired-install",
+        relay_url: "http://192.168.1.3:8787",
+        collector_token: pairing.collector_token,
+      },
+    });
+    assert.equal(reused.statusCode, 201);
+    assert.equal(reused.json().installation_id, "paired-install");
+    assert.equal(reused.json().collector_token, pairing.collector_token);
+    assert.equal(relay.repository.validateToken(phone.android_token, "android", new Date().toISOString())?.installation_id, "paired-install");
+    const wrongInstallationReuse = await app.inject({
+      method: "POST",
+      url: "/v1/pairing",
+      headers: validateHeaders,
+      payload: {
+        installation_id: "other-install",
+        relay_url: "http://192.168.1.3:8787",
+        collector_token: pairing.collector_token,
+      },
+    });
+    assert.equal(wrongInstallationReuse.statusCode, 401);
+    assert.deepEqual(wrongInstallationReuse.json(), { error: "invalid_collector_token" });
 
     await app.listen({ host: "127.0.0.1", port: 0 });
     const address = app.server.address();

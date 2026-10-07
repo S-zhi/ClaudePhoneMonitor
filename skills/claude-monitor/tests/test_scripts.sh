@@ -134,4 +134,7 @@ PY
 # Uninstall is idempotent too.
 "$SCRIPTS/uninstall" --settings "$SETTINGS" --state-dir "$STATE" --launch-agents-dir "$AGENTS" >/dev/null || fail "second uninstall"
 
+python3 "$ROOT/tests/test_real_pair.py" || fail "real pairing helper fixtures"
+python3 "$ROOT/tests/test_start_lan_monitor.py" || fail "launcher fixtures"
+
 printf 'PASS: claude-monitor temp-fixture tests\n'

@@ -9,6 +9,7 @@ import java.net.URISyntaxException
 import java.nio.charset.StandardCharsets
 import java.security.KeyStore
 import java.util.Locale
+import java.util.concurrent.CancellationException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -198,27 +199,79 @@ class PairingRepository(
     private val client: OkHttpClient = OkHttpClient(),
 ) {
     suspend fun claim(payload: PairingPayload, deviceName: String): PairingConfig = withContext(Dispatchers.IO) {
-        val qrAndroidWebSocketUrl = normalizeAndroidWebSocketUrl(payload.relayWsUrl)
-        val body = JSONObject().apply {
-            put("code", payload.pairingCode)
-            put("device_name", deviceName)
-        }.toString().toRequestBody("application/json".toMediaType())
-        val request = Request.Builder()
-            .url("${payload.relayHttpUrl}/v1/pairing/${payload.pairingId}/claim")
-            .post(body)
-            .build()
-        client.newCall(request).execute().use { response ->
-            val responseBody = response.body?.string().orEmpty()
-            require(response.isSuccessful) { "Pairing failed (${response.code})" }
-            val json = JSONObject(responseBody)
-            val claimWebSocketUrl = json.getString("ws_url")
-            requireSameAndroidWebSocketOrigin(qrAndroidWebSocketUrl, claimWebSocketUrl)
-            PairingConfig(
-                relayHttpUrl = payload.relayHttpUrl,
-                relayWsUrl = qrAndroidWebSocketUrl,
-                installationId = json.getString("installation_id"),
-                androidToken = json.getString("android_token"),
-            )
+        try {
+            val qrAndroidWebSocketUrl = normalizeAndroidWebSocketUrl(payload.relayWsUrl)
+            val body = JSONObject().apply {
+                put("code", payload.pairingCode)
+                put("device_name", deviceName)
+            }.toString().toRequestBody("application/json".toMediaType())
+            val request = Request.Builder()
+                .url("${payload.relayHttpUrl}/v1/pairing/${payload.pairingId}/claim")
+                .post(body)
+                .build()
+            client.newCall(request).execute().use { response ->
+                val responseBody = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val invalidCode = response.code == 400 && runCatching {
+                        JSONObject(responseBody).optString("error") == "invalid_pairing"
+                    }.getOrDefault(false)
+                    if (invalidCode) throw PairingClaimException(resolveInvalidPairingMessage(payload))
+                    throw PairingClaimException("配对请求未成功，请确认手机与 Mac 连接后重试。")
+                }
+
+                val config = runCatching {
+                    val json = JSONObject(responseBody)
+                    val installationId = json.getString("installation_id")
+                    require(installationId == payload.installationId)
+                    val claimWebSocketUrl = json.getString("ws_url")
+                    requireSameAndroidWebSocketOrigin(qrAndroidWebSocketUrl, claimWebSocketUrl)
+                    PairingConfig(
+                        relayHttpUrl = payload.relayHttpUrl,
+                        relayWsUrl = qrAndroidWebSocketUrl,
+                        installationId = installationId,
+                        androidToken = json.getString("android_token").takeIf(String::isNotBlank)
+                            ?: throw IllegalArgumentException(),
+                    )
+                }.getOrElse {
+                    throw PairingClaimException("配对响应与当前二维码不匹配，请重新扫描当前二维码。")
+                }
+                config
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: PairingClaimException) {
+            throw error
+        } catch (_: Exception) {
+            throw PairingClaimException("无法连接配对服务，请检查网络后重试。")
+        }
+    }
+
+    private fun resolveInvalidPairingMessage(payload: PairingPayload): String {
+        val refreshHint = "请在 Mac 端运行 ./scripts/start-lan-monitor.sh --watch-codex --watch-usage --pair 刷新二维码后重试。"
+        return try {
+            val request = Request.Builder()
+                .url("${payload.relayHttpUrl}/v1/pairing/${payload.pairingId}")
+                .get()
+                .build()
+            client.newCall(request).execute().use { response ->
+                if (response.code == 404) {
+                    return "当前 Relay 不认识此配对码，可能已更换或重启。$refreshHint"
+                }
+                if (!response.isSuccessful) return "暂时无法确认配对码状态，请检查网络后重试。"
+                val status = runCatching {
+                    JSONObject(response.body?.string().orEmpty()).optString("status")
+                }.getOrDefault("")
+                when (status) {
+                    "claimed" -> "此配对码已使用。$refreshHint"
+                    "expired" -> "此配对码已过期。$refreshHint"
+                    "pending" -> "配对验证码不匹配，请确认扫描的是当前二维码。"
+                    else -> "暂时无法确认配对码状态，请检查网络后重试。"
+                }
+            }
+        } catch (_: Exception) {
+            "暂时无法确认配对码状态，请检查网络后重试。"
         }
     }
 }
+
+class PairingClaimException(message: String) : IllegalArgumentException(message)
