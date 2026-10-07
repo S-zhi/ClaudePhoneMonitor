@@ -4,8 +4,8 @@ import com.example.claudephonemonitor.monitor.ActivityVariation
 import com.example.claudephonemonitor.monitor.PetState
 
 /**
- * Locally bundled Clawd image catalogue. The monitor renderer uses the procedural sprite frames below
- * and never fetches images over the network.
+ * Historical pose names kept for existing callers. The visible monitor and Usage scene now use
+ * ClawdAction's accepted PNG catalogue; these legacy GIF filenames are not runtime inputs.
  */
 enum class ClawdPose(
     val assetFilename: String,
@@ -51,7 +51,7 @@ enum class ClawdPersona(val label: String, val icon: String, val pose: ClawdPose
     CLOUD("Cloud", "☁️", ClawdPose.CLOUD),
 }
 
-/** Names the procedural frame sequence used for a monitor state. */
+/** Legacy matrix sequence names retained for compatibility and matrix-regression tests. */
 enum class ClawdFrameSet {
     STILL,
     TYPING,
@@ -116,8 +116,7 @@ private val ALERT_ANIMATION = ClawdAnimation(
 )
 
 /**
- * Resolves a monitor state to its local sprite sequence. Typing advances slowly at 320 ms per pose;
- * other animated sequences advance at 90 ms per frame. Idle and offline share STILL.
+ * Legacy matrix resolver. Production rendering uses resolveClawdAction and the PNG layer models.
  */
 fun resolveClawdAnimation(
     petState: PetState,
