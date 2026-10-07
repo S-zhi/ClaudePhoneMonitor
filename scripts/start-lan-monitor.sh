@@ -15,7 +15,9 @@ PAIR=0
 INSTALL_HOOKS=0
 OPEN_QR=0
 WATCH_CODEX="${COLLECTOR_WATCH_CODEX:-0}"
-WATCH_USAGE="${COLLECTOR_WATCH_USAGE:-0}"
+WATCH_USAGE=0
+USAGE_CHOICE=""
+CONFIGURE_USAGE=0
 RELAY_PID=""
 COLLECTOR_PID=""
 RELAY_STARTED=0
@@ -35,8 +37,9 @@ Options:
   --install-hooks   merge monitor-owned Claude Code Hooks (real settings change)
   --watch-codex     read local Codex session JSONL and send safe lifecycle metadata
   --no-watch-codex  disable Codex watching even when COLLECTOR_WATCH_CODEX=1
-  --watch-usage     opt into local Claude/Codex usage transcript aggregation
-  --no-watch-usage  disable Usage watching even when COLLECTOR_WATCH_USAGE=1
+  --configure-usage ask for a Usage preference on first interactive launch
+  --watch-usage     enable Usage and save this choice for future launches
+  --no-watch-usage  disable Usage and save this choice (overrides environment)
   --open-qr         open pairing.png in Preview after pairing
   --no-build        do not build relay/collector before starting
   -h, --help        show this help
@@ -49,8 +52,9 @@ while [[ $# -gt 0 ]]; do
     --install-hooks) INSTALL_HOOKS=1; shift ;;
     --watch-codex) WATCH_CODEX=1; shift ;;
     --no-watch-codex) WATCH_CODEX=0; shift ;;
-    --watch-usage) WATCH_USAGE=1; shift ;;
-    --no-watch-usage) WATCH_USAGE=0; shift ;;
+    --configure-usage) CONFIGURE_USAGE=1; shift ;;
+    --watch-usage) USAGE_CHOICE=1; shift ;;
+    --no-watch-usage) USAGE_CHOICE=0; shift ;;
     --open-qr) OPEN_QR=1; shift ;;
     --no-build) NO_BUILD=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -103,6 +107,54 @@ PY
 
 if ! check_collector_socket; then
   exit 1
+fi
+
+# Resolve preferences only after the duplicate-Collector guard. Pairing may
+# rewrite monitor.env, so the persistent Usage choice lives in its own file.
+USAGE_PREFERENCE_HELPER="$ROOT/scripts/usage-preference.py"
+if [[ -n "$USAGE_CHOICE" ]]; then
+  WATCH_USAGE="$USAGE_CHOICE"
+  if ! "$PYTHON_BIN" "$USAGE_PREFERENCE_HELPER" --state-dir "$STATE_DIR" --write "$USAGE_CHOICE"; then
+    printf 'Usage choice applies to this launch only; it could not be saved.\n' >&2
+  fi
+elif [[ -n "${COLLECTOR_WATCH_USAGE:-}" ]]; then
+  case "$COLLECTOR_WATCH_USAGE" in
+    0|1) WATCH_USAGE="$COLLECTOR_WATCH_USAGE" ;;
+    *) printf 'COLLECTOR_WATCH_USAGE must be 0 or 1.\n' >&2; exit 2 ;;
+  esac
+else
+  SAVED_USAGE=""
+  USAGE_PREFERENCE_VALID=1
+  if ! SAVED_USAGE="$("$PYTHON_BIN" "$USAGE_PREFERENCE_HELPER" --state-dir "$STATE_DIR")"; then
+    USAGE_PREFERENCE_VALID=0
+  fi
+  if [[ "$USAGE_PREFERENCE_VALID" -eq 0 ]]; then
+    printf 'Usage preference is unavailable; Usage stays disabled for this launch.\n' >&2
+  elif [[ -n "$SAVED_USAGE" ]]; then
+    WATCH_USAGE="$SAVED_USAGE"
+  elif [[ "$CONFIGURE_USAGE" -eq 1 && -t 0 ]]; then
+    printf 'Usage reads local Claude/Codex transcripts and sends only token totals.\n'
+    printf 'The private ledger keeps its first-enable start; historical usage is not backfilled.\n'
+    while true; do
+      ANSWER=""
+      if ! read -r -p 'Enable Usage monitoring and save this preference? [y/N] ' ANSWER; then
+        printf '\nUsage preference was not saved.\n'
+        break
+      fi
+      case "$ANSWER" in
+        y|Y|yes|YES) WATCH_USAGE=1 ;;
+        n|N|no|NO|'') WATCH_USAGE=0 ;;
+        *) printf 'Please enter y or n.\n'; continue ;;
+      esac
+      if ! "$PYTHON_BIN" "$USAGE_PREFERENCE_HELPER" --state-dir "$STATE_DIR" --write "$WATCH_USAGE"; then
+        printf 'Usage choice applies to this launch only; it could not be saved.\n' >&2
+      fi
+      break
+    done
+  else
+    printf 'Usage has not been configured; it stays disabled. Enable and save it with:\n'
+    printf '  "%s/scripts/start-lan-monitor.sh" --watch-usage\n' "$ROOT"
+  fi
 fi
 
 RELAY_BOOTSTRAP_SECRET="${RELAY_BOOTSTRAP_SECRET:-$(read_monitor_env RELAY_BOOTSTRAP_SECRET)}"

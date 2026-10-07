@@ -8,8 +8,8 @@ import type { Outbox, RelayOutboundMessage, UsageAggregate, UsageSnapshotMessage
 
 const MAX_FILES = 2_048;
 const MAX_BYTES_PER_POLL = 16 * 1024 * 1024;
-const MAX_BYTES_PER_FILE = 512 * 1024;
-const MAX_LINE_BYTES = 64 * 1024;
+const MAX_LINE_BYTES = 4 * 1024 * 1024;
+const MAX_BYTES_PER_FILE = MAX_LINE_BYTES + 1;
 const POLL_MS = 1_000;
 const PROVIDERS = ["claude", "codex"] as const;
 type Provider = (typeof PROVIDERS)[number];
@@ -367,6 +367,9 @@ class UsageStore {
 export class UsageWatcher {
   private readonly store: UsageStore;
   private readonly now: () => number;
+  private readonly maxLineBytes: number;
+  private readonly maxBytesPerFile: number;
+  private readonly maxBytesPerPoll: number;
   private readonly diagnostics: UsageWatcherDiagnostics = {
     files_seen: 0, rows_seen: 0, responses_seen: 0, malformed_rows: 0, oversized_rows: 0,
     stale_rows: 0, unsafe_identity_rows: 0, source_errors: 0, emit_errors: 0, conflicts: 0, numeric_overflows: 0, codes: [],
@@ -379,6 +382,15 @@ export class UsageWatcher {
 
   constructor(private readonly options: UsageWatcherOptions) {
     this.now = options.now ?? Date.now;
+    this.maxLineBytes = options.maxLineBytes ?? MAX_LINE_BYTES;
+    const configuredLimits = [this.maxLineBytes, options.maxBytesPerFile ?? MAX_BYTES_PER_FILE, options.maxBytesPerPoll ?? MAX_BYTES_PER_POLL];
+    if (configuredLimits.some((limit) => !Number.isSafeInteger(limit) || limit <= 0)
+      || this.maxLineBytes > MAX_LINE_BYTES) throw new UsageWatcherStartError();
+    // A complete allowed row plus its newline must fit in one read. Otherwise
+    // preserving a partial row's cursor would reread it forever. Small source
+    // files still allocate only their remaining bytes, rather than this ceiling.
+    this.maxBytesPerFile = Math.max(options.maxBytesPerFile ?? MAX_BYTES_PER_FILE, this.maxLineBytes + 1);
+    this.maxBytesPerPoll = Math.max(options.maxBytesPerPoll ?? MAX_BYTES_PER_POLL, (this.maxLineBytes + 1) * PROVIDERS.length);
     this.store = new UsageStore(options.databaseFile);
   }
 
@@ -521,7 +533,7 @@ export class UsageWatcher {
         const nowStat = await h.stat();
         if (nowStat.dev !== file.dev || nowStat.ino !== file.ino) return undefined;
         if (nowStat.size < cursor.offset) return { bytes: Buffer.alloc(0), size: nowStat.size };
-        const length = Math.min(nowStat.size - cursor.offset, budget, this.options.maxBytesPerFile ?? MAX_BYTES_PER_FILE);
+        const length = Math.min(nowStat.size - cursor.offset, budget, this.maxBytesPerFile);
         const b = Buffer.alloc(length);
         const { bytesRead } = await h.read(b, 0, length, cursor.offset);
         return { bytes: b.subarray(0, bytesRead), size: nowStat.size };
@@ -599,7 +611,7 @@ export class UsageWatcher {
     const lists = {} as Record<Provider, { files: FileInfo[]; accessible: boolean; limited: boolean }>;
     for (const provider of PROVIDERS) lists[provider] = await this.listFiles(provider, this.rootFor(provider));
     this.diagnostics.files_seen += lists.claude.files.length + lists.codex.files.length;
-    let remainingPollBudget = this.options.maxBytesPerPoll ?? MAX_BYTES_PER_POLL;
+    let remainingPollBudget = this.maxBytesPerPoll;
     this.store.beginPoll();
     try {
       const changedStatuses: Array<[Provider, "ready" | "partial" | "unavailable"]> = [];
@@ -609,7 +621,7 @@ export class UsageWatcher {
       for (const [provider, status] of changedStatuses) this.store.markProvider(provider, status);
       for (const provider of PROVIDERS) {
         // Keep one provider's growing backlog from starving the other source.
-        let providerBudget = Math.min(remainingPollBudget, Math.ceil((this.options.maxBytesPerPoll ?? MAX_BYTES_PER_POLL) / PROVIDERS.length));
+        let providerBudget = Math.min(remainingPollBudget, Math.floor(this.maxBytesPerPoll / PROVIDERS.length));
         for (const file of lists[provider].files) {
           if (providerBudget <= 0 || remainingPollBudget <= 0) break;
           let cursor = this.store.enrollFile(file);
@@ -618,6 +630,12 @@ export class UsageWatcher {
             this.addCode(`usage_${provider}_source_truncated`);
             this.store.markProvider(provider, "partial");
           }
+          const unreadBytes = file.size - cursor.offset;
+          if (unreadBytes <= 0) continue;
+          // Retry large unread tails with a fresh budget, but keep scanning
+          // smaller files that still fit this poll. A fully read historical
+          // file must not block other files merely because its total size is big.
+          if (providerBudget < this.maxLineBytes + 1 && unreadBytes > providerBudget) continue;
           const chunk = await this.readChunk(file, cursor, providerBudget);
           if (!chunk) continue;
           const bytes = chunk.bytes;
@@ -629,7 +647,7 @@ export class UsageWatcher {
           let discardingOversize = cursor.discardingOversize;
           for (let i = 0; i < bytes.length; i += 1) {
             if (bytes[i] !== 0x0a) {
-              if (!discardBaselineLine && !discardingOversize && i - lineStart + 1 > (this.options.maxLineBytes ?? MAX_LINE_BYTES)) {
+              if (!discardBaselineLine && !discardingOversize && i - lineStart + 1 > this.maxLineBytes) {
                 discardingOversize = true;
                 this.diagnostics.oversized_rows += 1;
                 this.addCode(`usage_${provider}_oversized_row`);
@@ -652,7 +670,7 @@ export class UsageWatcher {
               continue;
             }
             const lineBytes = bytes.subarray(lineStart, i);
-            if (lineBytes.length > (this.options.maxLineBytes ?? MAX_LINE_BYTES)) {
+            if (lineBytes.length > this.maxLineBytes) {
               this.diagnostics.oversized_rows += 1;
               this.addCode(`usage_${provider}_oversized_row`);
               this.store.markProvider(provider, "partial");

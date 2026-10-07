@@ -2,6 +2,7 @@ import datetime
 import http.server
 import json
 import os
+import pty
 from pathlib import Path
 import shutil
 import signal
@@ -30,6 +31,7 @@ def free_port():
 class HealthHandler(http.server.BaseHTTPRequestHandler):
     compatible = False
     pair_requests = 0
+    pairing = None
 
     def log_message(self, *_args):
         pass
@@ -48,11 +50,15 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
             if type(self).compatible:
                 body["capabilities"] = ["usage_snapshot_v1", "pairing_collector_reuse_v1"]
             return self._send(200, body)
+        if self.path == "/v1/pairing/fixture-pair" and type(self).pairing:
+            return self._send(200, {**type(self).pairing, "status": "pending"})
         return self._send(404, {})
 
     def do_POST(self):
         size = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(size))
+        if self.path == "/v1/collector-token/validate":
+            return self._send(200, {"valid": True, "installation_id": body["installation_id"]})
         if self.path == "/v1/pairing":
             type(self).pair_requests += 1
             public = urllib.parse.urlparse(body["public_url"])
@@ -67,11 +73,12 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
                 "installation_id": body["installation_id"],
             }, separators=(",", ":"))
             expiry = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
-            return self._send(201, {
+            type(self).pairing = {
                 "pairing_id": "fixture-pair", "code": "TESTCODE", "expires_at": expiry,
                 "qr_payload": payload, "collector_token": "collector-fixture-token-123456789",
                 "installation_id": body["installation_id"], "ws_url": ws_origin,
-            })
+            }
+            return self._send(201, type(self).pairing)
         return self._send(404, {})
 
 
@@ -88,6 +95,7 @@ class StartLanMonitorTests(unittest.TestCase):
         self.pid_dir.mkdir()
         HealthHandler.compatible = False
         HealthHandler.pair_requests = 0
+        HealthHandler.pairing = None
 
     def tearDown(self):
         self.temp.cleanup()
@@ -95,6 +103,7 @@ class StartLanMonitorTests(unittest.TestCase):
     def _env(self, port):
         python = sys.executable
         env = os.environ.copy()
+        env.pop("COLLECTOR_WATCH_USAGE", None)
         env.update({
             "CLAUDE_PHONE_MONITOR_HOME": str(self.state),
             "RELAY_PORT": str(port),
@@ -136,6 +145,7 @@ if [[ "$1" == *"/services/relay/dist/src/index.js" ]]; then
   exec "$PYTHON_BIN" "$FAKE_RELAY_SERVER" "$RELAY_PORT"
 fi
 echo "$$" > "$FAKE_PID_DIR/collector.pid"
+printf '%s' "$COLLECTOR_WATCH_USAGE" > "$FAKE_PID_DIR/usage-choice"
 exec /bin/sleep 120
 '''
         node_path = self.root / "fake-node"
@@ -147,6 +157,132 @@ import pathlib,sys
 pathlib.Path(sys.argv[3]).write_bytes(b"\\x89PNG\\r\\n\\x1a\\nfixture")
 ''')
         swift.chmod(0o700)
+
+    def _launch_choice(self, port, options=(), override=None, answer=None):
+        choice = self.pid_dir / "usage-choice"
+        choice.unlink(missing_ok=True)
+        env = self._env(port)
+        if override is not None:
+            env["COLLECTOR_WATCH_USAGE"] = override
+        master = slave = None
+        if answer is not None:
+            master, slave = pty.openpty()
+        process = subprocess.Popen([str(SCRIPT), "--no-build", *options], cwd=ROOT, env=env,
+                                   stdin=slave if slave is not None else subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if slave is not None:
+            os.close(slave)
+            os.write(master, (answer + "\n").encode())
+        try:
+            deadline = time.monotonic() + 10
+            while not choice.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            if not choice.exists():
+                process.terminate()
+                output, error = process.communicate(timeout=8)
+                self.fail(f"launcher failed to start: {output} {error}")
+            selected = choice.read_text()
+            process.send_signal(signal.SIGINT)
+            output, error = process.communicate(timeout=8)
+            return selected, output + error
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.communicate(timeout=8)
+            if master is not None:
+                os.close(master)
+
+    def test_usage_first_interactive_choice_persists_and_environment_only_overrides_one_run(self):
+        self._write_fake_programs()
+        HealthHandler.compatible = True
+        server = ThreadedServer(("127.0.0.1", 0), HealthHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            selected, output = self._launch_choice(server.server_port, ["--configure-usage"], answer="y")
+            self.assertEqual(selected, "1")
+            self.assertIn("historical usage is not backfilled", output)
+            preference = self.state / "usage.preference"
+            self.assertEqual(preference.read_text(), "1\n")
+            self.assertEqual(preference.stat().st_mode & 0o777, 0o600)
+            selected, output = self._launch_choice(server.server_port, ["--configure-usage"])
+            self.assertEqual(selected, "1")
+            self.assertNotIn("Enable Usage monitoring and save", output)
+            selected, _ = self._launch_choice(server.server_port, override="0")
+            self.assertEqual(selected, "0")
+            self.assertEqual(preference.read_text(), "1\n")
+            selected, _ = self._launch_choice(server.server_port)
+            self.assertEqual(selected, "1")
+            selected, _ = self._launch_choice(server.server_port, ["--no-watch-usage"], override="1")
+            self.assertEqual(selected, "0", "explicit CLI disable wins over environment")
+            self.assertEqual(preference.read_text(), "0\n")
+            selected, _ = self._launch_choice(server.server_port)
+            self.assertEqual(selected, "0")
+            selected, _ = self._launch_choice(server.server_port, ["--watch-usage"], override="0")
+            self.assertEqual(selected, "1", "explicit CLI enable wins and saves")
+            self.assertEqual(preference.read_text(), "1\n")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_usage_noninteractive_unconfigured_launch_is_off_and_does_not_save_default(self):
+        self._write_fake_programs()
+        HealthHandler.compatible = True
+        server = ThreadedServer(("127.0.0.1", 0), HealthHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            selected, output = self._launch_choice(server.server_port, ["--configure-usage"])
+            self.assertEqual(selected, "0")
+            self.assertIn("--watch-usage", output)
+            self.assertNotIn("Enable Usage monitoring and save", output)
+            self.assertFalse((self.state / "usage.preference").exists())
+            selected, _ = self._launch_choice(server.server_port, override="1")
+            self.assertEqual(selected, "1")
+            self.assertFalse((self.state / "usage.preference").exists())
+            selected, _ = self._launch_choice(server.server_port, ["--configure-usage"], answer="n")
+            self.assertEqual(selected, "0")
+            self.assertEqual((self.state / "usage.preference").read_text(), "0\n")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_bad_usage_preference_does_not_block_monitor_and_explicit_choice_repairs_regular_file(self):
+        self._write_fake_programs()
+        self.state.mkdir()
+        preference = self.state / "usage.preference"
+        preference.write_text("bad-value\n")
+        HealthHandler.compatible = True
+        server = ThreadedServer(("127.0.0.1", 0), HealthHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            selected, output = self._launch_choice(server.server_port, ["--configure-usage"])
+            self.assertEqual(selected, "0")
+            self.assertIn("usage_preference_unavailable", output)
+            self.assertIn("Claude Phone Monitor is running", output)
+            self.assertEqual(preference.read_text(), "bad-value\n")
+            selected, _ = self._launch_choice(server.server_port, ["--watch-usage"])
+            self.assertEqual(selected, "1")
+            self.assertEqual(preference.read_text(), "1\n")
+            target = self.root / "unrelated-file"
+            target.write_text("keep\n")
+            preference.unlink()
+            preference.symlink_to(target)
+            selected, output = self._launch_choice(server.server_port, ["--watch-usage"])
+            self.assertEqual(selected, "1", "explicit runtime choice survives a refused preference write")
+            self.assertIn("could not be saved", output)
+            self.assertTrue(preference.is_symlink())
+            self.assertEqual(target.read_text(), "keep\n")
+            selected, output = self._launch_choice(server.server_port)
+            self.assertEqual(selected, "0", "unsafe saved preference falls back to disabled Usage")
+            self.assertIn("usage_preference_unavailable", output)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_legacy_healthy_relay_is_rejected_without_being_killed_or_repaired(self):
         server = ThreadedServer(("127.0.0.1", 0), HealthHandler)
@@ -195,7 +331,7 @@ pathlib.Path(sys.argv[3]).write_bytes(b"\\x89PNG\\r\\n\\x1a\\nfixture")
         env = self._env(free_port())
         env["COLLECTOR_SOCKET_PATH"] = str(socket_path)
         try:
-            result = subprocess.run([str(SCRIPT), "--no-build", "--pair", "--install-hooks"], env=env,
+            result = subprocess.run([str(SCRIPT), "--no-build", "--pair", "--install-hooks", "--watch-usage"], env=env,
                                     text=True, capture_output=True, timeout=8)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("A Collector is already listening", result.stderr)
@@ -203,6 +339,7 @@ pathlib.Path(sys.argv[3]).write_bytes(b"\\x89PNG\\r\\n\\x1a\\nfixture")
             self.assertFalse((self.state / "bootstrap.secret").exists())
             self.assertFalse((self.state / "pairing.json").exists())
             self.assertFalse((self.state / "pairing.png").exists())
+            self.assertFalse((self.state / "usage.preference").exists())
             self.assertFalse((self.pid_dir / "collector.pid").exists())
             self.assertFalse((self.pid_dir / "relay.pid").exists())
             self.assertEqual(HealthHandler.pair_requests, 0)

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, appendFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, appendFile, rm, writeFile, utimes } from "node:fs/promises";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { UsageWatcher } from "../src/usage-watcher.js";
+import { UsageWatcher, type UsageWatcherOptions } from "../src/usage-watcher.js";
 import type { UsageSnapshotMessage } from "../src/types.js";
 import { validateUsageAggregate } from "../../../packages/protocol/src/index.js";
 
@@ -21,7 +21,7 @@ async function fixture(t: { after(fn: () => void | Promise<void>): void }) {
   const databaseFile = path.join(root, "private", "usage.sqlite");
   const messages: UsageSnapshotMessage[] = [];
   let sequence = 0;
-  const makeWatcher = () => new UsageWatcher({
+  const makeWatcher = (overrides: Partial<UsageWatcherOptions> = {}) => new UsageWatcher({
     claudeProjectsRoot: claude,
     codexSessionsRoot: codex,
     databaseFile,
@@ -31,6 +31,7 @@ async function fixture(t: { after(fn: () => void | Promise<void>): void }) {
     emit: async (message) => { messages.push(message); },
     now: () => epoch,
     pollIntervalMs: 60_000,
+    ...overrides,
   });
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
   return { root, claude, codex, databaseFile, messages, makeWatcher };
@@ -236,6 +237,152 @@ test("non-usage assistant rows without timestamps do not poison coverage", async
   assert.equal(usage.provider_coverage.claude.status, "ready");
   assert.equal(usage.observed_responses, 0);
   assert.equal(handle.getDiagnostics().malformed_rows, 0);
+});
+
+test("large irrelevant rows with nested or late type fields preserve complete coverage", async (t) => {
+  const f = await fixture(t);
+  const watcher = f.makeWatcher();
+  const handle = await watcher.start();
+  t.after(() => handle.stop());
+  const text = "private body ".repeat(60_000);
+  const claudeFile = path.join(f.claude, "large.jsonl");
+  const codexFile = path.join(f.codex, "rollout-large.jsonl");
+  await writeFile(claudeFile, JSON.stringify({ message: { type: "assistant", content: text }, type: "user" }) + "\n"
+    + JSON.stringify({ message: { content: text }, type: "assistant" }) + "\n" + claudeRow());
+  await writeFile(codexFile, JSON.stringify({ payload: { type: "token_usage_record", content: text }, type: "response_item" }) + "\n");
+  const usage = await poll(watcher);
+  assert.equal(usage.observed_responses, 1);
+  assert.equal(usage.provider_coverage.claude.status, "ready");
+  assert.equal(usage.provider_coverage.codex.status, "ready");
+  assert.equal(usage.cache_hit.quality, "complete");
+  assert.equal(handle.getDiagnostics().oversized_rows, 0);
+  assert.equal(handle.getDiagnostics().malformed_rows, 0);
+  assert.equal((await readFile(f.databaseFile)).includes("private body"), false);
+});
+
+test("large valid usage rows fit even when configured read budgets are too small", async (t) => {
+  const f = await fixture(t);
+  const watcher = f.makeWatcher({ maxBytesPerFile: 1_024, maxBytesPerPoll: 2_048 });
+  const handle = await watcher.start();
+  t.after(() => handle.stop());
+  const row = JSON.parse(claudeRow()) as Record<string, unknown>;
+  const message = row.message as Record<string, unknown>;
+  message.content = "x".repeat(700_000);
+  await writeFile(path.join(f.claude, "large-usage.jsonl"), JSON.stringify(row) + "\n");
+  await writeFile(path.join(f.codex, "rollout-usage.jsonl"), JSON.stringify({
+    type: "token_usage_record", timestamp: stamp,
+    payload: { thread_id: "t", response_id: "r", usage: { input_tokens: 9, cached_input_tokens: 4, output_tokens: 6 } },
+  }) + "\n");
+  const usage = await poll(watcher);
+  assert.equal(usage.observed_responses, 2);
+  assert.equal(usage.complete_responses, 2);
+  assert.equal(usage.actual.value, 26);
+  assert.equal(usage.cache_hit.quality, "complete");
+  assert.equal(handle.getDiagnostics().oversized_rows, 0);
+  assert.equal((await poll(watcher)).observed_responses, 2);
+});
+
+test("hard-limit rows are discarded across polls while later usage and the other provider progress", async (t) => {
+  const f = await fixture(t);
+  const watcher = f.makeWatcher();
+  const handle = await watcher.start();
+  const epochId = handle.getSnapshot().epoch_id;
+  let stopped = false;
+  t.after(() => { if (!stopped) return handle.stop(); });
+  await writeFile(path.join(f.claude, "oversized.jsonl"), JSON.stringify({ type: "user", text: "x".repeat(4 * 1024 * 1024 + 100) }) + "\n" + claudeRow({ id: "after-hard-limit" }));
+  await writeFile(path.join(f.codex, "rollout-after.jsonl"), JSON.stringify({
+    type: "token_usage_record", timestamp: stamp,
+    payload: { thread_id: "t", response_id: "r", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } },
+  }) + "\n");
+  let usage = await poll(watcher);
+  assert.equal(usage.provider_coverage.codex.observed_responses, 1, "Claude backlog cannot starve Codex");
+  usage = await poll(watcher);
+  assert.equal(usage.observed_responses, 2);
+  assert.equal(usage.provider_coverage.claude.status, "partial");
+  assert.equal(handle.getDiagnostics().oversized_rows, 1);
+  await handle.stop();
+  stopped = true;
+  const restarted = f.makeWatcher();
+  const restartedHandle = await restarted.start();
+  t.after(() => restartedHandle.stop());
+  assert.equal(restartedHandle.getSnapshot().epoch_id, epochId);
+  assert.equal(restartedHandle.getSnapshot().observed_responses, 2);
+  assert.equal(restartedHandle.getSnapshot().provider_coverage.claude.status, "partial", "an old permanent gap is not erased");
+});
+
+test("an exact hard-limit row with a late type fits and incomplete large rows wait for their newline", async (t) => {
+  const f = await fixture(t);
+  const watcher = f.makeWatcher();
+  const handle = await watcher.start();
+  t.after(() => handle.stop());
+  const file = path.join(f.claude, "boundary.jsonl");
+  const empty = JSON.stringify({ text: "", type: "user" });
+  const large = JSON.stringify({ text: "x".repeat(4 * 1024 * 1024 - Buffer.byteLength(empty)), type: "user" });
+  assert.equal(Buffer.byteLength(large), 4 * 1024 * 1024);
+  await writeFile(file, large);
+  assert.equal((await poll(watcher)).provider_coverage.claude.status, "ready");
+  await appendFile(file, "\n" + claudeRow({ id: "after-exact-limit" }));
+  await poll(watcher);
+  assert.equal((await poll(watcher)).observed_responses, 1);
+  assert.equal(handle.getDiagnostics().oversized_rows, 0);
+});
+
+test("fully read large files and deferred large tails do not block smaller files", async (t) => {
+  const f = await fixture(t);
+  const first = path.join(f.claude, "first.jsonl");
+  const historical = path.join(f.claude, "historical.jsonl");
+  const small = path.join(f.claude, "small.jsonl");
+  await writeFile(historical, JSON.stringify({ text: "x".repeat(700_000), type: "user" }) + "\n");
+  const watcher = f.makeWatcher({ maxLineBytes: 1_024, maxBytesPerFile: 2_048, maxBytesPerPoll: 4_096 });
+  const handle = await watcher.start();
+  t.after(() => handle.stop());
+  const filler = (JSON.stringify({ type: "user", text: "x".repeat(470) }) + "\n").repeat(3);
+  await writeFile(first, filler);
+  await writeFile(small, claudeRow({ id: "small-first" }));
+  const orderFiles = async () => {
+    for (const [file, seconds] of [[first, 3], [historical, 2], [small, 1]] as const) {
+      await utimes(file, epoch / 1000 + seconds, epoch / 1000 + seconds);
+    }
+  };
+  await orderFiles();
+  assert.equal((await poll(watcher)).observed_responses, 1, "an already-read huge file is skipped using its cursor");
+  const largeRow = JSON.parse(claudeRow({ id: "deferred-large" })) as Record<string, unknown>;
+  (largeRow.message as Record<string, unknown>).content = "x".repeat(600);
+  await appendFile(first, filler);
+  await appendFile(historical, JSON.stringify(largeRow) + "\n");
+  await appendFile(small, claudeRow({ id: "small-later" }));
+  await orderFiles();
+  assert.equal((await poll(watcher)).observed_responses, 2, "a large deferred tail does not hide a later small file");
+  const usage = await poll(watcher);
+  assert.equal(usage.observed_responses, 3, "the deferred allowed row progresses with a fresh budget");
+  assert.equal(usage.provider_coverage.claude.status, "ready");
+});
+
+test("upgrading the old line limit preserves its gap, counters, epoch, and response deduplication", async (t) => {
+  const f = await fixture(t);
+  const file = path.join(f.claude, "upgrade.jsonl");
+  const old = f.makeWatcher({ maxLineBytes: 64 * 1024 });
+  const oldHandle = await old.start();
+  let stopped = false;
+  t.after(() => { if (!stopped) return oldHandle.stop(); });
+  const epochId = oldHandle.getSnapshot().epoch_id;
+  await writeFile(file, JSON.stringify({ type: "user", text: "x".repeat(100_000) }) + "\n" + claudeRow({ id: "before-upgrade" }));
+  assert.equal((await poll(old)).observed_responses, 1);
+  assert.equal(oldHandle.getSnapshot().provider_coverage.claude.status, "partial");
+  await oldHandle.stop();
+  stopped = true;
+  const upgraded = f.makeWatcher();
+  const upgradedHandle = await upgraded.start();
+  t.after(() => upgradedHandle.stop());
+  assert.equal(upgradedHandle.getSnapshot().epoch_id, epochId);
+  assert.equal(upgradedHandle.getSnapshot().observed_responses, 1);
+  const row = JSON.parse(claudeRow({ id: "after-upgrade" })) as Record<string, unknown>;
+  (row.message as Record<string, unknown>).content = "x".repeat(100_000);
+  await appendFile(file, claudeRow({ id: "before-upgrade" }) + JSON.stringify(row) + "\n");
+  const usage = await poll(upgraded);
+  assert.equal(usage.observed_responses, 2);
+  assert.equal(usage.provider_coverage.claude.status, "partial");
+  assert.equal(upgradedHandle.getDiagnostics().oversized_rows, 0);
 });
 
 test("missing timestamp on a usage row and inconsistent Codex cache counters mark coverage partial", async (t) => {

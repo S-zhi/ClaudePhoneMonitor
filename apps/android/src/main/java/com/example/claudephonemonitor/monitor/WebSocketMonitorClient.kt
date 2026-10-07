@@ -101,6 +101,20 @@ class WebSocketMonitorClient(
                         }
                     }
 
+                    override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                        val accepted = synchronized(lock) {
+                            if (!claimSocketLocked(generation, webSocket)) {
+                                false
+                            } else {
+                                terminateLocked(reason.ifBlank { "WebSocket closing" })
+                                true
+                            }
+                        }
+                        // A peer close frame already ends the usable connection.
+                        // Reply with a legal code even when the peer sent an empty frame (1005).
+                        if (accepted && !webSocket.close(1000, null)) webSocket.cancel()
+                    }
+
                     override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                         synchronized(lock) {
                             if (!claimSocketLocked(generation, webSocket)) return

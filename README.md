@@ -20,11 +20,10 @@ npm run ci:install
 ```
 
 ```bash
-npm test
-```
-
-```bash
+npm run lint
 npm run typecheck
+npm run build
+npm test
 ```
 
 真实 LAN live test 默认跳过；配置 `RELAY_BASE_URL` 和 `RELAY_BOOTSTRAP_SECRET` 后才会连接运行中的 Relay：
@@ -135,12 +134,13 @@ apps/android/build/outputs/apk/debug/android-debug.apk
 - 验证未过期的一次性 QR，或刷新已领取/过期/地址变更的 QR；
 - 生成并打开 `pairing.png`；
 - 安装 monitor-owned Claude Hooks；
+- 首次询问是否启用 Usage，并记住选择；
 - 启动 Collector。
 
 也可以在终端运行：
 
 ```bash
-scripts/start-lan-monitor.sh --pair --install-hooks --open-qr
+scripts/start-lan-monitor.sh --pair --install-hooks --open-qr --configure-usage
 ```
 
 脚本会检查 Relay 的 pairing 与 Usage 兼容能力。过期或已领取的 QR 会自动刷新，同时保留 installation ID、Collector token、Relay 数据库和 Usage 统计起点；要主动换一张新码时使用 `--pair`。如果目标端口运行着旧版或配置不兼容的 Relay，脚本会拒绝复用并提示你先手动停止旧实例，不会自行结束未知进程。
@@ -194,8 +194,13 @@ Codex 会话记录格式随版本变化。当前投影只报告可核实的 WORK
 scripts/start-lan-monitor.sh --watch-usage
 ```
 
-等价开关为 `COLLECTOR_WATCH_USAGE=1` 或直接运行 Collector 时使用
-`--collector --watch-usage`；默认关闭，`--no-watch-usage` 可覆盖环境开关。采集器读取
+双击入口首次在终端询问是否开启 Usage，选择保存在私有的
+`~/.claude-phone-monitor/usage.preference`（权限 600，或由 `CLAUDE_PHONE_MONITOR_HOME`
+指定目录）。普通启动沿用保存选择；`--watch-usage` / `--no-watch-usage` 分别保存开启 / 关闭。
+`COLLECTOR_WATCH_USAGE=1` / `0` 仅覆盖本次启动，显式 CLI 选项优先。未选择且非交互启动时
+保持关闭，并打印开启命令。直接运行 Collector 时使用 `--collector --watch-usage` 或上述环境
+开关，默认关闭；启动脚本的保存选择只用于该脚本。保存选择损坏时关闭 Usage 并继续启动状态监控，
+可用显式选项修复普通配置文件；无法安全保存时提示选择仅对本次生效。采集器读取
 `~/.claude/projects` 与 `$CODEX_HOME/sessions`（默认 `~/.codex/sessions`），可分别用
 `COLLECTOR_CLAUDE_PROJECTS_DIR` 和 `COLLECTOR_CODEX_SESSIONS_DIR` 指定来源。首次启用时
 建立并持久化统计起点，不回填之前的历史；之后重启从本地游标追读。去重按 Claude 消息或
@@ -203,6 +208,10 @@ Codex response 身份，页面请求数表示“已观测模型响应”，不�
 私有 `usage.sqlite` 只保存匿名身份散列、用量数字与游标，不保存 transcript 正文或完整路径；
 Relay 只收到绝对汇总。缓存字段缺失或来源不可用会标记部分/不可用，剩余额度无真实来源时
 保持不可用。诊断只输出固定代码，不输出原始数据。
+
+单行 JSONL 最多读取 4 MiB，允许包含长正文的普通记录先解析类型再忽略。
+超过该上限或损坏的记录会跳过并保守标记覆盖缺口，后续有效记录继续计数。
+旧账本已有的覆盖缺口会继续显示部分覆盖；重启不会清除统计起点或伪装成完整数据。
 
 口径按响应来源区分：Claude 新增输入为 `input_tokens + cache_creation_input_tokens`，Codex
 新增输入为 `input_tokens - cached_input_tokens`；实际消耗为新增输入加输出，总输入再加缓存命中
