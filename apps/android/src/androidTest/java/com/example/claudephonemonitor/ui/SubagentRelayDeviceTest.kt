@@ -16,6 +16,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.example.claudephonemonitor.monitor.MonitorViewModel
 import com.example.claudephonemonitor.monitor.PetState
+import com.example.claudephonemonitor.monitor.ReminderStrength
 import com.example.claudephonemonitor.monitor.SessionKind
 import com.example.claudephonemonitor.monitor.WebSocketMonitorClient
 import java.io.File
@@ -115,12 +116,15 @@ class SubagentRelayDeviceTest {
             control("last_main_finish")
             val lastMainAt = SystemClock.elapsedRealtime()
             assertEquals("Main Beta", vm.uiState.value.stateChange?.completionName)
+            assertEquals(ReminderStrength.WEAK, vm.uiState.value.stateChange?.strength)
+            assertEquals(MonitorPage.STATUS, selectMonitorPage(vm.uiState.value))
+            compose.onNodeWithTag("weak-reminder").assertIsDisplayed()
             control("children_only")
             counts(0, 8)
             assertEquals(PetState.IDLE, vm.uiState.value.petState)
             assertEquals("Main Beta", vm.uiState.value.stateChange?.completionName)
-            compose.waitUntil(20_000) { vm.uiState.value.stateChange == null }
-            assertTrue("Real monotonic presentation lasts approximately 15 seconds", SystemClock.elapsedRealtime() - lastMainAt >= 14_500)
+            compose.waitUntil(8_000) { vm.uiState.value.stateChange == null }
+            assertTrue("A short main task uses the real five-second weak reminder", SystemClock.elapsedRealtime() - lastMainAt in 4_500L..7_500L)
             compose.mainClock.advanceTimeBy(100)
             compose.waitForIdle()
             assertEquals(MonitorPage.STATUS, selectMonitorPage(vm.uiState.value))

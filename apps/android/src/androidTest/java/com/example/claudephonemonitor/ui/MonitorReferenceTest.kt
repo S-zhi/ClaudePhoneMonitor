@@ -11,6 +11,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.isDisplayed
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -40,10 +42,11 @@ import org.junit.runner.RunWith
 class MonitorReferenceTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
-    @Before fun freezeAnimationClock() {
+    @Before fun resetAnimationClock() {
         // The debug manifest fixes the host direction before launch, so setContent cannot be lost
         // to an asynchronous orientation recreation during the first test in the process.
-        compose.mainClock.autoAdvance = false
+        // Let each fresh Activity finish composing and measuring before freezing its animations.
+        compose.mainClock.autoAdvance = true
     }
 
     @Test fun statusShowsAllFiveRowsAndGlobalCounts() {
@@ -91,6 +94,7 @@ class MonitorReferenceTest {
         compose.onNodeWithTag("weak-reminder").assertIsDisplayed()
         compose.onNodeWithText("任务完成：${titles.last()}").assertIsDisplayed()
         compose.onNodeWithTag("state-change-title").assertDoesNotExist()
+        capture("weak-status.png", "issue17-screenshots")
     }
 
     @Test fun weakCompletionStaysOnUsagePage() {
@@ -101,6 +105,7 @@ class MonitorReferenceTest {
         compose.onNodeWithText("Usage 用量消耗").assertIsDisplayed()
         compose.onNodeWithTag("weak-reminder").assertIsDisplayed()
         compose.onNodeWithTag("session-list").assertDoesNotExist()
+        capture("weak-usage.png", "issue17-screenshots")
     }
 
     @Test fun strongCompletionIsVisibleAboveUsagePage() {
@@ -110,10 +115,12 @@ class MonitorReferenceTest {
         ))
         compose.onNodeWithTag("state-change-title").assertIsDisplayed()
         compose.onNodeWithText("Usage 用量消耗").assertDoesNotExist()
+        capture("strong-from-usage.png", "issue17-screenshots")
     }
 
     @Test fun shortLandscapeKeepsAllFiveRowsVisible() {
         render(fixture(), short = true)
+        compose.waitUntil(5_000L) { titles.all { compose.onNodeWithText(it).isDisplayed() } }
         assertAllTitles()
         capture("status-short.png")
     }
@@ -123,8 +130,10 @@ class MonitorReferenceTest {
         // Scroll requests a new measure/layout frame. Let the clock advance until the action and
         // assertion settle, then freeze again so the captured sprite does not move between frames.
         compose.mainClock.autoAdvance = true
-        compose.onNodeWithText(titles.last()).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(titles.last()).performScrollTo()
+        compose.waitUntil(5_000L) { compose.onNodeWithText(titles.last()).isDisplayed() }
         compose.mainClock.autoAdvance = false
+        compose.onNodeWithText(titles.last()).assertIsDisplayed()
         capture("status-large-font.png")
     }
 
@@ -143,16 +152,23 @@ class MonitorReferenceTest {
                 }
             }
         }
+        compose.waitUntil(5_000L) {
+            compose.onAllNodesWithTag("monitor-stage")
+                .fetchSemanticsNodes(atLeastOneRootRequired = false)
+                .any { it.size.width > 0 && it.size.height > 0 }
+        }
+        compose.waitForIdle()
+        compose.mainClock.autoAdvance = false
         compose.mainClock.advanceTimeBy(100L)
         compose.waitForIdle()
     }
 
     private fun assertAllTitles() = titles.forEach { compose.onNodeWithText(it).assertIsDisplayed() }
 
-    private fun capture(name: String) {
+    private fun capture(name: String, directoryName: String = "issue4-screenshots") {
         val bitmap = compose.onNodeWithTag("monitor-stage").captureToImage().asAndroidBitmap()
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val directory = requireNotNull(context.getExternalFilesDir("issue4-screenshots"))
+        val directory = requireNotNull(context.getExternalFilesDir(directoryName))
         directory.mkdirs()
         File(directory, name).outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
     }
