@@ -14,7 +14,8 @@ PORT="${RELAY_PORT:-8787}"
 PAIR=0
 INSTALL_HOOKS=0
 OPEN_QR=0
-WATCH_CODEX="${COLLECTOR_WATCH_CODEX:-0}"
+WATCH_CODEX=0
+CODEX_CHOICE=""
 WATCH_USAGE=0
 USAGE_CHOICE=""
 CONFIGURE_USAGE=0
@@ -35,8 +36,8 @@ creates a bootstrap secret, creates a one-time pairing, and writes a QR image.
 Options:
   --pair            create a fresh one-time pairing QR
   --install-hooks   merge monitor-owned Claude Code Hooks (real settings change)
-  --watch-codex     read local Codex session JSONL and send safe lifecycle metadata
-  --no-watch-codex  disable Codex watching even when COLLECTOR_WATCH_CODEX=1
+  --watch-codex     enable Codex lifecycle monitoring and save this choice
+  --no-watch-codex  disable Codex watching and save this choice (overrides environment)
   --configure-usage ask for a Usage preference on first interactive launch
   --watch-usage     enable Usage and save this choice for future launches
   --no-watch-usage  disable Usage and save this choice (overrides environment)
@@ -50,8 +51,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --pair) PAIR=1; shift ;;
     --install-hooks) INSTALL_HOOKS=1; shift ;;
-    --watch-codex) WATCH_CODEX=1; shift ;;
-    --no-watch-codex) WATCH_CODEX=0; shift ;;
+    --watch-codex) CODEX_CHOICE=1; shift ;;
+    --no-watch-codex) CODEX_CHOICE=0; shift ;;
     --configure-usage) CONFIGURE_USAGE=1; shift ;;
     --watch-usage) USAGE_CHOICE=1; shift ;;
     --no-watch-usage) USAGE_CHOICE=0; shift ;;
@@ -110,11 +111,30 @@ if ! check_collector_socket; then
 fi
 
 # Resolve preferences only after the duplicate-Collector guard. Pairing may
-# rewrite monitor.env, so the persistent Usage choice lives in its own file.
-USAGE_PREFERENCE_HELPER="$ROOT/scripts/usage-preference.py"
+# rewrite monitor.env, so persistent watcher choices live in their own files.
+WATCH_PREFERENCE_HELPER="$ROOT/scripts/usage-preference.py"
+if [[ -n "$CODEX_CHOICE" ]]; then
+  WATCH_CODEX="$CODEX_CHOICE"
+  if ! "$PYTHON_BIN" "$WATCH_PREFERENCE_HELPER" --state-dir "$STATE_DIR" --feature codex --write "$CODEX_CHOICE"; then
+    printf 'Codex choice applies to this launch only; it could not be saved.\n' >&2
+  fi
+elif [[ -n "${COLLECTOR_WATCH_CODEX:-}" ]]; then
+  case "$COLLECTOR_WATCH_CODEX" in
+    0|1) WATCH_CODEX="$COLLECTOR_WATCH_CODEX" ;;
+    *) printf 'COLLECTOR_WATCH_CODEX must be 0 or 1.\n' >&2; exit 2 ;;
+  esac
+else
+  SAVED_CODEX=""
+  if ! SAVED_CODEX="$("$PYTHON_BIN" "$WATCH_PREFERENCE_HELPER" --state-dir "$STATE_DIR" --feature codex)"; then
+    printf 'Codex preference is unavailable; Codex watching stays disabled for this launch.\n' >&2
+  elif [[ -n "$SAVED_CODEX" ]]; then
+    WATCH_CODEX="$SAVED_CODEX"
+  fi
+fi
+
 if [[ -n "$USAGE_CHOICE" ]]; then
   WATCH_USAGE="$USAGE_CHOICE"
-  if ! "$PYTHON_BIN" "$USAGE_PREFERENCE_HELPER" --state-dir "$STATE_DIR" --write "$USAGE_CHOICE"; then
+  if ! "$PYTHON_BIN" "$WATCH_PREFERENCE_HELPER" --state-dir "$STATE_DIR" --write "$USAGE_CHOICE"; then
     printf 'Usage choice applies to this launch only; it could not be saved.\n' >&2
   fi
 elif [[ -n "${COLLECTOR_WATCH_USAGE:-}" ]]; then
@@ -125,7 +145,7 @@ elif [[ -n "${COLLECTOR_WATCH_USAGE:-}" ]]; then
 else
   SAVED_USAGE=""
   USAGE_PREFERENCE_VALID=1
-  if ! SAVED_USAGE="$("$PYTHON_BIN" "$USAGE_PREFERENCE_HELPER" --state-dir "$STATE_DIR")"; then
+  if ! SAVED_USAGE="$("$PYTHON_BIN" "$WATCH_PREFERENCE_HELPER" --state-dir "$STATE_DIR")"; then
     USAGE_PREFERENCE_VALID=0
   fi
   if [[ "$USAGE_PREFERENCE_VALID" -eq 0 ]]; then
@@ -146,7 +166,7 @@ else
         n|N|no|NO|'') WATCH_USAGE=0 ;;
         *) printf 'Please enter y or n.\n'; continue ;;
       esac
-      if ! "$PYTHON_BIN" "$USAGE_PREFERENCE_HELPER" --state-dir "$STATE_DIR" --write "$WATCH_USAGE"; then
+      if ! "$PYTHON_BIN" "$WATCH_PREFERENCE_HELPER" --state-dir "$STATE_DIR" --write "$WATCH_USAGE"; then
         printf 'Usage choice applies to this launch only; it could not be saved.\n' >&2
       fi
       break

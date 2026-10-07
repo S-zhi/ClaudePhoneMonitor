@@ -169,8 +169,13 @@ scripts/start-lan-monitor.sh --watch-codex
 `--collector --watch-codex`。监听默认读取 `$CODEX_HOME/sessions`，未设置
 `CODEX_HOME` 时读取 `~/.codex/sessions`；可用
 `COLLECTOR_CODEX_SESSIONS_DIR` 指定其他目录。监听只读取 sessions JSONL 的安全
-生命周期字段，不安装 Hook、不修改 Codex 配置；如关闭监听，省略选项或使用
-`--no-watch-codex`。
+生命周期字段，不安装 Hook、不修改 Codex 配置。首次默认关闭；
+`--watch-codex` 会保存启用选择，后续普通重启仍会监听；需要关闭时显式使用
+`--no-watch-codex`。环境变量只覆盖当前启动，不改保存的选择。
+若手机显示 `RELAY CONNECTED`，但结束的任务仍留在 Working 列表，先检查启动日志是否显示
+`Codex session monitoring: enabled`，以及 Collector 进程是否带有 `--watch-codex`。
+`RELAY CONNECTED` 只表示手机连上 Relay，不能证明 Codex 生命周期正在采集；
+用 `scripts/start-lan-monitor.sh --watch-codex` 重启服务会恢复监听并保存该选择。
 
 Codex 会话名称只从本机原生标题元数据读取：优先使用 `state_*.sqlite` 的
 `threads.name`，其次是 `session_index.jsonl` 中同 UUID 的最新 `thread_name`，
