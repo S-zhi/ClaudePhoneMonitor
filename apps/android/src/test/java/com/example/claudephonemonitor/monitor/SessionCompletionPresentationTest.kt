@@ -18,7 +18,7 @@ import org.junit.Test
 class SessionCompletionPresentationTest {
     @Test
     fun firstSnapshotRestoresFreshCompletionWhileOtherSessionsKeepWorking() {
-        val completion = RecentCompletion("done", "task", 3, "", "Named release")
+        val completion = RecentCompletion("done", "task", 3, "", "Named release", durationMs = 300_001L)
         var state = reduce(MonitorPresentationState(), snapshot(4, completion, listOf(
             SessionSummary("done", "Named release", ClaudeState.IDLE, 3),
             SessionSummary("other", "Other", ClaudeState.WORKING, 4),
@@ -45,12 +45,12 @@ class SessionCompletionPresentationTest {
         state = reduce(state, MonitorEvent(type = MonitorEventType.CONNECTED), 300)
         state = reduce(state, snapshot(2, RecentCompletion("a", "task", 2, "", "Release A")), 400)
         assertEquals(PetState.IDLE, state.baseState)
-        assertEquals(PetState.IDLE, state.changeStatus)
+        assertEquals(PetState.FINISH, state.changeStatus) // A weak reconnect does not take over the strong result.
         assertNull(state.recentSessionCompletion)
 
         state = reduce(state, MonitorEvent(type = MonitorEventType.DISCONNECTED), 500)
         state = reduce(state, MonitorEvent(type = MonitorEventType.CONNECTED), 600)
-        state = reduce(state, snapshot(3, RecentCompletion("b", "task", 3, "", "Release B")), 700)
+        state = reduce(state, snapshot(3, RecentCompletion("b", "task", 3, "", "Release B", durationMs = 300_001L)), 700)
         assertEquals(PetState.FINISH, state.changeStatus)
         assertEquals("Release B", state.completionName)
         assertEquals("b", state.recentSessionCompletion?.sessionId)
@@ -117,6 +117,7 @@ class SessionCompletionPresentationTest {
         state = reduce(state, MonitorEvent(
             type = MonitorEventType.EVENT, name = MonitorEventName.TASK_FAILED,
             sessionId = "c", taskId = "task", sequence = 4,
+            durationMs = 300_001L,
         ), 1_000)
         assertEquals(PetState.ERROR, state.changeStatus)
         assertEquals("b", state.recentSessionCompletion?.sessionId)
@@ -147,7 +148,7 @@ class SessionCompletionPresentationTest {
             sessionId = "done", taskId = "new-task", sequence = 4,
         ), 6_100)
         assertNull(state.recentSessionCompletion)
-        assertEquals(PetState.WORKING, state.changeStatus)
+        assertEquals(PetState.FINISH, state.changeStatus) // Starting work is weak; the prior strong reminder remains.
         assertEquals(PetState.WORKING, state.baseState)
     }
 
@@ -304,6 +305,7 @@ class SessionCompletionPresentationTest {
         taskId = "task",
         sessionTitle = title,
         sequence = sequence,
+        durationMs = 300_001L,
     )
 
     private class FakeMonitorClient : MonitorClient {

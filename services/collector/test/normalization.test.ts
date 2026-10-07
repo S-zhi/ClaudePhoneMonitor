@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import { normalizeHookEvent, safeSessionTitle } from "../src/normalize.ts";
 import { Collector } from "../src/collector.ts";
+import { isSafeEventPayload } from "../src/types.ts";
 
 const now = new Date("2026-10-02T11:00:00.000Z");
 
@@ -54,6 +55,36 @@ test("canonical event_type and allowlisted payload survive local socket normaliz
     occurred_at: "2026-10-02T10:59:00.000Z",
     payload: { tool_name: "Read", duration_ms: 7, exit_code: 0 },
   });
+});
+
+test("explicit permission and input notifications retain only a verified waiting reason", () => {
+  for (const [hook, notificationType, expected] of [
+    ["PermissionRequest", undefined, "permission"],
+    ["Notification", "permission_prompt", "permission"],
+    ["Notification", "elicitation_dialog", "input"],
+    ["Notification", "elicitation_url_dialog", "input"],
+    ["Notification", "agent_needs_input", "input"],
+  ] as const) {
+    const first = normalizeHookEvent({ hook_event_name: hook, notification_type: notificationType,
+      session_id: "s1", message: "private notification text", title: "private title" }, { now });
+    assert.ok(first);
+    assert.deepEqual(first.payload, { reason: expected });
+    assert.equal(isSafeEventPayload(first.payload), true);
+    assert.deepEqual(normalizeHookEvent(first, { now })?.payload, { reason: expected }, "local socket normalization preserves the reason");
+    assert.equal(JSON.stringify(first).includes("private"), false);
+  }
+  for (const notificationType of [undefined, "idle_prompt", "auth_success", "agent_completed", "elicitation_complete", "unknown-kind"]) {
+    const normalized = normalizeHookEvent({ hook_event_name: "Notification", notification_type: notificationType,
+      session_id: "s1", message: "permission approval input needed", payload: { reason: "unverified-private-reason" } }, { now });
+    assert.equal(normalized?.event_type, "waiting");
+    assert.deepEqual(normalized.payload, {}, "ordinary notification content never proves an explicit wait");
+  }
+  for (const reason of ["permission", "question", "approval", "input", "unknown"] as const) {
+    assert.deepEqual(normalizeHookEvent({ event_type: "waiting", session_id: "s1", payload: { reason } }, { now })?.payload, { reason });
+  }
+  assert.equal(isSafeEventPayload({ reason: "unverified" }), false);
+  assert.equal(isSafeEventPayload({ reason: { permission: true } }), false);
+  assert.deepEqual(normalizeHookEvent({ event_type: "tool_started", session_id: "s1", payload: { reason: "permission" } }, { now })?.payload, {});
 });
 
 test("unknown hook names are dropped rather than forwarded", () => {

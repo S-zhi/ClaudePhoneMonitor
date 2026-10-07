@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import {
   EVENT_TYPES,
+  isWaitingReason,
   type EventType,
   type NormalizedHookEvent,
   type SafeEventPayload,
+  type WaitingReason,
 } from "./types.js";
 
 /** Keys intentionally ignored even if they appear at the top level. */
@@ -156,6 +158,23 @@ function normalizeToolName(value: unknown): string | undefined {
   return undefined;
 }
 
+function waitingReason(record: Record<string, unknown>, payload: Record<string, unknown>): WaitingReason | undefined {
+  const hook = getString(record, "hook_event_name", "hookEventName", "event", "name")
+    ?.toLowerCase().replace(/[\s_-]+/g, "");
+  if (hook === "permissionrequest") return "permission";
+  // A canonical event is normalized twice on its way through the Unix socket.
+  // Preserve a verified scalar reason without reading any notification text.
+  if (isWaitingReason(record.reason)) return record.reason;
+  if (isWaitingReason(payload.reason)) return payload.reason;
+  if (hook !== "notification") return undefined;
+  const notificationType = getString(record, "notification_type", "notificationType");
+  if (notificationType === "permission_prompt") return "permission";
+  if (["elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"].includes(notificationType ?? "")) {
+    return "input";
+  }
+  return undefined;
+}
+
 function deriveEventType(record: Record<string, unknown>): EventType | undefined {
   const direct = getString(record, "event_type", "eventType");
   if (direct && EVENT_TYPE_SET.has(direct)) return direct as EventType;
@@ -243,7 +262,7 @@ export function normalizeHookEvent(
   );
 
   // The hook adapter sends this already-normalized object over the local
-  // socket. Read only the same three allowlisted scalar fields when they are
+  // socket. Read only the same allowlisted scalar fields when they are
   // nested under payload; all other nested data remains ignored.
   const nestedPayload = asRecord(record.payload) ?? {};
   const toolName = normalizeToolName(
@@ -276,6 +295,10 @@ export function normalizeHookEvent(
   if (toolName) payload.tool_name = toolName;
   if (duration !== undefined) payload.duration_ms = duration;
   if (exitCode !== undefined) payload.exit_code = exitCode;
+  if (eventType === "waiting") {
+    const reason = waitingReason(record, nestedPayload);
+    if (reason !== undefined) payload.reason = reason;
+  }
 
   const safeSession =
     escapeClaudeIdentifier(safeIdentifier(rawSessionId), "session") ?? "unknown";

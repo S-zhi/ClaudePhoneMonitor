@@ -106,6 +106,14 @@ export interface RecentCompletion {
   sequence: number;
   occurred_at: string;
   display_name: string;
+  duration_ms?: number;
+}
+
+export interface ActiveTask {
+  session_id: string;
+  task_id?: string;
+  started_at: string;
+  elapsed_ms: number;
 }
 
 export interface SnapshotMessage {
@@ -124,6 +132,7 @@ export interface SnapshotMessage {
   running_count?: number;
   session_count?: number;
   recent_completion?: RecentCompletion;
+  active_tasks?: ActiveTask[];
   usage?: UsageAggregate;
 }
 
@@ -296,6 +305,7 @@ export interface InstallationState {
   running_count?: number;
   session_count?: number;
   recent_completion?: RecentCompletion;
+  active_tasks?: ActiveTask[];
   usage?: UsageAggregate;
 }
 

@@ -119,6 +119,8 @@ interface SessionState {
   last_activity_at: string;
   updated_at: string;
   task_id?: string;
+  /** Only an observed task_started establishes a timing origin. */
+  task_started_at?: string;
   ended: boolean;
   /** Task completion is terminal until a newer task starts, even after recent_completion expires. */
   terminalTask?: boolean;
@@ -127,6 +129,48 @@ interface SessionState {
 
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
 const COMPLETION_TTL_MS = 5_000;
+const MAX_TASK_DURATION_MS = 86_400_000;
+
+function taskTimestamp(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parts = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/);
+  if (!parts) return undefined;
+  const [year, month, day, hour, minute, second] = parts.slice(1).map(Number);
+  if (year === undefined || month === undefined || day === undefined || hour === undefined || minute === undefined || second === undefined) return undefined;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  if (daysInMonth === undefined || day < 1 || day > daysInMonth || hour > 23 || minute > 59 || second > 59) return undefined;
+  const milliseconds = Date.parse(value);
+  return Number.isSafeInteger(milliseconds) ? milliseconds : undefined;
+}
+
+function taskDuration(previous: SessionState | undefined, event: EventEnvelope): number | undefined {
+  if (event.session_id === "unknown" ||
+      (event.event_type !== "task_finished" && event.event_type !== "task_failed") ||
+      previous?.ended || (previous?.terminalTask ?? Boolean(previous?.completion)) ||
+      (previous && event.sequence <= previous.last_sequence) ||
+      (event.task_id && previous?.task_id && event.task_id !== previous.task_id)) return undefined;
+  const start = taskTimestamp(previous?.task_started_at);
+  if (start !== undefined) {
+    const end = taskTimestamp(event.occurred_at);
+    if (end === undefined || end < start) return undefined;
+    return Math.min(end - start, MAX_TASK_DURATION_MS);
+  }
+  if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) return undefined;
+  const duration = (event.payload as Record<string, unknown>).duration_ms;
+  return typeof duration === "number" && Number.isSafeInteger(duration) && duration >= 0 && duration <= MAX_TASK_DURATION_MS
+    ? duration : undefined;
+}
+
+function eventWithTaskDuration(previous: SessionState | undefined, event: EventEnvelope): EventEnvelope {
+  if (event.event_type !== "task_finished" && event.event_type !== "task_failed") return event;
+  const duration = taskDuration(previous, event);
+  const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+    ? { ...event.payload as Record<string, unknown> } : {};
+  delete payload.duration_ms;
+  if (duration !== undefined) payload.duration_ms = duration;
+  return { ...event, payload };
+}
 
 function sessionDisplayName(record: SessionState): string {
   const codexHash = /^codex:sess:([0-9a-f]{64})$/.exec(record.session_id)?.[1];
@@ -198,11 +242,16 @@ function applySessionEvent(
       next.claude_state = "idle";
       next.ended = false;
       next.task_id = undefined;
+      next.task_started_at = undefined;
       next.terminalTask = false;
       next.completion = undefined;
       break;
     case "task_started":
       next.claude_state = "working";
+      // Repeated starts for the same explicit task must not shorten its age.
+      if (!(event.task_id && next.task_id === event.task_id && next.task_started_at && !next.terminalTask)) {
+        next.task_started_at = taskTimestamp(event.occurred_at) !== undefined ? event.occurred_at : undefined;
+      }
       next.task_id = event.task_id;
       next.terminalTask = false;
       next.completion = undefined;
@@ -227,8 +276,10 @@ function applySessionEvent(
       );
       if (!staleTaskFinish) {
         const completedTaskId = event.task_id ?? next.task_id;
+        const duration = taskDuration(previous, event);
         next.claude_state = "idle";
         next.task_id = undefined;
+        next.task_started_at = undefined;
         next.terminalTask = true;
         if (event.event_type === "task_finished") {
           next.completion = {
@@ -237,6 +288,7 @@ function applySessionEvent(
             sequence: event.sequence,
             occurred_at: event.occurred_at,
             display_name: sessionDisplayName(next),
+            ...(duration !== undefined ? { duration_ms: duration } : {}),
           };
         } else {
           next.completion = undefined;
@@ -247,6 +299,8 @@ function applySessionEvent(
     case "session_ended":
       next.ended = true;
       next.claude_state = "idle";
+      next.task_id = undefined;
+      next.task_started_at = undefined;
       break;
     case "tool_failed":
       if (event.task_id && next.task_id && event.task_id !== next.task_id) break;
@@ -261,7 +315,7 @@ function aggregatedState(
   now: string,
 ): Pick<
   InstallationState,
-  "claude_state" | "sessions" | "running_count" | "session_count" | "recent_completion" | "main_running_count" | "main_session_count" | "total_running_count"
+  "claude_state" | "sessions" | "running_count" | "session_count" | "recent_completion" | "active_tasks" | "main_running_count" | "main_session_count" | "total_running_count"
 > {
   const nowMs = Date.parse(now);
   const allActive = records.filter((record) => !record.ended && nowMs - Date.parse(record.last_activity_at) < SESSION_TTL_MS);
@@ -294,12 +348,22 @@ function aggregatedState(
     total_running_count: allActive.filter((record) => record.claude_state === "working").length,
     running_count: active.filter((record) => record.claude_state === "working").length,
     session_count: active.length,
+    active_tasks: ordered.flatMap((record) => {
+      const start = taskTimestamp(record.task_started_at);
+      if (!record.task_started_at || (record.terminalTask ?? Boolean(record.completion)) || start === undefined || !Number.isSafeInteger(nowMs)) return [];
+      return [{
+        session_id: record.session_id,
+        ...(record.task_id ? { task_id: record.task_id } : {}),
+        started_at: record.task_started_at,
+        elapsed_ms: Math.min(MAX_TASK_DURATION_MS, Math.max(0, nowMs - start)),
+      }];
+    }),
     ...(completion ? { recent_completion: completion } : {}),
   };
 }
 
 function presentInstallationState(state: InstallationState, records: SessionState[], now: string): InstallationState {
-  if (!records.length) return { ...state, main_running_count: 0, main_session_count: 0, total_running_count: 0, running_count: 0, session_count: 0 };
+  if (!records.length) return { ...state, active_tasks: [], main_running_count: 0, main_session_count: 0, total_running_count: 0, running_count: 0, session_count: 0 };
   const next = { ...state, ...aggregatedState(records, now) };
   if (typeof next.activity === "object" && records.some((record) =>
       record.session_id === next.activity?.session_id && record.session_kind === "subagent")) {
@@ -560,7 +624,7 @@ export class InMemoryRelayRepository implements RelayRepository {
     const changesActivity = updatedSession?.session_kind !== "subagent" &&
       !["session_title_updated", "session_classification_updated"].includes(event.event_type) &&
       (event.session_id === "unknown" || updatedSession?.last_activity_sequence === event.sequence);
-    stored.event = { ...stored.event, ...(updatedSession?.session_kind ? { session_kind: updatedSession.session_kind } : {}) };
+    stored.event = { ...eventWithTaskDuration(priorSession, stored.event), ...(updatedSession?.session_kind ? { session_kind: updatedSession.session_kind } : {}) };
     stored.activity_applied = (changesActivity || (titleUpdated && updatedSession?.session_kind !== "subagent") || event.event_type === "session_classification_updated" || updatedSession?.session_kind === "subagent") && sequence_status !== "out_of_order" &&
       !(event.session_id === "unknown" && event.event_type === "task_finished");
 
@@ -1096,7 +1160,7 @@ export class SqliteRelayRepository implements RelayRepository {
     const changesActivity = updatedSession?.session_kind !== "subagent" &&
       !["session_title_updated", "session_classification_updated"].includes(event.event_type) &&
       (event.session_id === "unknown" || updatedSession?.last_activity_sequence === event.sequence);
-    stored.event = { ...stored.event, ...(updatedSession?.session_kind ? { session_kind: updatedSession.session_kind } : {}) };
+    stored.event = { ...eventWithTaskDuration(priorSession, stored.event), ...(updatedSession?.session_kind ? { session_kind: updatedSession.session_kind } : {}) };
     stored.activity_applied = (changesActivity || (titleUpdated && updatedSession?.session_kind !== "subagent") || event.event_type === "session_classification_updated" || updatedSession?.session_kind === "subagent") && sequence_status !== "out_of_order" &&
       !(event.session_id === "unknown" && event.event_type === "task_finished");
     const nextState: InstallationState =

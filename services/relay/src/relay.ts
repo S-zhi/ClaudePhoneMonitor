@@ -607,6 +607,7 @@ export class Relay {
       running_count: state?.running_count ?? 0,
       session_count: state?.session_count ?? 0,
       ...(state?.recent_completion ? { recent_completion: state.recent_completion } : {}),
+      active_tasks: state?.active_tasks ?? [],
       ...(state?.usage ? { usage: state.usage } : {}),
     };
   }
@@ -1489,6 +1490,9 @@ export class Relay {
       total_running_count: state?.total_running_count,
       session_count: state?.session_count,
       recent_completion: state?.recent_completion,
+      // Elapsed time is computed when a snapshot is sent; it is not a reason
+      // to broadcast an otherwise identical snapshot on every Relay tick.
+      active_tasks: state?.active_tasks?.map(({ session_id, task_id, started_at }) => ({ session_id, task_id, started_at })),
     });
   }
 

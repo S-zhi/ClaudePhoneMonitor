@@ -108,9 +108,9 @@ apps/android/build/outputs/apk/debug/android-debug.apk
 - 仅横屏；
 - 隐藏系统栏；
 - 使用 `update_clawd_assets` 分支提供的 Clawd 帧矩阵作为主角，Compose Canvas 原生渲染；
-- 横屏沉浸式暖炭黑舞台，待机居中，状态变化短暂以大字和 Clawd 分屏展示；
-- 有意义的状态变化与任务结果显示 15 秒改变状态页，倒计时由单调时钟截止；重复事件、心跳及同状态工具事件不会重置计时；
-- 连接后常态展示状态页；真实状态变化或任务结果会切换到改变状态页 15 秒，然后回到最新状态页；
+- 横屏沉浸式暖炭黑舞台；常态显示会话列表和 Clawd，强提醒的 15 秒改变状态页以左侧大字、右侧 Clawd 分屏展示；
+- 执行超过 5 分钟的任务完成、任务失败、明确需要用户操作的等待，以及长任务运行中断连，会显示 15 秒改变状态页；短任务与普通状态变化仅在当前页面内提示 5 秒；
+- 任务时长从 `task_started` 起算，等待时间计入；恰好 5 分钟或既无可靠起点、也无合法事件时长时采用弱提醒。重复事件、心跳与快照刷新不会重置提醒倒计时；
 - 多主会话中单个任务完成时保留其他主任务的 `WORKING` 聚合状态，同时显示该任务的 `FINISH` 提示与完成会话名称；
 - 主列表先过滤已识别子代理，再展示最近的五个主会话；`Main Running` 与 `Main Sessions` 统计全部有效主会话，`Total Running` 统计主会话及子代理的独立运行线程，旁边显示 `Includes subagents`。旧服务缺少明确统计时显示 `—`；
 - `WORKING` 使用 Clawd 坐在灰色笔记本电脑后打字的动作；
@@ -119,7 +119,9 @@ apps/android/build/outputs/apk/debug/android-debug.apk
 - 真实 WebSocket snapshot/event；
 - 无 Mock 客户端和 Demo 控件。
 
-展示方向见 [Clawd 界面整合设计](docs/clawd-ui-design.md)；[待机构图](docs/clawd-design-idle.png) 和 [完成构图](docs/clawd-design-finish.png) 仅是按分支 STILL 帧绘制的设计参考，不是 APK 或真机截图。
+提醒分级的时长、事件和抢占规则见 [Issue #17 说明](docs/issue-17-reminder-policy.md)。
+
+展示方向见 [Clawd 界面整合设计](docs/clawd-ui-design.md)；[待机构图](docs/clawd-design-idle.png) 和 [完成构图](docs/clawd-design-finish.png) 是按分支 STILL 帧绘制的设计参考，不是 APK 或真机截图。强提醒沿用完成构图的左右分屏，任务名称取实际会话。
 
 ## 事件和隐私
 
@@ -167,8 +169,13 @@ scripts/start-lan-monitor.sh --watch-codex
 `--collector --watch-codex`。监听默认读取 `$CODEX_HOME/sessions`，未设置
 `CODEX_HOME` 时读取 `~/.codex/sessions`；可用
 `COLLECTOR_CODEX_SESSIONS_DIR` 指定其他目录。监听只读取 sessions JSONL 的安全
-生命周期字段，不安装 Hook、不修改 Codex 配置；如关闭监听，省略选项或使用
-`--no-watch-codex`。
+生命周期字段，不安装 Hook、不修改 Codex 配置。首次默认关闭；
+`--watch-codex` 会保存启用选择，后续普通重启仍会监听；需要关闭时显式使用
+`--no-watch-codex`。环境变量只覆盖当前启动，不改保存的选择。
+若手机显示 `RELAY CONNECTED`，但结束的任务仍留在 Working 列表，先检查启动日志是否显示
+`Codex session monitoring: enabled`，以及 Collector 进程是否带有 `--watch-codex`。
+`RELAY CONNECTED` 只表示手机连上 Relay，不能证明 Codex 生命周期正在采集；
+用 `scripts/start-lan-monitor.sh --watch-codex` 重启服务会恢复监听并保存该选择。
 
 Codex 会话名称只从本机原生标题元数据读取：优先使用 `state_*.sqlite` 的
 `threads.name`，其次是 `session_index.jsonl` 中同 UUID 的最新 `thread_name`，
