@@ -2,6 +2,7 @@ node_modules/
 dist/
 build/
 .gradle/
+.kotlin/
 .idea/
 *.iml
 *.apk
