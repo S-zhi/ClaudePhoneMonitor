@@ -17,11 +17,13 @@ internal data class UsagePresentation(
     val collectionDetail: String,
     val connectionLabel: String,
     val showSetup: Boolean,
+    val freshnessLabel: String,
 )
 
 /** Collection, source coverage, quota availability and transport are separate states. */
 internal fun usagePresentation(state: MonitorUiState): UsagePresentation {
     val usage = state.snapshot.usage
+    val quotaSampledAt = usage?.quota?.sampledAt
     val title = when {
         usage == null -> "尚未收到 Usage 数据"
         usage.observedResponses == 0L -> "采集已启用 · 等待新响应"
@@ -44,6 +46,15 @@ internal fun usagePresentation(state: MonitorUiState): UsagePresentation {
             else -> "Relay 已连接"
         },
         showSetup = usage == null,
+        freshnessLabel = when {
+            !state.isConnected && state.snapshot.computerState == ComputerState.OFFLINE -> "Relay 离线 · Mac 采集端离线"
+            !state.isConnected -> "快照 · 未实时更新"
+            state.snapshot.computerState == ComputerState.OFFLINE -> "Mac 采集端离线"
+            state.snapshot.computerState == ComputerState.STALE -> "额度可能过期 · ${quotaSampledAt?.let(::formatUsageStartedAt) ?: "等待采样"}"
+            quotaSampledAt != null -> "额度采样 ${formatUsageStartedAt(quotaSampledAt)}"
+            state.snapshot.updatedAt.isBlank() -> "等待更新时间"
+            else -> "更新 ${formatUsageStartedAt(state.snapshot.updatedAt)}"
+        },
     )
 }
 
@@ -64,3 +75,17 @@ internal fun formatProviderCoverage(name: String, coverage: UsageProviderCoverag
 
 internal fun usageCacheExplanation(usage: UsageAggregate?): String =
     "缓存命中 Tokens ${usage?.cachedInput?.let(::formatUsageMetric) ?: "不可用"} / 总输入 ${usage?.totalInput?.let(::formatUsageMetric) ?: "不可用"}"
+
+
+internal fun formatCollectorRuntime(startedAt: String, nowMillis: Long = System.currentTimeMillis()): String = runCatching {
+    val elapsed = ((nowMillis - Instant.parse(startedAt).toEpochMilli()).coerceAtLeast(0L)) / 1000L
+    val days = elapsed / 86_400L
+    val hours = (elapsed % 86_400L) / 3_600L
+    val minutes = (elapsed % 3_600L) / 60L
+    val label = when {
+        days > 0 -> "${days}天${hours}时"
+        hours > 0 -> "${hours}时${minutes}分"
+        else -> "${minutes}分钟"
+    }
+    "服务已运行 $label"
+}.getOrDefault("服务时长 —")

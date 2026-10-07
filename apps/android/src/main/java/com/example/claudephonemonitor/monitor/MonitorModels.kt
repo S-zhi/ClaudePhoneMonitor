@@ -164,14 +164,23 @@ data class UsageCacheHit(
     val numerator: Long?,
     val denominator: Long?,
     val quality: UsageQuality,
+    val providers: List<String>? = null,
+    val sampleResponses: Long? = null,
 )
 
 data class UsageQuota(
-    val startRemaining: Long?,
-    val currentRemaining: Long?,
+    val startRemaining: Double?,
+    val currentRemaining: Double?,
     val unit: String?,
     val resetAt: String?,
     val availability: String,
+    val source: String? = null,
+    val limitId: String? = null,
+    val windowMinutes: Int? = null,
+    val window: String? = null,
+    val sampledAt: String? = null,
+    val startSampledAt: String? = null,
+    val startResetAt: String? = null,
 )
 
 data class UsageAggregate(
@@ -189,6 +198,7 @@ data class UsageAggregate(
     val totalInput: UsageMetric,
     val cacheHit: UsageCacheHit,
     val quota: UsageQuota,
+    val collectorStartedAt: String? = null,
 )
 
 data class SessionSummary(
@@ -442,38 +452,69 @@ data class MonitorEvent(
             val completeResponses = json.safeIntegerOrNull("complete_responses") ?: return null
             if (completeResponses > observedResponses) return null
             val coverage = json.optJSONObject("provider_coverage") ?: return null
+            val claudeCoverage = parseCoverage(coverage.optJSONObject("claude")) ?: return null
+            val codexCoverage = parseCoverage(coverage.optJSONObject("codex")) ?: return null
             val quotaJson = json.optJSONObject("quota") ?: return null
-            val quotaAvailability = quotaJson.stringOrNull("availability") ?: return null
-            if (quotaAvailability != "unavailable") return null
-            if (!quotaJson.hasValidNullableInteger("start_remaining") ||
-                !quotaJson.hasValidNullableInteger("current_remaining") ||
-                !quotaJson.has("unit") || !quotaJson.has("reset_at")
-            ) return null
-            val quota = UsageQuota(
-                startRemaining = quotaJson.safeIntegerOrNull("start_remaining"),
-                currentRemaining = quotaJson.safeIntegerOrNull("current_remaining"),
-                unit = quotaJson.stringOrNull("unit"),
-                resetAt = quotaJson.stringOrNull("reset_at"),
-                availability = quotaAvailability,
-            )
-            if (quota.startRemaining != null || quota.currentRemaining != null || quota.unit != null || quota.resetAt != null) {
-                return null
-            }
+            val quota = parseUsageQuota(quotaJson) ?: return null
+            val collectorStartedAt = json.stringOrNull("collector_started_at")
+            if (collectorStartedAt != null && wireTimestampMillis(collectorStartedAt) == null) return null
             UsageAggregate(
                 epochId = epochId,
                 startedAt = startedAt,
                 revision = revision,
                 observedResponses = observedResponses,
                 completeResponses = completeResponses,
-                claudeCoverage = parseCoverage(coverage.optJSONObject("claude")) ?: return null,
-                codexCoverage = parseCoverage(coverage.optJSONObject("codex")) ?: return null,
+                claudeCoverage = claudeCoverage,
+                codexCoverage = codexCoverage,
                 newInput = parseMetric(json.optJSONObject("new_input")) ?: return null,
                 cachedInput = parseMetric(json.optJSONObject("cached_input")) ?: return null,
                 output = parseMetric(json.optJSONObject("output")) ?: return null,
                 actual = parseMetric(json.optJSONObject("actual")) ?: return null,
                 totalInput = parseMetric(json.optJSONObject("total_input")) ?: return null,
-                cacheHit = parseCacheHit(json.optJSONObject("cache_hit")) ?: return null,
+                cacheHit = parseCacheHit(json.optJSONObject("cache_hit"), claudeCoverage.completeResponses, codexCoverage.completeResponses) ?: return null,
                 quota = quota,
+                collectorStartedAt = collectorStartedAt,
+            )
+        }.getOrNull()
+
+        private fun parseUsageQuota(json: JSONObject): UsageQuota? = runCatching {
+            val availability = json.stringOrNull("availability") ?: return null
+            if (availability !in setOf("available", "stale", "unavailable")) return null
+            if (!json.hasValidNullablePercent("start_remaining") || !json.hasValidNullablePercent("current_remaining")) return null
+            val start = json.percentOrNull("start_remaining")
+            val current = json.percentOrNull("current_remaining")
+            val unit = json.stringOrNull("unit")
+            val windowMinutes = if (json.has("window_minutes") && !json.isNull("window_minutes")) {
+                json.safeIntegerOrNull("window_minutes")?.takeIf { it in 1..Int.MAX_VALUE.toLong() }?.toInt() ?: return null
+            } else null
+            val window = json.stringOrNull("window")
+            if (window != null && window !in setOf("primary", "secondary")) return null
+            listOf("reset_at", "sampled_at", "start_sampled_at", "start_reset_at").forEach { key ->
+                val timestamp = json.stringOrNull(key)
+                if (timestamp != null && wireTimestampMillis(timestamp) == null) return null
+            }
+            if (availability == "unavailable" && (start != null || current != null)) return null
+            if (availability != "unavailable" && (
+                    json.stringOrNull("source") != "codex_app_server" ||
+                    json.stringOrNull("limit_id") != "codex" ||
+                    (availability == "available" && current == null) || unit != "percent" ||
+                    json.stringOrNull("reset_at") == null || json.stringOrNull("sampled_at") == null ||
+                    windowMinutes == null || window == null
+                )) return null
+            if (start != null && (json.stringOrNull("start_sampled_at") == null || json.stringOrNull("start_reset_at") == null)) return null
+            UsageQuota(
+                startRemaining = start,
+                currentRemaining = current,
+                unit = unit,
+                resetAt = json.stringOrNull("reset_at"),
+                availability = availability,
+                source = json.stringOrNull("source"),
+                limitId = json.stringOrNull("limit_id"),
+                windowMinutes = windowMinutes,
+                window = window,
+                sampledAt = json.stringOrNull("sampled_at"),
+                startSampledAt = json.stringOrNull("start_sampled_at"),
+                startResetAt = json.stringOrNull("start_reset_at"),
             )
         }.getOrNull()
 
@@ -497,7 +538,7 @@ data class MonitorEvent(
             UsageMetric(value, quality)
         }.getOrNull()
 
-        private fun parseCacheHit(json: JSONObject?): UsageCacheHit? = runCatching {
+        private fun parseCacheHit(json: JSONObject?, claudeCompleteResponses: Long, codexCompleteResponses: Long): UsageCacheHit? = runCatching {
             json ?: return null
             val quality = parseUsageQuality(json.optString("quality")) ?: return null
             if (!json.hasValidNullableInteger("numerator") || !json.hasValidNullableInteger("denominator")) return null
@@ -506,7 +547,19 @@ data class MonitorEvent(
             if (quality == UsageQuality.UNAVAILABLE && (numerator != null || denominator != null)) return null
             if (numerator != null && denominator != null && numerator > denominator) return null
             if (quality == UsageQuality.COMPLETE && (numerator == null || denominator == null || denominator == 0L)) return null
-            UsageCacheHit(numerator, denominator, quality)
+            val providers = if (!json.has("providers") || json.isNull("providers")) null else {
+                val array = json.optJSONArray("providers") ?: return null
+                val values = (0 until array.length()).map { array.optString(it) }
+                if (values.isEmpty() || values.any { it !in setOf("claude", "codex") } || values.distinct().size != values.size) return null
+                values
+            }
+            val sampleResponses = json.safeIntegerOrNull("sample_responses")
+            if (json.has("sample_responses") && !json.isNull("sample_responses") && sampleResponses == null) return null
+            val scopedCompleteResponses = providers?.sumOf { provider ->
+                if (provider == "codex") codexCompleteResponses else claudeCompleteResponses
+            } ?: (claudeCompleteResponses + codexCompleteResponses)
+            if (sampleResponses != null && sampleResponses > scopedCompleteResponses) return null
+            UsageCacheHit(numerator, denominator, quality, providers, sampleResponses)
         }.getOrNull()
 
         private fun parseUsageQuality(value: String): UsageQuality? =
@@ -588,6 +641,7 @@ fun MonitorSnapshot.toJson(): JSONObject = JSONObject().apply {
 private fun UsageAggregate.toJson(): JSONObject = JSONObject().apply {
     put("epoch_id", epochId)
     put("started_at", startedAt)
+    collectorStartedAt?.let { put("collector_started_at", it) }
     put("revision", revision)
     put("observed_responses", observedResponses)
     put("complete_responses", completeResponses)
@@ -604,6 +658,8 @@ private fun UsageAggregate.toJson(): JSONObject = JSONObject().apply {
         put("numerator", cacheHit.numerator ?: JSONObject.NULL)
         put("denominator", cacheHit.denominator ?: JSONObject.NULL)
         put("quality", cacheHit.quality.wireValue)
+        cacheHit.providers?.let { providers -> put("providers", org.json.JSONArray(providers)) }
+        cacheHit.sampleResponses?.let { put("sample_responses", it) }
     })
     put("quota", JSONObject().apply {
         put("start_remaining", quota.startRemaining ?: JSONObject.NULL)
@@ -611,6 +667,13 @@ private fun UsageAggregate.toJson(): JSONObject = JSONObject().apply {
         put("unit", quota.unit ?: JSONObject.NULL)
         put("reset_at", quota.resetAt ?: JSONObject.NULL)
         put("availability", quota.availability)
+        quota.source?.let { put("source", it) }
+        quota.limitId?.let { put("limit_id", it) }
+        quota.windowMinutes?.let { put("window_minutes", it) }
+        quota.window?.let { put("window", it) }
+        quota.sampledAt?.let { put("sampled_at", it) }
+        quota.startSampledAt?.let { put("start_sampled_at", it) }
+        quota.startResetAt?.let { put("start_reset_at", it) }
     })
 }
 
@@ -664,6 +727,15 @@ private fun JSONObject.safeIntegerOrNull(key: String): Long? {
 
 private fun JSONObject.hasValidNullableInteger(key: String): Boolean =
     has(key) && (isNull(key) || safeIntegerOrNull(key) != null)
+
+private fun JSONObject.percentOrNull(key: String): Double? {
+    if (!has(key) || isNull(key)) return null
+    val raw = opt(key) as? Number ?: return null
+    return raw.toDouble().takeIf { it.isFinite() && it in 0.0..100.0 }
+}
+
+private fun JSONObject.hasValidNullablePercent(key: String): Boolean =
+    has(key) && (isNull(key) || percentOrNull(key) != null)
 
 private fun JSONObject.stringOrNull(key: String): String? =
     if (!has(key) || isNull(key)) null else optString(key).takeIf(String::isNotBlank)

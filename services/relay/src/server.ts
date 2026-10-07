@@ -116,7 +116,7 @@ export function createRelayServer(options: RelayServerOptions = {}): {
     schema_version: RELAY_SCHEMA_VERSION,
     auth: { mode: config.authMode },
     storage: relay.repository.storageKind ?? "memory",
-    capabilities: ["usage_snapshot_v1", "pairing_collector_reuse_v1"],
+    capabilities: ["usage_snapshot_v1", "usage_scoped_cache_v1", "codex_quota_v1", "pairing_collector_reuse_v1"],
     uptime_ms: Math.round(process.uptime() * 1000),
   }));
 

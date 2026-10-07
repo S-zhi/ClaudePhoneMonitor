@@ -114,7 +114,7 @@ test("Fastify health, pairing, and WebSocket gateways are runnable", async () =>
     const health = await app.inject({ method: "GET", url: "/healthz" });
     assert.equal(health.statusCode, 200);
     assert.equal(health.json().status, "ok");
-    assert.deepEqual(health.json().capabilities, ["usage_snapshot_v1", "pairing_collector_reuse_v1"]);
+    assert.deepEqual(health.json().capabilities, ["usage_snapshot_v1", "usage_scoped_cache_v1", "codex_quota_v1", "pairing_collector_reuse_v1"]);
 
     const pairing = await app.inject({ method: "POST", url: "/v1/pairing" });
     assert.equal(pairing.statusCode, 201);
@@ -227,7 +227,7 @@ test("paired bootstrap validates and reuses the existing installation collector 
     await app.ready();
     const health = await app.inject({ method: "GET", url: "/healthz" });
     assert.equal(health.json().storage, "memory");
-    assert.deepEqual(health.json().capabilities, ["usage_snapshot_v1", "pairing_collector_reuse_v1"]);
+    assert.deepEqual(health.json().capabilities, ["usage_snapshot_v1", "usage_scoped_cache_v1", "codex_quota_v1", "pairing_collector_reuse_v1"]);
     const unauthorized = await app.inject({
       method: "POST",
       url: "/v1/pairing",

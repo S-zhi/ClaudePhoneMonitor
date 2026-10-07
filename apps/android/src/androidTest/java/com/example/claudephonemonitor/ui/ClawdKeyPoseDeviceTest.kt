@@ -1,6 +1,8 @@
 package com.example.claudephonemonitor.ui
 
 import android.graphics.Bitmap
+import android.os.Build
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -45,6 +47,10 @@ class ClawdKeyPoseDeviceTest {
 
     @Before fun freezeClock() {
         compose.mainClock.autoAdvance = false
+        compose.runOnUiThread {
+            compose.activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) compose.activity.setTurnScreenOn(true)
+        }
     }
 
     @Test fun everyMonitorStateDrawsItsBundledKeyPose() {
@@ -109,7 +115,6 @@ class ClawdKeyPoseDeviceTest {
         }
         awaitAsset(ClawdAction.USAGE_BALL)
         compose.mainClock.advanceTimeBy(176L)
-        val before = clock(ClawdAction.USAGE_BALL)
         val initialPlayFrame = capturePose(ClawdAction.USAGE_BALL, "usage-ball-before-weak-reminder.png")
         assertTrue("Usage must paint the separately bundled complete ball", bitmapPixels(initialPlayFrame).any { it == 0xFF526F48.toInt() })
         compose.runOnIdle {
@@ -119,8 +124,8 @@ class ClawdKeyPoseDeviceTest {
             )
         }
         compose.mainClock.advanceTimeBy(176L)
-        capturePose(ClawdAction.USAGE_BALL, "usage-ball-after-weak-reminder.png")
-        assertTrue(clock(ClawdAction.USAGE_BALL) > before)
+        val afterWeakReminder = capturePose(ClawdAction.USAGE_BALL, "usage-ball-after-weak-reminder.png")
+        assertFalse("Weak reminders must not replace the independent Usage animation", initialPlayFrame.sameAs(afterWeakReminder))
         pose(ClawdAction.ERROR_ALERT).assertDoesNotExist()
         compose.runOnIdle {
             state.value = state.value.copy(
@@ -149,34 +154,37 @@ class ClawdKeyPoseDeviceTest {
             }
         }
         awaitAsset(action)
-        compose.mainClock.advanceTimeBy(cycleMs - clock(action))
-        compose.waitForIdle()
+        // The test clock begins at composition time; this controlled timeline samples the
+        // rendered scene directly instead of observing a per-frame production semantics value.
         pose(action).assertIsDisplayed()
-        val csv = StringBuilder("index,filename,requested_elapsed_ms,observed_elapsed_ms,elapsed_since_first_ms,compose_clock_ms\n")
-        var previous = clock(action)
-        val firstObserved = previous
-        var elapsedSinceFirst = 0L
+        val csv = StringBuilder("index,filename,requested_elapsed_ms,compose_clock_ms\n")
         val names = mutableListOf<String>()
+        var previousFrame: Bitmap? = null
+        var firstFrame: Bitmap? = null
+        var changedFrames = 0
         repeat(frameCount) { index ->
-            if (index > 0) {
-                compose.mainClock.advanceTimeBy(sampleStepMs)
-                compose.waitForIdle()
-            }
-            val observed = clock(action)
-            if (index > 0) elapsedSinceFirst += (observed - previous + cycleMs) % cycleMs
-            previous = observed
+            if (index > 0) compose.mainClock.advanceTimeBy(sampleStepMs)
             val name = "usage-cycle/frame-${index.toString().padStart(3, '0')}.png"
-            capturePose(action, name)
+            val frame = capturePose(action, name)
+            if (previousFrame != null && !previousFrame!!.sameAs(frame)) changedFrames++
+            if (firstFrame == null) firstFrame = frame
+            previousFrame = frame
             names += name
-            csv.append("$index,$name,${index * sampleStepMs},$observed,$elapsedSinceFirst,${compose.mainClock.currentTime}\n")
+            csv.append("$index,$name,${index * sampleStepMs},${compose.mainClock.currentTime}\n")
         }
         val directory = screenshotDirectory()
         File(directory, "usage-cycle/samples.csv").writeText(csv.toString())
+        val endpointChangedPixels = changedPixelCount(requireNotNull(firstFrame), requireNotNull(previousFrame))
         File(directory, "usage-cycle/capture-metadata.json").writeText(
-            """{"source":"Android Compose captureToImage","mode":"controlled device frames","wall_clock_recording":false,"sample_step_ms":$sampleStepMs,"cycle_ms":$cycleMs,"frame_count":$frameCount,"first_observed_elapsed_ms":$firstObserved,"sampled_elapsed_ms":$elapsedSinceFirst}""",
+            """{"source":"Android Compose captureToImage","mode":"controlled Compose test clock","wall_clock_recording":false,"sample_step_ms":$sampleStepMs,"cycle_ms":$cycleMs,"frame_count":$frameCount,"requested_elapsed_ms":$cycleMs,"changed_consecutive_frames":$changedFrames,"first_last_changed_pixels":$endpointChangedPixels}""",
         )
         assertEquals(251, names.size)
-        assertTrue("The controlled frames must span one complete Usage cycle", elapsedSinceFirst >= cycleMs - sampleStepMs && elapsedSinceFirst <= cycleMs + sampleStepMs)
+        assertTrue("The requested frame timeline must span one complete Usage cycle", (names.size - 1) * sampleStepMs == cycleMs)
+        assertTrue("The controlled timeline must produce visible animation", changedFrames > frameCount / 4)
+        assertTrue(
+            "First and last frames should approximately match after one complete cycle; changedPixels=$endpointChangedPixels",
+            endpointChangedPixels <= requireNotNull(firstFrame).width * requireNotNull(firstFrame).height / 50,
+        )
         assertTrue(names.all { File(directory, it).isFile && File(directory, it).length() > 0L })
     }
 
@@ -243,6 +251,14 @@ class ClawdKeyPoseDeviceTest {
         val directory = requireNotNull(context.getExternalFilesDir("issue8-screenshots"))
         assertTrue("Screenshot directory unavailable", directory.isDirectory || directory.mkdirs())
         return directory
+    }
+
+    private fun changedPixelCount(first: Bitmap, last: Bitmap): Int {
+        assertEquals(first.width, last.width)
+        assertEquals(first.height, last.height)
+        val firstPixels = bitmapPixels(first)
+        val lastPixels = bitmapPixels(last)
+        return firstPixels.indices.count { firstPixels[it] != lastPixels[it] }
     }
 
     private fun awaitAsset(action: ClawdAction) {

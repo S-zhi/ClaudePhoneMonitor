@@ -110,6 +110,7 @@ async function usageThroughRelay(t, storageKind) {
       relayUrl: `ws://127.0.0.1:${address.port}/ws/collector`,
       installationId,
       watchUsage: true,
+      codexBinary: "",
       claudeProjectsRoot: claudeRoot,
       sessionsRoot: codexRoot,
       usageDatabaseFile: join(dataDir, "usage.sqlite"),
@@ -294,7 +295,7 @@ test("transient outbox persistence failure retries the same Usage message throug
     await waitFor(() => phone.readyState === WebSocket.OPEN);
     runtime = await createCollectorRuntime({
       dataDir, socketPath, relayUrl: `ws://127.0.0.1:${address.port}/ws/collector`, installationId,
-      watchUsage: true, claudeProjectsRoot: claudeRoot, sessionsRoot: codexRoot,
+      watchUsage: true, codexBinary: "", claudeProjectsRoot: claudeRoot, sessionsRoot: codexRoot,
       usageDatabaseFile: join(dataDir, "usage.sqlite"),
     });
     const initial = await waitFor(async () => {

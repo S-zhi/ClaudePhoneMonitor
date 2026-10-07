@@ -229,7 +229,7 @@ function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): b
 
 function validUsageAggregate(value: unknown): value is UsageAggregate {
   if (!isRecord(value) || !hasOnlyKeys(value, [
-    "epoch_id", "started_at", "revision", "observed_responses", "complete_responses",
+    "epoch_id", "started_at", "collector_started_at", "revision", "observed_responses", "complete_responses",
     "provider_coverage", "new_input", "cached_input", "output", "actual", "total_input", "cache_hit", "quota",
   ])) return false;
   if (
@@ -237,11 +237,12 @@ function validUsageAggregate(value: unknown): value is UsageAggregate {
     typeof value.started_at !== "string" ||
       !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value.started_at) ||
       !Number.isFinite(Date.parse(value.started_at)) ||
+    value.collector_started_at !== undefined && (typeof value.collector_started_at !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value.collector_started_at) || !Number.isFinite(Date.parse(value.collector_started_at))) ||
     !Number.isSafeInteger(value.revision) || (value.revision as number) < 0 ||
     !isSafeCount(value.observed_responses) || !isSafeCount(value.complete_responses) || value.complete_responses > value.observed_responses ||
     !isRecord(value.provider_coverage) || !hasOnlyKeys(value.provider_coverage, ["claude", "codex"]) ||
-    !isRecord(value.cache_hit) || !hasOnlyKeys(value.cache_hit, ["numerator", "denominator", "quality"]) ||
-    !isRecord(value.quota) || !hasOnlyKeys(value.quota, ["start_remaining", "current_remaining", "unit", "reset_at", "availability"])
+    !isRecord(value.cache_hit) || !hasOnlyKeys(value.cache_hit, ["numerator", "denominator", "quality", "providers", "sample_responses"]) ||
+    !isRecord(value.quota) || !hasOnlyKeys(value.quota, ["start_remaining", "current_remaining", "unit", "reset_at", "availability", "limit_id", "source", "window_minutes", "sampled_at", "start_sampled_at", "start_reset_at", "window"])
   ) return false;
   const validMetric = (metric: unknown): metric is UsageAggregate["new_input"] => {
     if (!isRecord(metric) || !hasOnlyKeys(metric, ["value", "quality"])) return false;
@@ -270,6 +271,9 @@ function validUsageAggregate(value: unknown): value is UsageAggregate {
   if (!metricKeys.every((key) => validMetric(value[key]))) return false;
   const aggregate = value as unknown as UsageAggregate;
   const cacheHit = value.cache_hit;
+  if (cacheHit.providers !== undefined && (!Array.isArray(cacheHit.providers) || cacheHit.providers.length < 1 || cacheHit.providers.length > 2 ||
+    new Set(cacheHit.providers).size !== cacheHit.providers.length || cacheHit.providers.some((provider) => provider !== "claude" && provider !== "codex"))) return false;
+  if (cacheHit.sample_responses !== undefined && (!isSafeCount(cacheHit.sample_responses) || cacheHit.sample_responses === 0 || !cacheHit.providers)) return false;
   if (
     !["complete", "partial", "unavailable"].includes(String(cacheHit.quality)) ||
     !(cacheHit.numerator === null || isSafeCount(cacheHit.numerator)) ||
@@ -279,11 +283,30 @@ function validUsageAggregate(value: unknown): value is UsageAggregate {
     (cacheHit.quality === "complete" && (!isSafeCount(cacheHit.numerator) || !isSafeCount(cacheHit.denominator) || cacheHit.denominator <= 0)) ||
     (cacheHit.numerator !== null && cacheHit.denominator !== null && cacheHit.numerator > cacheHit.denominator)
   ) return false;
+  if (cacheHit.providers && cacheHit.providers.some((provider) => {
+    const coverage = provider === "claude" ? claude : codex;
+    return coverage.observed_responses === 0 || coverage.complete_responses === 0;
+  })) return false;
+  if (cacheHit.providers && (cacheHit.sample_responses === undefined || cacheHit.sample_responses > cacheHit.providers.reduce((sum, provider) => sum + (provider === "claude" ? claude.complete_responses : codex.complete_responses), 0))) return false;
   const quota = value.quota;
-  if (
-    quota.start_remaining !== null || quota.current_remaining !== null || quota.unit !== null ||
-    quota.reset_at !== null || quota.availability !== "unavailable"
-  ) return false;
+  const validPercent = (n: unknown): boolean => n === null || typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 100;
+  const validIso = (s: unknown): boolean => typeof s === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(s) && Number.isFinite(Date.parse(s));
+  if (!validPercent(quota.start_remaining) || !validPercent(quota.current_remaining) ||
+      !["available", "stale", "unavailable"].includes(String(quota.availability))) return false;
+  if (quota.availability === "unavailable") {
+    if (quota.start_remaining !== null || quota.current_remaining !== null || quota.unit !== null || quota.reset_at !== null) return false;
+  } else if (quota.unit !== "percent" || !validIso(quota.reset_at)) return false;
+  const validSampledWindow = typeof quota.window_minutes === "number" && Number.isSafeInteger(quota.window_minutes) && quota.window_minutes >= 1 &&
+    validIso(quota.sampled_at) && ["primary", "secondary"].includes(String(quota.window)) &&
+    quota.limit_id === "codex" && quota.source === "codex_app_server";
+  const hasStartSample = quota.start_sampled_at !== undefined;
+  const hasStartReset = quota.start_reset_at !== undefined;
+  if (hasStartSample !== hasStartReset || hasStartSample && (!validIso(quota.start_sampled_at) || !validIso(quota.start_reset_at)) ||
+      quota.start_remaining !== null && (!hasStartSample || !hasStartReset)) return false;
+  if (quota.availability === "available" && (quota.current_remaining === null || !validSampledWindow)) return false;
+  if (quota.availability === "stale" && !validSampledWindow) return false;
+  if (quota.limit_id !== undefined && quota.limit_id !== "codex" || quota.source !== undefined && quota.source !== "codex_app_server" ||
+      quota.window !== undefined && !["primary", "secondary"].includes(String(quota.window))) return false;
   const metrics = metricKeys.map((key) => aggregate[key]);
   const providersComplete = claude.status === "ready" && codex.status === "ready" &&
     claude.complete_responses === claude.observed_responses && codex.complete_responses === codex.observed_responses;

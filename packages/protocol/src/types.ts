@@ -234,6 +234,8 @@ export interface UsageProviderCoverage {
 export interface UsageAggregate {
   readonly epoch_id: string;
   readonly started_at: WireTimestamp;
+  /** Start time for this collector process; differs from the durable token epoch. */
+  readonly collector_started_at?: WireTimestamp;
   readonly revision: SequenceNumber;
   readonly observed_responses: number;
   readonly complete_responses: number;
@@ -250,13 +252,24 @@ export interface UsageAggregate {
     numerator: number | null;
     denominator: number | null;
     quality: UsageQuality;
+    /** Providers represented by a partial ratio; omitted for legacy/unscoped ratios. */
+    providers?: readonly ("claude" | "codex")[];
+    /** Number of complete response samples included in a scoped partial ratio. */
+    sample_responses?: number;
   }>;
   readonly quota: Readonly<{
-    start_remaining: null;
-    current_remaining: null;
-    unit: null;
-    reset_at: null;
-    availability: "unavailable";
+    start_remaining: number | null;
+    current_remaining: number | null;
+    unit: "percent" | null;
+    reset_at: WireTimestamp | null;
+    availability: "available" | "stale" | "unavailable";
+    limit_id?: "codex";
+    source?: "codex_app_server";
+    window_minutes?: number;
+    sampled_at?: WireTimestamp;
+    start_sampled_at?: WireTimestamp;
+    start_reset_at?: WireTimestamp;
+    window?: "primary" | "secondary";
   }>;
 }
 
@@ -529,6 +542,8 @@ export interface JsonSchema {
   readonly minLength?: number;
   readonly maxLength?: number;
   readonly maxItems?: number;
+  readonly minItems?: number;
+  readonly uniqueItems?: boolean;
   readonly minimum?: number;
   readonly maximum?: number;
   readonly pattern?: string;

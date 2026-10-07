@@ -185,6 +185,7 @@ export interface UsageProviderCoverage {
 export interface UsageAggregate {
   epoch_id: string;
   started_at: string;
+  collector_started_at?: string;
   revision: number;
   observed_responses: number;
   complete_responses: number;
@@ -194,8 +195,8 @@ export interface UsageAggregate {
   output: UsageMetric;
   actual: UsageMetric;
   total_input: UsageMetric;
-  cache_hit: { numerator: number | null; denominator: number | null; quality: UsageQuality };
-  quota: { start_remaining: null; current_remaining: null; unit: null; reset_at: null; availability: "unavailable" };
+  cache_hit: { numerator: number | null; denominator: number | null; quality: UsageQuality; providers?: Array<"claude" | "codex">; sample_responses?: number };
+  quota: { start_remaining: number | null; current_remaining: number | null; unit: "percent" | null; reset_at: string | null; availability: "available" | "stale" | "unavailable"; limit_id?: "codex"; source?: "codex_app_server"; window_minutes?: number; sampled_at?: string; start_sampled_at?: string; start_reset_at?: string; window?: "primary" | "secondary" };
 }
 export interface UsageSnapshotMessage {
   type: "usage_snapshot";

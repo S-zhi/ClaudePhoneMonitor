@@ -5,12 +5,14 @@ import { DatabaseSync } from "node:sqlite";
 import type { LocalSequence } from "./sequence.js";
 import { eventId } from "./sequence.js";
 import type { Outbox, RelayOutboundMessage, UsageAggregate, UsageSnapshotMessage } from "./types.js";
+import { readCodexQuota, type CodexQuotaReader, type CodexQuotaSample } from "./codex-quota.js";
 
 const MAX_FILES = 2_048;
 const MAX_BYTES_PER_POLL = 16 * 1024 * 1024;
 const MAX_LINE_BYTES = 4 * 1024 * 1024;
 const MAX_BYTES_PER_FILE = MAX_LINE_BYTES + 1;
-const POLL_MS = 1_000;
+const POLL_MS = 5_000;
+const QUOTA_POLL_MS = 60_000;
 const PROVIDERS = ["claude", "codex"] as const;
 type Provider = (typeof PROVIDERS)[number];
 type UsageNumbers = { input: number | null; cached: number | null; cacheCreation: number | null; output: number | null };
@@ -48,6 +50,8 @@ export interface UsageWatcherOptions {
   maxBytesPerPoll?: number;
   maxBytesPerFile?: number;
   maxLineBytes?: number;
+  codexBinary?: string;
+  quotaReader?: CodexQuotaReader;
 }
 
 export interface UsageWatcherHandle {
@@ -101,6 +105,7 @@ class UsageStore {
   private startedAt = "";
   private epochId = "";
   lastNumericOverflows = 0;
+  private aggregateDirty = true;
 
   constructor(private readonly databaseFile: string) {
     mkdirSync(path.dirname(databaseFile), { recursive: true, mode: 0o700 });
@@ -196,6 +201,8 @@ class UsageStore {
     let next = status;
     // Once a provider is observed unavailable/partial, retain the coverage gap for this epoch.
     if (current?.status === "partial" || current?.status === "unavailable" && status === "ready") next = current.status === "unavailable" ? "partial" : "partial";
+    if (current?.status === next) return;
+    this.aggregateDirty = true;
     this.db.prepare(`INSERT INTO usage_provider_health(provider,status) VALUES(?,?)
       ON CONFLICT(provider) DO UPDATE SET status=excluded.status`).run(provider, next);
   }
@@ -212,6 +219,7 @@ class UsageStore {
     if (!existing) {
       this.db.prepare(`INSERT INTO usage_responses(identity_hash,provider,values_json,complete,conflicted,source_timestamp,source_path_hash,source_offset)
         VALUES(?,?,?,?,0,?,?,?)`).run(response.identityHash, response.provider, JSON.stringify(response.values), response.complete ? 1 : 0, response.timestamp, response.sourcePathHash, response.sourceOffset);
+      this.aggregateDirty = true;
       return "inserted";
     }
     const previous = JSON.parse(existing.values_json) as UsageNumbers;
@@ -228,11 +236,13 @@ class UsageStore {
       return "duplicate";
     }
     if (!sameSource && tsOrder === 0) {
+      this.aggregateDirty = true;
       this.db.prepare("UPDATE usage_responses SET conflicted=1 WHERE identity_hash=?").run(response.identityHash);
       return "conflict";
     }
     const hasRegression = (Object.keys(previous) as (keyof UsageNumbers)[]).some((key) => changedNumber(previous[key], response.values[key]));
     if (hasRegression) {
+      this.aggregateDirty = true;
       this.db.prepare("UPDATE usage_responses SET conflicted=1 WHERE identity_hash=?").run(response.identityHash);
       return "conflict";
     }
@@ -244,10 +254,14 @@ class UsageStore {
     const complete = existing.complete === 1 || response.complete;
     this.db.prepare(`UPDATE usage_responses SET values_json=?,complete=?,conflicted=0,source_timestamp=?,source_path_hash=?,source_offset=?
       WHERE identity_hash=?`).run(JSON.stringify(merged), complete ? 1 : 0, response.timestamp, response.sourcePathHash, response.sourceOffset, response.identityHash);
+    this.aggregateDirty = true;
     return "updated";
   }
 
-  commitPoll(): UsageAggregate {
+  get needsAggregate(): boolean { return this.aggregateDirty; }
+  commitWithoutAggregate(): void { this.db.exec("COMMIT"); }
+
+  commitPoll(quota: UsageAggregate["quota"], collectorStartedAt: string): UsageAggregate {
     const responses = this.db.prepare("SELECT provider,values_json,complete,conflicted FROM usage_responses").all() as Array<{ provider: Provider; values_json: string; complete: number; conflicted: number }>;
     const counts = Object.fromEntries(PROVIDERS.map((provider) => {
       const rows = responses.filter((row) => row.provider === provider);
@@ -305,22 +319,40 @@ class UsageStore {
     const adjustedOutput = adjustQuality(output);
     const adjustedActual = adjustQuality(actual);
     const adjustedTotal = adjustQuality(total_input);
-    const cacheComplete = provider_coverage.claude.status === "ready" && provider_coverage.codex.status === "ready" && adjustedNew.quality === "complete" && adjustedCached.quality === "complete" && adjustedTotal.quality === "complete" && adjustedTotal.value !== null && adjustedTotal.value > 0;
-    const zeroDenominator = adjustedTotal.value === 0;
-    const cacheOverflow = overflowedMetrics.has("cached_input") || overflowedMetrics.has("total_input");
-    const knownNumerator = zeroDenominator || cacheOverflow ? null : adjustedCached.value;
-    const knownDenominator = zeroDenominator || cacheOverflow ? null : adjustedTotal.value;
-    const cache_hit = {
-      numerator: knownNumerator,
-      denominator: knownDenominator,
-      quality: cacheComplete ? "complete" as const : knownNumerator === null && knownDenominator === null ? "unavailable" as const : "partial" as const,
-    };
+    const scopedProviders = new Set<Provider>();
+    let hitNumerator = 0; let hitDenominator = 0; let hitKnown = false;
+    let sampleResponses = 0;
+    for (const row of parsed) {
+      const provider = row.provider;
+      if (row.complete !== 1 || row.conflicted !== 0 || row.values.input === null || row.values.cached === null ||
+          provider === "claude" && row.values.cacheCreation === null) continue;
+      const denominator = provider === "claude" ? row.values.input! + row.values.cached! + row.values.cacheCreation! : row.values.input!;
+      const nextNumerator = hitNumerator + row.values.cached!;
+      const nextDenominator = hitDenominator + denominator;
+      // Exclude only the unsafe row. Valid samples on either side still form a
+      // useful scoped subset, with the sample count making that scope explicit.
+      if (!Number.isSafeInteger(denominator) || !Number.isSafeInteger(nextNumerator) || !Number.isSafeInteger(nextDenominator) || row.values.cached! > denominator) continue;
+      hitNumerator = nextNumerator; hitDenominator = nextDenominator; hitKnown = true; sampleResponses += 1; scopedProviders.add(provider);
+    }
+    if (hitDenominator <= 0 || hitNumerator > hitDenominator) hitKnown = false;
+    const coverageComplete = provider_coverage.claude.status === "ready" && provider_coverage.codex.status === "ready" &&
+      provider_coverage.claude.complete_responses === provider_coverage.claude.observed_responses &&
+      provider_coverage.codex.complete_responses === provider_coverage.codex.observed_responses;
+    const scoped = [...scopedProviders];
+    const globallyComplete = coverageComplete && sampleResponses === parsed.length &&
+      adjustedCached.quality === "complete" && adjustedTotal.quality === "complete" &&
+      hitKnown && hitNumerator === adjustedCached.value && hitDenominator === adjustedTotal.value;
+    const cache_hit: UsageAggregate["cache_hit"] = globallyComplete
+      ? { numerator: hitNumerator, denominator: hitDenominator, quality: "complete" }
+      : hitKnown ? { numerator: hitNumerator, denominator: hitDenominator, quality: "partial", providers: scoped, sample_responses: sampleResponses }
+        : { numerator: null, denominator: null, quality: "unavailable" };
     const observed_responses = counts.claude.observed_responses + counts.codex.observed_responses;
     const complete_responses = counts.claude.complete_responses + counts.codex.complete_responses;
     const currentRevision = Number((this.db.prepare("SELECT value FROM usage_meta WHERE key='revision'").get() as { value: string } | undefined)?.value ?? 0);
     const aggregateBase = {
       epoch_id: this.epochId,
       started_at: this.startedAt,
+      collector_started_at: collectorStartedAt,
       observed_responses,
       complete_responses,
       provider_coverage,
@@ -330,7 +362,7 @@ class UsageStore {
       actual: adjustedActual,
       total_input: adjustedTotal,
       cache_hit,
-      quota: { start_remaining: null, current_remaining: null, unit: null, reset_at: null, availability: "unavailable" as const },
+      quota,
     };
     const priorFingerprint = (this.db.prepare("SELECT value FROM usage_meta WHERE key='aggregate_fingerprint'").get() as { value: string } | undefined)?.value;
     const fingerprint = JSON.stringify(aggregateBase);
@@ -341,6 +373,7 @@ class UsageStore {
       this.db.prepare("UPDATE usage_meta SET value='1' WHERE key='dirty'").run();
     }
     this.db.exec("COMMIT");
+    this.aggregateDirty = false;
     return { ...aggregateBase, revision };
   }
 
@@ -376,12 +409,19 @@ export class UsageWatcher {
   };
   private readonly codeSet = new Set<string>();
   private snapshot: UsageAggregate | undefined;
+  private collectorStartedAt = "";
+  private quota: UsageAggregate["quota"] = { start_remaining: null, current_remaining: null, unit: null, reset_at: null, availability: "unavailable" };
+  private quotaBaseline?: CodexQuotaSample;
+  private initialQuotaSamplePending = true;
+  private lastQuotaSampleAt = 0;
+  private readonly quotaReader: CodexQuotaReader;
   private running = false;
   private timer?: NodeJS.Timeout;
   private operation: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: UsageWatcherOptions) {
     this.now = options.now ?? Date.now;
+    this.quotaReader = options.quotaReader ?? (options.codexBinary === undefined ? async () => undefined : readCodexQuota);
     this.maxLineBytes = options.maxLineBytes ?? MAX_LINE_BYTES;
     const configuredLimits = [this.maxLineBytes, options.maxBytesPerFile ?? MAX_BYTES_PER_FILE, options.maxBytesPerPoll ?? MAX_BYTES_PER_POLL];
     if (configuredLimits.some((limit) => !Number.isSafeInteger(limit) || limit <= 0)
@@ -405,7 +445,9 @@ export class UsageWatcher {
         initialStatus[provider] = !result.accessible ? "unavailable" : result.limited ? "partial" : "ready";
         inventories.push(...await Promise.all(result.files.map((f) => this.markInitialBoundary(f))));
       }
-      this.store.initialize(this.now(), inventories, initialStatus);
+      const startedAt = this.now();
+      this.collectorStartedAt = new Date(startedAt).toISOString();
+      this.store.initialize(startedAt, inventories, initialStatus);
       await fs.chmod(this.options.databaseFile, 0o600).catch(() => undefined);
       this.store.dirtyOnStartup();
       this.running = true;
@@ -455,6 +497,41 @@ export class UsageWatcher {
       void this.pollOnce().catch(() => undefined).finally(() => this.schedule());
     }, Math.max(100, this.options.pollIntervalMs ?? POLL_MS));
     this.timer.unref?.();
+  }
+
+  private async refreshQuota(): Promise<void> {
+    if (this.options.codexBinary === "") return;
+    const now = this.now();
+    if (this.lastQuotaSampleAt && now - this.lastQuotaSampleAt < QUOTA_POLL_MS) return;
+    this.lastQuotaSampleAt = now;
+    let sample: CodexQuotaSample | undefined;
+    try { sample = await this.quotaReader(this.options.codexBinary ?? "codex", now); } catch { sample = undefined; }
+    const isInitialSample = this.initialQuotaSamplePending;
+    this.initialQuotaSamplePending = false;
+    if (!sample) {
+      if (this.quota.availability !== "unavailable") {
+        const expired = this.quota.reset_at !== null && Date.parse(this.quota.reset_at) <= now;
+        this.quota = { ...this.quota, availability: "stale", ...(expired ? { start_remaining: null, current_remaining: null } : {}) };
+      }
+      return;
+    }
+    if (isInitialSample) this.quotaBaseline = sample;
+    const base = this.quotaBaseline;
+    const sameWindow = Boolean(base && sample.account_key && base.account_key && sample.account_key === base.account_key &&
+      sample.reset_at === base.reset_at && sample.window_minutes === base.window_minutes && sample.window === base.window);
+    this.quota = {
+      start_remaining: sameWindow && base ? 100 - base.used_percent : null,
+      current_remaining: 100 - sample.used_percent,
+      unit: "percent",
+      reset_at: sample.reset_at,
+      availability: "available",
+      limit_id: "codex",
+      source: "codex_app_server",
+      window_minutes: sample.window_minutes,
+      sampled_at: sample.sampled_at,
+      ...(base ? { start_sampled_at: base.sampled_at, start_reset_at: base.reset_at } : {}),
+      window: sample.window,
+    };
   }
 
   private addCode(code: string): void { this.codeSet.add(code); this.diagnostics.codes = [...this.codeSet]; }
@@ -608,6 +685,7 @@ export class UsageWatcher {
   }
 
   private async pollUnlocked(): Promise<void> {
+    await this.refreshQuota();
     const lists = {} as Record<Provider, { files: FileInfo[]; accessible: boolean; limited: boolean }>;
     for (const provider of PROVIDERS) lists[provider] = await this.listFiles(provider, this.rootFor(provider));
     this.diagnostics.files_seen += lists.claude.files.length + lists.codex.files.length;
@@ -702,7 +780,12 @@ export class UsageWatcher {
           this.store.saveCursor(update);
         }
       }
-      this.snapshot = this.store.commitPoll();
+      if (!this.store.needsAggregate && this.snapshot && JSON.stringify(this.snapshot.quota) === JSON.stringify(this.quota)) {
+        this.store.commitWithoutAggregate();
+        await this.publishIfDirty();
+        return;
+      }
+      this.snapshot = this.store.commitPoll(this.quota, this.collectorStartedAt);
       if (this.store.lastNumericOverflows > 0) {
         this.diagnostics.numeric_overflows += this.store.lastNumericOverflows;
         this.addCode("usage_numeric_overflow");

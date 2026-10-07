@@ -1,0 +1,68 @@
+{
+  "type": "snapshot",
+  "schema_version": 1,
+  "installation_id": "install-1",
+  "computer_state": "online",
+  "claude_state": "idle",
+  "activity": {
+    "event_type": "session_started",
+    "session_id": "session-1",
+    "occurred_at": "2026-10-02T00:00:00.000Z"
+  },
+  "last_sequence": 2,
+  "updated_at": "2026-10-02T00:00:00.000Z",
+  "sessions": [],
+  "running_count": 0,
+  "session_count": 0,
+  "usage": {
+    "epoch_id": "synthetic-epoch",
+    "started_at": "2026-10-07T00:00:00.000Z",
+    "revision": 1,
+    "observed_responses": 2,
+    "complete_responses": 2,
+    "provider_coverage": {
+      "claude": {
+        "status": "ready",
+        "observed_responses": 1,
+        "complete_responses": 1
+      },
+      "codex": {
+        "status": "ready",
+        "observed_responses": 1,
+        "complete_responses": 1
+      }
+    },
+    "new_input": {
+      "value": 90,
+      "quality": "complete"
+    },
+    "cached_input": {
+      "value": 10,
+      "quality": "complete"
+    },
+    "output": {
+      "value": 20,
+      "quality": "complete"
+    },
+    "actual": {
+      "value": 110,
+      "quality": "complete"
+    },
+    "total_input": {
+      "value": 100,
+      "quality": "complete"
+    },
+    "cache_hit": {
+      "numerator": 10,
+      "denominator": 100,
+      "quality": "complete"
+    },
+    "quota": {
+      "start_remaining": null,
+      "current_remaining": null,
+      "unit": null,
+      "reset_at": null,
+      "availability": "unavailable"
+    }
+  }
+}

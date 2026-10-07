@@ -167,7 +167,7 @@ scripts/start-lan-monitor.sh --no-approval-bridge
 scripts/start-lan-monitor.sh --pair --install-hooks --open-qr --configure-usage
 ```
 
-脚本会检查 Relay 的 pairing 与 Usage 兼容能力。过期或已领取的 QR 会自动刷新，同时保留 installation ID、Collector token、Relay 数据库和 Usage 统计起点；要主动换一张新码时使用 `--pair`。如果目标端口运行着旧版或配置不兼容的 Relay，脚本会拒绝复用并提示你先手动停止旧实例，不会自行结束未知进程。
+脚本会检查 Relay 的 pairing、Usage、scoped cache 和 Codex quota 能力。过期或已领取的 QR 会自动刷新，同时保留 installation ID、Collector token、Relay 数据库和 Usage 统计起点；要主动换一张新码时使用 `--pair`。如果目标端口运行着旧版或配置不兼容的 Relay，脚本会拒绝复用并提示你手动升级或停止旧 Relay，再用新版脚本重启 Relay 与 Collector；不会自行结束未知进程。新版手机需要新版 Relay 和 Collector 同时提供服务。
 
 启动前会通过 Collector Unix socket 做一次无数据连接探测；如果已有 Collector 正在监听，脚本会停止并保留现有服务与配对文件，避免重复启动。启动 Collector 前会再次检查。
 
@@ -242,8 +242,10 @@ scripts/start-lan-monitor.sh --watch-usage
 建立并持久化统计起点，不回填之前的历史；之后重启从本地游标追读。去重按 Claude 消息或
 Codex response 身份，页面请求数表示“已观测模型响应”，不包括来源不可见的内部重试。
 私有 `usage.sqlite` 只保存匿名身份散列、用量数字与游标，不保存 transcript 正文或完整路径；
-Relay 只收到绝对汇总。缓存字段缺失或来源不可用会标记部分/不可用，剩余额度无真实来源时
-保持不可用。诊断只输出固定代码，不输出原始数据。
+Relay 只收到绝对汇总。缓存字段缺失或来源不可用会标记部分/不可用；有完整响应样本时，
+缓存命中率会注明参与计算的 provider 与样本数，只代表这部分样本，不推算为全量命中率。
+Codex 剩余额度来自只读 `codex app-server` 的 `account/rateLimits/read`，只读显式标记的 Codex
+额度桶，不提交模型请求。默认运行 `codex`；可用 `COLLECTOR_CODEX_BIN` 指定 CLI 二进制。额度以百分比和重置窗口呈现；启动时读取失败后，后续读数只作为当前值，不冒充启动基线。诊断只输出固定代码，不输出原始数据。
 
 单行 JSONL 最多读取 4 MiB，允许包含长正文的普通记录先解析类型再忽略。
 超过该上限或损坏的记录会跳过并保守标记覆盖缺口，后续有效记录继续计数。

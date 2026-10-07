@@ -95,8 +95,15 @@ Codex new input is `input_tokens - cached_input_tokens`. Actual use is new input
 plus output, total input adds cached input, and cache-hit tokens use Claude's
 cache-read or Codex's cached-input counter. Missing cache fields stay unknown,
 including 0/0 assistant messages; only the explicit `<synthetic>` model marker
-is filtered. No real remaining-token quota is exposed by these sources, so the
-quota fields remain unavailable.
+is filtered. Codex quota comes from the read-only `codex app-server` account/rate
+limits endpoint; it is sampled on watcher startup and then at most once per
+minute. The wire quota is a percent remaining value with its reset window and
+sample timestamps. A baseline is compared only within the same Codex account,
+limit window, and reset. If that identity changes, the startup sample and reset
+metadata remain available for context while `start_remaining` becomes null. If
+the startup quota read fails, a later successful read supplies only the current
+value; it never becomes a claimed startup value. Read failures preserve the last
+sample as `stale`; no token limits are inferred from transcript rows.
 
 JSONL rows have a 4 MiB hard limit. Both providers receive a read budget large
 enough for one allowed row and its newline; allocations use the actual bytes

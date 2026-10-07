@@ -71,6 +71,15 @@ class UsagePresentationTest {
         assertEquals("older-relay-time", formatUsageStartedAt("older-relay-time"))
     }
 
+
+    @Test
+    fun serviceRuntimeUsesCollectorProcessStartRatherThanLedgerEnableTime() {
+        val start = "2026-10-08T00:00:00Z"
+        val elapsed = java.time.Instant.parse(start).toEpochMilli() + 3_780_000L
+        assertEquals("服务已运行 1时3分", formatCollectorRuntime(start, elapsed))
+        assertEquals("服务时长 —", formatCollectorRuntime("not-a-timestamp", elapsed))
+    }
+
     private fun snapshot(): MonitorSnapshot {
         val wire = javaClass.getResource("/usage-relay-snapshot.json")!!.readText()
         return MonitorEvent.fromWireJson(wire)!!.snapshot!!
