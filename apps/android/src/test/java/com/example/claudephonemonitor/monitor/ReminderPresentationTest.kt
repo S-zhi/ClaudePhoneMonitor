@@ -201,6 +201,35 @@ class ReminderPresentationTest {
     }
 
     @Test
+    fun suppressedWeakCompletionSnapshotCannotRenameTheActiveStrongReminder() {
+        val alpha = event(MonitorEventName.TASK_FINISHED, 2, durationMs = 300_001)
+            .copy(sessionId = "alpha", taskId = "alpha-task", sessionTitle = "Completed Alpha")
+        val beta = event(MonitorEventName.TASK_FINISHED, 3, durationMs = 1)
+            .copy(sessionId = "beta", taskId = "beta-task", sessionTitle = "Completed Beta")
+        var state = reduce(initial(), alpha, 100)
+        val deadline = state.changeDeadlineMs
+        val identity = state.changeIdentity
+        state = reduce(state, beta, 200)
+        val betaCompletion = RecentCompletion("beta", "beta-task", 3, beta.occurredAt, "Completed Beta", 1)
+        state = reduce(state, snapshot(3, completion = betaCompletion), 300)
+        assertEquals(betaCompletion, state.recentSessionCompletion)
+        assertEquals(PetState.FINISH, state.changeStatus)
+        assertEquals(ReminderStrength.STRONG, state.changeStrength)
+        assertEquals("Completed Alpha", state.completionName)
+        assertEquals(identity, state.changeIdentity)
+        assertEquals(deadline, state.changeDeadlineMs)
+
+        // A late refinement of Alpha still belongs to the active reminder, even when Beta
+        // is the newest durable task result. Neither result can restart the reminder timer.
+        val namedAlpha = RecentCompletion("alpha", "alpha-task", 2, alpha.occurredAt, "Renamed Alpha", 300_001)
+        state = reduce(state, snapshot(4, completion = namedAlpha), 400)
+        assertEquals(betaCompletion, state.recentSessionCompletion)
+        assertEquals("Renamed Alpha", state.completionName)
+        assertEquals(identity, state.changeIdentity)
+        assertEquals(deadline, state.changeDeadlineMs)
+    }
+
+    @Test
     fun newStrongReminderReplacesAnOlderStrongReminder() {
         var state = reduce(initial(), event(MonitorEventName.TASK_FINISHED, 2, durationMs = 300_001), 100)
         state = reduce(state, event(MonitorEventName.TASK_FAILED, 3, durationMs = 300_001).copy(sessionId = "other"), 500)

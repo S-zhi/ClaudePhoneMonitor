@@ -16,6 +16,8 @@ Validated locally with Node.js 24.13.0, JDK 21, and Android SDK 35:
 
 - `npm test`: all 217 Node tests and 34 Python tests passed, including helper/CI checks and the live isolated HTTP/WebSocket Relay smoke test.
 - `npm run typecheck` and `npm run lint`: passed.
-- `./gradlew --offline --no-daemon :apps:android:testDebugUnitTest :apps:android:lintDebug :apps:android:assembleDebug :apps:android:assembleDebugAndroidTest`: passed. Android reports 193 tests, 192 passed and one expected live-recording test skipped; lint reports zero errors and nine warnings.
+- `./gradlew --offline --no-daemon :apps:android:testDebugUnitTest :apps:android:lintDebug :apps:android:assembleDebug :apps:android:assembleDebugAndroidTest`: passed. Android reports 194 tests, 193 passed and one expected live-recording test skipped; lint reports zero errors and nine warnings.
 
-Debug and instrumentation APKs were built. Instrumentation tests were compiled but were not run on a device; this validation did not install the APK or alter the deployed monitor.
+Debug and instrumentation APKs were built. Physical-device acceptance is recorded in [the device report](device-testing/issue27-2026-10-08.md). All 15 isolated device cases obtained a passing result, including one targeted rerun after a lost Compose test window. Completion-title refinements stay bound to the active reminder's task identity even when a suppressed result updates the latest durable DONE record.
+
+For isolated USB device acceptance, build with `./gradlew -PdeviceTestApplicationIdSuffix=.issue27test :apps:android:assembleDebug :apps:android:assembleDebugAndroidTest`. This changes only the opted-in debug application ID to `com.example.claudephonemonitor.issue27test`; the instrumentation package is `com.example.claudephonemonitor.issue27test.test`. Run `DoneRelayDeviceTest` with `deviceRelayUrl=http://127.0.0.1:18887` and the isolated `tests/device-done-relay.mjs` fixture. The default application ID and namespace remain unchanged.

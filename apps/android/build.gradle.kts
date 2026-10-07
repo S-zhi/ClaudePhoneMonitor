@@ -4,6 +4,9 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Opt-in device fixtures can coexist with the daily app and other test runs.
+val deviceTestApplicationIdSuffix = providers.gradleProperty("deviceTestApplicationIdSuffix").orNull
+
 android {
     namespace = "com.example.claudephonemonitor"
     compileSdk = 35
@@ -20,6 +23,9 @@ android {
     }
 
     buildTypes {
+        debug {
+            deviceTestApplicationIdSuffix?.let { applicationIdSuffix = it }
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(

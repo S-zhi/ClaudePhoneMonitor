@@ -137,12 +137,20 @@ internal object MonitorPresentationReducer {
                 event.sessionId == it.sessionId && !event.taskId.isNullOrBlank() && event.taskId == it.taskId &&
                 !event.sessionTitle.isNullOrBlank()
         }?.copy(displayName = event.sessionTitle.orEmpty())
+        val activeFinishParts = current.changeIdentity?.split('|')
+        val activeFinishSequence = activeFinishParts?.getOrNull(2)?.toLongOrNull()
+        // A later suppressed finish can replace the durable local result while this reminder
+        // still belongs to its original task. Refine only that reminder's completion identity.
+        val matchingReminderCompletion = completion?.takeIf {
+            it.sessionId == activeFinishParts?.getOrNull(0) && it.sequence == activeFinishSequence &&
+                (activeFinishParts?.getOrNull(1).isNullOrBlank() || it.taskId == null ||
+                    it.taskId == activeFinishParts?.getOrNull(1))
+        }?.let { it.copy(taskId = it.taskId ?: activeFinishParts?.getOrNull(1)?.takeIf { taskId -> taskId.isNotBlank() }) }
         val snapshotConfirmsCurrentFinish = current.changeStatus == PetState.FINISH &&
             current.changeDeadlineMs?.let { nowMs < it } == true &&
-            (matchingCompletion != null || completion?.identity == current.changeIdentity ||
-                (event.snapshot?.activity == MonitorEventName.TASK_FINISHED.wireValue &&
-                    incomingSequence != null && incomingSequence == current.lastSequence))
-        val activeFinishParts = current.changeIdentity?.split('|')
+            (matchingReminderCompletion != null ||
+                (completion == null && event.snapshot?.activity == MonitorEventName.TASK_FINISHED.wireValue &&
+                    incomingSequence != null && incomingSequence == activeFinishSequence))
         val toolFinishedClosesCurrentFinish = event.type == MonitorEventType.EVENT &&
             event.name == MonitorEventName.TOOL_FINISHED && event.sessionId != null &&
             activeFinishParts?.getOrNull(0) == event.sessionId &&
@@ -276,12 +284,12 @@ internal object MonitorPresentationReducer {
                     ?: event.sessionId?.let(::fallbackSessionTitle)
                     ?: "未命名会话"
             } else null
-        } else if (current.changeStatus == PetState.FINISH && matchingCompletion != null &&
-            matchingCompletion.displayName.isNotBlank()
+        } else if (current.changeStatus == PetState.FINISH && matchingReminderCompletion != null &&
+            matchingReminderCompletion.displayName.isNotBlank()
         ) {
             // Fill in a better label within the existing local deadline; never restart it.
-            completionName = matchingCompletion.displayName
-            changeIdentity = matchingCompletion.identity
+            completionName = matchingReminderCompletion.displayName
+            changeIdentity = matchingReminderCompletion.identity
         }
         if (titledLocalCompletion != null && changeStatus == PetState.FINISH &&
             changeIdentity == titledLocalCompletion.identity
