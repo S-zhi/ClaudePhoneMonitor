@@ -9,6 +9,7 @@ const FIXTURE_URL = new URL("./fixtures/real-lan-event.json", TESTS_DIR);
 const LIVE_BASE_URL = process.env.RELAY_BASE_URL?.replace(/\/+$/, "");
 const BOOTSTRAP_SECRET = process.env.RELAY_BOOTSTRAP_SECRET;
 const LIVE_TEST_CONFIGURED = Boolean(LIVE_BASE_URL && BOOTSTRAP_SECRET);
+if (process.env.RELAY_REQUIRE_LIVE === "1" && !LIVE_TEST_CONFIGURED) throw new Error("required live contract needs relay URL and bootstrap secret");
 
 const PRIVATE_MARKERS = [
   "REAL_LAN_PRIVATE_PROMPT_MUST_NOT_CROSS_PHONE_BOUNDARY",
@@ -87,6 +88,7 @@ function timeoutError(description) {
 async function openJsonSocket(url, WebSocketConstructor) {
   const socket = new WebSocketConstructor(url);
   const messages = [];
+  const receivedFrames = [];
   const waiters = [];
   let closed = false;
   let closeDetail;
@@ -107,7 +109,10 @@ async function openJsonSocket(url, WebSocketConstructor) {
     messages.push(message);
   };
 
-  addSocketListener(socket, "message", (raw) => deliver(parseMessage(raw)));
+  addSocketListener(socket, "message", (raw) => {
+    receivedFrames.push(rawMessageText(raw));
+    deliver(parseMessage(raw));
+  });
   addSocketListener(socket, "close", (eventOrCode, reason) => {
     closed = true;
     closeDetail = { eventOrCode, reason };
@@ -140,17 +145,30 @@ async function openJsonSocket(url, WebSocketConstructor) {
       resolve();
     });
     addSocketListener(socket, "error", (error) => {
-      if (settled) return;
+      if (settled) {
+        for (const waiter of waiters.splice(0)) {
+          clearTimeout(waiter.timer);
+          waiter.reject(new Error("WebSocket error while waiting for a message"));
+        }
+        try { socket.terminate?.(); socket.close?.(); } catch {}
+        return;
+      }
       settled = true;
       clearTimeout(timer);
       reject(error instanceof Error ? error : new Error(`WebSocket error (${url})`));
     });
   });
-  await opened;
+  try {
+    await opened;
+  } catch (error) {
+    try { socket.terminate?.(); socket.close?.(); } catch {}
+    throw error;
+  }
 
   return {
     socket,
     messages,
+    receivedFrames,
     get closed() {
       return closed;
     },
@@ -160,6 +178,7 @@ async function openJsonSocket(url, WebSocketConstructor) {
     async waitFor(predicate, description = "a WebSocket message") {
       const backlogIndex = messages.findIndex(predicate);
       if (backlogIndex >= 0) return messages.splice(backlogIndex, 1)[0];
+      if (closed) throw new Error("WebSocket is already closed");
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           const index = waiters.findIndex((waiter) => waiter.resolve === resolve);
@@ -204,7 +223,7 @@ async function openJsonSocket(url, WebSocketConstructor) {
 }
 
 async function requestJson(url, init = {}) {
-  const response = await fetch(url, init);
+  const response = await fetch(url, { ...init, signal: AbortSignal.timeout(TEST_TIMEOUT_MS) });
   const raw = await response.text();
   let body;
   try {
@@ -251,26 +270,32 @@ function installationEvent(fixture, installationId, sequence, eventType = fixtur
     session_id: `${fixture.session_id}-${installationId}`,
     sequence,
     event_type: eventType,
-    occurred_at: new Date(Date.parse(fixture.occurred_at) + sequence * 1_000).toISOString(),
+    // Live sessions must use current time so the relay session TTL does not expire the fixture.
+    occurred_at: new Date().toISOString(),
   };
 }
 
 async function authenticateCollector(wsUrl, installationId, token, WebSocketConstructor) {
   const client = await openJsonSocket(relayWsEndpoint(wsUrl, "collector"), WebSocketConstructor);
-  client.send({
-    type: "hello",
-    schema_version: 1,
-    role: "collector",
-    client_id: "real-lan-integration-collector",
-    installation_id: installationId,
-    token,
-  });
-  const hello = await client.waitFor(
-    (message) => message.type === "hello_ack" && message.installation_id === installationId,
-    "authenticated collector hello_ack",
-  );
-  assert.equal(hello.accepted, true);
-  return client;
+  try {
+    client.send({
+      type: "hello",
+      schema_version: 1,
+      role: "collector",
+      client_id: "real-lan-integration-collector",
+      installation_id: installationId,
+      token,
+    });
+    const hello = await client.waitFor(
+      (message) => message.type === "error" || (message.type === "hello_ack" && message.installation_id === installationId),
+      "authenticated collector hello_ack",
+    );
+    assert.equal(hello.accepted, true);
+    return client;
+  } catch (error) {
+    await client.close();
+    throw error;
+  }
 }
 
 async function authenticateAndroid(
@@ -281,27 +306,33 @@ async function authenticateAndroid(
   WebSocketConstructor,
 ) {
   const client = await openJsonSocket(relayWsEndpoint(wsUrl, "android"), WebSocketConstructor);
-  client.send({
-    type: "hello",
-    schema_version: 1,
-    role: "phone",
-    client_id: "real-lan-integration-android",
-    installation_id: installationId,
-    last_sequence: lastSequence,
-  });
-  const hello = await client.waitFor(
-    (message) => message.type === "hello_ack" && message.installation_id === installationId,
-    "Android hello_ack",
-  );
-  assert.equal(hello.accepted, true);
-  client.send({
-    type: "subscribe",
-    schema_version: 1,
-    installation_id: installationId,
-    token,
-    last_sequence: lastSequence,
-  });
-  return client;
+  try {
+    client.send({
+      type: "hello",
+      schema_version: 1,
+      role: "phone",
+      client_id: "real-lan-integration-android",
+      installation_id: installationId,
+      last_sequence: lastSequence,
+      token,
+    });
+    const hello = await client.waitFor(
+      (message) => message.type === "error" || (message.type === "hello_ack" && message.installation_id === installationId),
+      "Android hello_ack",
+    );
+    assert.equal(hello.accepted, true);
+    client.send({
+      type: "subscribe",
+      schema_version: 1,
+      installation_id: installationId,
+      token,
+      last_sequence: lastSequence,
+    });
+    return client;
+  } catch (error) {
+    await client.close();
+    throw error;
+  }
 }
 
 async function assertWebSocketRejects(url, messages, WebSocketConstructor, label) {
@@ -349,10 +380,11 @@ test("real-LAN event fixture is synthetic and contains explicit redaction probes
 
 test(
   "approved real-LAN pairing, role tokens, event snapshots, redaction, and resume",
-  { skip: LIVE_TEST_CONFIGURED ? false : "Set RELAY_BASE_URL and RELAY_BOOTSTRAP_SECRET to run against a relay" },
+  { timeout: TEST_TIMEOUT_MS * 20, skip: LIVE_TEST_CONFIGURED ? false : "Set RELAY_BASE_URL and RELAY_BOOTSTRAP_SECRET to run against a relay" },
   async (t) => {
     const WebSocketConstructor = await loadWebSocketConstructor();
     if (!WebSocketConstructor) {
+      assert.notEqual(process.env.RELAY_REQUIRE_LIVE, "1", "required live contract needs a WebSocket implementation");
       t.skip("Node WebSocket is unavailable; install relay dependencies for the ws fallback");
       return;
     }
@@ -454,6 +486,10 @@ test(
     assertClaimRejected(reused.response, "reused one-time pairing code");
 
     const wsUrl = claim.ws_url || pairing.ws_url;
+    const handshakeFailureStarted = Date.now();
+    await assert.rejects(authenticateAndroid(wsUrl, installationId, pairing.collector_token, 0, WebSocketConstructor));
+    await assert.rejects(authenticateCollector(wsUrl, installationId, claim.android_token, WebSocketConstructor));
+    assert.ok(Date.now() - handshakeFailureStarted < TEST_TIMEOUT_MS * 2 + 2500, "failed authentication helpers must close within deadline");
     let collector;
     let android;
     let resumedAndroid;
@@ -487,7 +523,7 @@ test(
       assert.equal(firstSnapshot.computer_state, "online");
       assert.equal(firstSnapshot.claude_state, "working");
 
-      const androidWire = JSON.stringify(android.messages);
+      const androidWire = JSON.stringify(android.receivedFrames);
       for (const marker of PRIVATE_MARKERS) {
         assert.equal(
           androidWire.includes(marker),
@@ -497,6 +533,9 @@ test(
       }
 
       await android.close();
+      const closedWaitStarted = Date.now();
+      await assert.rejects(android.waitFor(() => false), /already closed/);
+      assert.ok(Date.now() - closedWaitStarted < 500, "closed socket wait must fail immediately");
       const secondEvent = installationEvent(fixture, installationId, 2, "task_finished");
       collector.send(secondEvent);
       const secondAck = await collector.waitFor(
@@ -518,12 +557,20 @@ test(
         installation_id: installationId,
         last_sequence: 1,
       });
+      const replayedEvent = await resumedAndroid.waitFor(
+        (message) => message.type === "event" && message.event_id === secondEvent.event_id && message.sequence === 2,
+        "replayed second event after resume",
+      );
+      assert.equal(replayedEvent.event_type, "task_finished");
       const resumedSnapshot = await resumedAndroid.waitFor(
         (message) => message.type === "snapshot" && message.installation_id === installationId && message.last_sequence >= 2,
         "Android snapshot after reconnect/resume",
       );
       assert.equal(resumedSnapshot.last_sequence, 2);
       assert.equal(resumedSnapshot.claude_state, "idle");
+      for (const frame of [...android.receivedFrames, ...resumedAndroid.receivedFrames]) {
+        for (const marker of PRIVATE_MARKERS) assert.equal(frame.includes(marker), false, `private data in received frame: ${marker}`);
+      }
 
       await assertWebSocketRejects(
         relayWsEndpoint(wsUrl, "collector"),
@@ -550,6 +597,7 @@ test(
             client_id: "real-lan-wrong-android-token",
             installation_id: installationId,
             last_sequence: 2,
+            token: pairing.collector_token,
           },
           {
             type: "subscribe",

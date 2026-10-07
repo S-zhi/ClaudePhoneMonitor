@@ -4,10 +4,10 @@ The collector is a small Node.js daemon that keeps Claude Code Hook delivery loc
 
 ## Build and test
 
-From the repository root:
+Use Node.js 24.13.0 (pinned in `.node-version`); see [CI and local reproduction](../../docs/ci.md) for the full environment. From the repository root:
 
 ```bash
-npm install --prefix services/collector
+npm ci --prefix services/collector
 npm --prefix services/collector run typecheck
 npm --prefix services/collector run build
 npm --prefix services/collector test

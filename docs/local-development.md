@@ -1,6 +1,6 @@
 # Local monitor MVP harness
 
-This repository currently has a dependency-free, in-memory smoke harness for the phone-monitor workstream. It tests the protocol boundary without opening a WebSocket, starting a relay process, contacting Claude, or reading a real Hook installation.
+This page describes the legacy dependency-free, in-memory source harness `tests/monitor-mvp-harness.test.mjs`. It tests a simulated protocol boundary without opening a WebSocket or starting a relay; it is not the compiled service smoke test. For the current CI setup and canonical commands, see [CI and local reproduction](ci.md). `npm run test:live` builds the real services and runs `scripts/ci/relay-smoke.mjs` against an isolated loopback Relay with a temporary database and bootstrap secret.
 
 For the approved same-LAN deployment flow (bootstrap bearer pairing, one-time Android claim, role-scoped WebSocket tokens, reconnect/resume, redaction, and the Mac-to-Android LAN checklist), see [real-LAN deployment](real-lan-deployment.md). Its live integration gate is opt-in and runs with `RELAY_BASE_URL` plus `RELAY_BOOTSTRAP_SECRET`; it must use the Mac's LAN IP for Android, never `127.0.0.1`. The checklist also records the trusted-LAN-only `ws://` limitation and the later WSS hardening step.
 
