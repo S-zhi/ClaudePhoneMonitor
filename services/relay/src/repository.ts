@@ -134,11 +134,20 @@ function sessionDisplayName(record: SessionState): string {
   return `会话 ${suffix}`;
 }
 
+function canUpdateSessionTitle(previous: SessionState | undefined, event: EventEnvelope): boolean {
+  const knownTaskId = previous?.task_id ?? previous?.completion?.task_id;
+  return Boolean(previous && event.event_type === "session_title_updated" && event.session_title &&
+    event.sequence > previous.last_sequence &&
+    !(event.task_id && knownTaskId && event.task_id !== knownTaskId));
+}
+
 function applySessionEvent(
   previous: SessionState | undefined,
   event: EventEnvelope,
+  now = event.occurred_at,
 ): SessionState | undefined {
   if (event.session_id === "unknown") return previous;
+  if (!previous && event.event_type === "session_title_updated") return undefined;
   if (
     previous &&
     event.sequence <= previous.last_sequence
@@ -157,6 +166,15 @@ function applySessionEvent(
   };
   next.last_activity_sequence ??= next.last_sequence;
   next.last_sequence = event.sequence;
+  if (event.event_type === "session_title_updated") {
+    if (!canUpdateSessionTitle(previous, event)) return next;
+    next.title = event.session_title;
+    if (next.completion && (next.terminalTask ?? Boolean(next.completion)) &&
+        Date.parse(now) - Date.parse(next.completion.occurred_at) <= COMPLETION_TTL_MS) {
+      next.completion = { ...next.completion, display_name: sessionDisplayName(next) };
+    }
+    return next;
+  }
   const taskTail = ["tool_started", "tool_finished", "tool_failed", "waiting", "task_finished", "task_failed"].includes(event.event_type);
   if (
     (next.ended && event.event_type !== "session_started") ||
@@ -168,7 +186,9 @@ function applySessionEvent(
   next.last_activity_sequence = event.sequence;
   next.updated_at = event.occurred_at;
   next.last_activity_at = event.occurred_at;
-  if (event.event_type === "session_started" && event.session_title) next.title = event.session_title;
+  if (["session_started", "task_started", "task_finished"].includes(event.event_type) && event.session_title) {
+    next.title = event.session_title;
+  }
   switch (event.event_type) {
     case "session_started":
       next.claude_state = "idle";
@@ -515,9 +535,11 @@ export class InMemoryRelayRepository implements RelayRepository {
 
     const sessionKey = `${event.installation_id}\u0000${event.session_id}`;
     const priorSession = this.sessions.get(sessionKey);
-    const updatedSession = applySessionEvent(priorSession, event);
-    const changesActivity = event.session_id === "unknown" || updatedSession?.last_activity_sequence === event.sequence;
-    stored.activity_applied = changesActivity && sequence_status !== "out_of_order" &&
+    const updatedSession = applySessionEvent(priorSession, event, receivedAt);
+    const titleUpdated = canUpdateSessionTitle(priorSession, event);
+    const changesActivity = event.event_type !== "session_title_updated" &&
+      (event.session_id === "unknown" || updatedSession?.last_activity_sequence === event.sequence);
+    stored.activity_applied = (changesActivity || titleUpdated) && sequence_status !== "out_of_order" &&
       !(event.session_id === "unknown" && event.event_type === "task_finished");
 
     const nextState: InstallationState =
@@ -532,12 +554,12 @@ export class InMemoryRelayRepository implements RelayRepository {
                 ? event.sequence
                 : Math.max(previousSequence, event.sequence),
             claude_state: stateForEvent(event.event_type, current?.claude_state ?? "idle"),
-            activity: {
+            ...(event.event_type !== "session_title_updated" ? { activity: {
               event_type: event.event_type,
               session_id: event.session_id,
               ...(event.task_id ? { task_id: event.task_id } : {}),
               occurred_at: event.occurred_at,
-            },
+            } } : {}),
             updated_at: event.occurred_at,
             ...(current?.usage ? { usage: current.usage } : {}),
           };
@@ -1043,9 +1065,12 @@ export class SqliteRelayRepository implements RelayRepository {
     const sessionRow = this.db
       .prepare("SELECT session_json FROM relay_sessions WHERE installation_id = ? AND session_id = ?")
       .get(event.installation_id, event.session_id) as SqlRow | undefined;
-    const updatedSession = applySessionEvent(optionalJson<SessionState>(sessionRow?.session_json), event);
-    const changesActivity = event.session_id === "unknown" || updatedSession?.last_activity_sequence === event.sequence;
-    stored.activity_applied = changesActivity && sequence_status !== "out_of_order" &&
+    const priorSession = optionalJson<SessionState>(sessionRow?.session_json);
+    const updatedSession = applySessionEvent(priorSession, event, receivedAt);
+    const titleUpdated = canUpdateSessionTitle(priorSession, event);
+    const changesActivity = event.event_type !== "session_title_updated" &&
+      (event.session_id === "unknown" || updatedSession?.last_activity_sequence === event.sequence);
+    stored.activity_applied = (changesActivity || titleUpdated) && sequence_status !== "out_of_order" &&
       !(event.session_id === "unknown" && event.event_type === "task_finished");
     const nextState: InstallationState =
       current && previousSequence !== null && event.sequence < previousSequence
@@ -1059,12 +1084,12 @@ export class SqliteRelayRepository implements RelayRepository {
                 ? event.sequence
                 : Math.max(previousSequence, event.sequence),
             claude_state: stateForEvent(event.event_type, current?.claude_state ?? "idle"),
-            activity: {
+            ...(event.event_type !== "session_title_updated" ? { activity: {
               event_type: event.event_type,
               session_id: event.session_id,
               ...(event.task_id ? { task_id: event.task_id } : {}),
               occurred_at: event.occurred_at,
-            },
+            } } : {}),
             updated_at: event.occurred_at,
           };
     this.db.exec("BEGIN IMMEDIATE");

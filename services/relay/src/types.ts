@@ -2,6 +2,7 @@ export const RELAY_SCHEMA_VERSION = 1 as const;
 
 export const EVENT_TYPES = [
   "session_started",
+  "session_title_updated",
   "task_started",
   "tool_started",
   "tool_finished",

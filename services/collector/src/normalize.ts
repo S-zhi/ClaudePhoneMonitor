@@ -62,7 +62,7 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 /** Reserved source namespace used by the local Codex session watcher. */
 export const CODEX_ID_PREFIX = "codex:";
 const SENSITIVE_ID = /(?:^|[-_.:])(secret|token|password|api[_-]?key|authorization)(?:$|[-_.:])/i;
-const SENSITIVE_TITLE = /(?:api[_ -]?key|token|secret|password|authorization)\s*[:=]|\bbearer\s+[A-Za-z0-9_-]{16,}|\b(?:sk-|ghp_|gho_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{8,}/i;
+const SENSITIVE_TITLE = /(?:api[_ -]?key|token|secret|password|authorization)\s*[:=]|\bbearer\s+[A-Za-z0-9._~+/-]{8,}|\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_-]{8,}|github_pat_[A-Za-z0-9_-]{8,}|xox[baprs]-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16})/i;
 const UNSAFE_TITLE_PATH_OR_URL = /https?:\/\//i;
 const SAFE_NONCE = /^[A-Za-z0-9._:-]{1,256}$/;
 const MAX_DURATION_MS = 24 * 60 * 60 * 1000;
@@ -99,7 +99,7 @@ function escapeClaudeIdentifier(value: string | undefined, kind: "session" | "ta
   return `claude:${kind}:${digest}`;
 }
 
-function safeSessionTitle(value: unknown): string | undefined {
+export function safeSessionTitle(value: unknown): string | undefined {
   if (typeof value !== "string" || /[\u0000-\u001f\u007f]/.test(value)) return undefined;
   const title = value.trim().replace(/\s+/g, " ");
   if (
@@ -167,6 +167,8 @@ function deriveEventType(record: Record<string, unknown>): EventType | undefined
     sessionstart: "session_started",
     sessionstarted: "session_started",
     session_started: "session_started",
+    sessiontitleupdated: "session_title_updated",
+    session_title_updated: "session_title_updated",
     sessionend: "session_ended",
     sessionended: "session_ended",
     session_end: "session_ended",
@@ -230,11 +232,12 @@ export function normalizeHookEvent(
       ?? safeIdentifier(getString(record, "prompt_id", "promptId")),
     "task",
   );
-  // Claude only documents session_title on SessionStart. Other hook metadata
-  // and user content are deliberately not considered as title sources.
-  const sessionTitle = eventType === "session_started"
+  // Accept only explicit native labels on lifecycle/title metadata events;
+  // prompt text, commands and paths are never considered title sources.
+  const sessionTitle = ["session_started", "task_started", "task_finished", "session_title_updated"].includes(eventType)
     ? safeSessionTitle(getString(record, "session_title", "sessionTitle"))
     : undefined;
+  if (eventType === "session_title_updated" && !sessionTitle) return null;
   const correlationId = safeIdentifier(
     getString(record, "correlation_id", "correlationId", "tool_use_id", "toolUseId"),
   );
@@ -283,7 +286,7 @@ export function normalizeHookEvent(
     ...(taskId ? { task_id: taskId } : {}),
     ...(sessionTitle ? { session_title: sessionTitle } : {}),
     occurred_at: safeOccurredAt(record, now),
-    payload,
+    payload: eventType === "session_title_updated" ? {} : payload,
     ...(correlationId ? { correlation_id: correlationId } : {}),
   };
 }

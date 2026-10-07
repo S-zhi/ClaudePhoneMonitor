@@ -56,6 +56,7 @@ enum class MonitorEventName(val wireValue: String) {
     TASK_FINISHED("task_finished"),
     TASK_FAILED("task_failed"),
     SESSION_STARTED("session_started"),
+    SESSION_TITLE_UPDATED("session_title_updated"),
     SESSION_ENDED("session_ended"),
     UNKNOWN("unknown"),
 }
@@ -501,6 +502,7 @@ fun MonitorEventName.toPetState(): PetState = when (this) {
     MonitorEventName.TOOL_STARTED,
     MonitorEventName.TOOL_FINISHED -> PetState.WORKING
     MonitorEventName.SESSION_STARTED,
+    MonitorEventName.SESSION_TITLE_UPDATED,
     MonitorEventName.SESSION_ENDED,
     MonitorEventName.UNKNOWN -> PetState.IDLE
 }

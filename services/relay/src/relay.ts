@@ -1314,7 +1314,11 @@ export class Relay {
     const taskId = optionalString(message.task_id);
     const correlationId = optionalString(message.correlation_id);
     const sessionTitle =
-      eventType === "session_started" ? safeSessionTitle(message.session_title) : undefined;
+      ["session_started", "task_started", "task_finished", "session_title_updated"].includes(eventType)
+        ? safeSessionTitle(message.session_title) : undefined;
+    if (eventType === "session_title_updated" && (
+      !sessionTitle || !isRecord(message.payload) || Object.keys(message.payload).length !== 0
+    )) return undefined;
     return {
       type: "event",
       schema_version: RELAY_SCHEMA_VERSION,

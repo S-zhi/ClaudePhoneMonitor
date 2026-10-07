@@ -288,6 +288,81 @@ test("pairing records are claimable once and expire", () => {
   assert.equal(repository.getPairing(expiring.pairing_id, "2026-10-02T00:00:01.001Z")?.status, "expired");
 });
 
+test("native title metadata preserves task ownership, activity ordering and TTL in memory and SQLite", () => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-native-titles-"));
+  const sqlite = new SqliteRelayRepository(join(directory, "relay.sqlite"));
+  try {
+    for (const repository of [new InMemoryRelayRepository(), sqlite]) {
+      let sequence = 0;
+      const base = Date.parse("2026-10-02T00:00:00.000Z");
+      const record = (session_id: string, event_type: EventEnvelope["event_type"], task_id?: string, session_title?: string, offset = sequence * 100) => {
+        sequence += 1;
+        const now = new Date(base + offset).toISOString();
+        const result = repository.recordEvent(event({ event_id: `native-${sequence}`, session_id, sequence, event_type, occurred_at: now,
+          ...(task_id ? { task_id } : {}), ...(session_title ? { session_title } : {}), payload: {},
+        }), now);
+        return { result, state: repository.getInstallationState("install-1", now)! };
+      };
+      const metadataOnly = record("unseen", "session_title_updated", undefined, "Unseen native title");
+      assert.equal(metadataOnly.state.activity, undefined);
+      assert.equal(metadataOnly.state.sessions, undefined);
+      assert.equal(metadataOnly.result.activity_applied, false);
+
+      record("target", "task_started", "old-task", "Original native task");
+      record("target", "task_started", "current-task", "Current native task");
+      const before = record("other", "session_started", undefined, "Other session").state;
+      const activitySequence = before.sessions?.find((row) => row.session_id === "target")?.last_activity_sequence;
+      const renamed = record("target", "session_title_updated", "current-task", "Renamed native task");
+      assert.equal(renamed.result.activity_applied, true, "metadata can reach clients without becoming an outcome");
+      assert.equal(renamed.state.running_count, 1);
+      assert.equal(renamed.state.claude_state, "working");
+      assert.equal(renamed.state.sessions?.[0]?.session_id, "other");
+      assert.equal(renamed.state.sessions?.find((row) => row.session_id === "target")?.title, "Renamed native task");
+      assert.equal(renamed.state.sessions?.find((row) => row.session_id === "target")?.last_activity_sequence, activitySequence);
+      assert.deepEqual(renamed.state.activity, before.activity);
+      assert.equal(renamed.state.updated_at, before.updated_at);
+      const unscoped = record("target", "session_title_updated", undefined, "Unscoped native title").state;
+      assert.equal(unscoped.sessions?.find((row) => row.session_id === "target")?.title, "Unscoped native title");
+      assert.equal(unscoped.sessions?.find((row) => row.session_id === "target")?.last_activity_sequence, activitySequence);
+      assert.equal(unscoped.running_count, 1);
+
+      for (const event_type of ["task_finished", "session_title_updated"] as const) {
+        const stale = record("target", event_type, "old-task", "Wrong old task name");
+        assert.equal(stale.result.activity_applied, false);
+        assert.equal(stale.state.sessions?.find((row) => row.session_id === "target")?.title, "Unscoped native title");
+        assert.equal(stale.state.running_count, 1);
+        assert.equal(stale.state.recent_completion, undefined);
+      }
+      const finished = record("target", "task_finished", undefined, "Final native task", 1_000).state;
+      assert.equal(finished.recent_completion?.task_id, "current-task");
+      assert.equal(finished.recent_completion?.display_name, "Final native task");
+      const completion = finished.recent_completion!;
+      record("target", "session_ended", undefined, undefined, 1_100);
+      const supplemented = record("target", "session_title_updated", "current-task", "Late native title", 2_000).state;
+      assert.deepEqual(supplemented.recent_completion, { ...completion, display_name: "Late native title" });
+      assert.equal(supplemented.running_count, 0);
+      assert.equal(supplemented.session_count, 1, "renaming an ended session must not reactivate it");
+      assert.equal(record("target", "session_title_updated", "other-task", "Incorrect terminal title", 2_100).state.recent_completion?.display_name, "Late native title");
+      const unscopedCompletion = record("target", "session_title_updated", undefined, "Unscoped completion title", 2_200).state;
+      assert.deepEqual(unscopedCompletion.recent_completion, { ...completion, display_name: "Unscoped completion title" });
+      assert.equal(record("target", "session_title_updated", undefined, "Expired native title", 6_001).state.recent_completion, undefined);
+
+      record("target", "session_started", undefined, "Restarted native session", 7_000);
+      record("target", "task_started", "next-task", "Next native task", 7_100);
+      const rejectedOldTitle = record("target", "session_title_updated", "current-task", "Previous completion title", 7_200);
+      assert.equal(rejectedOldTitle.result.activity_applied, false);
+      assert.equal(rejectedOldTitle.state.recent_completion, undefined);
+      assert.equal(rejectedOldTitle.state.sessions?.find((row) => row.session_id === "target")?.title, "Next native task");
+      const lateRename = record("target", "session_title_updated", undefined, "Still native title", 2 * 60 * 60 * 1_000 + 60_000).state;
+      assert.equal(lateRename.session_count, 0, "title updates must not extend activity TTL");
+      assert.equal(lateRename.running_count, 0);
+    }
+  } finally {
+    sqlite.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("Top 5 presentation preserves all-session Working priority and most-active fallback in memory and SQLite", () => {
   const directory = mkdtempSync(join(tmpdir(), "relay-top-five-"));
   const sqlite = new SqliteRelayRepository(join(directory, "relay.sqlite"));

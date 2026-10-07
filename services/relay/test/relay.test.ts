@@ -505,6 +505,47 @@ test("unacknowledged probes mark the installation stale and emit a retryable tim
   relay.stop();
 });
 
+test("safe native title events broadcast metadata snapshots while unsafe payloads are rejected", () => {
+  const base = Date.parse("2026-10-02T00:00:00.000Z");
+  const relay = new Relay({ autoStart: false, now: () => new Date(base + 2_000) });
+  const collectorMessages = messages();
+  const phoneMessages = messages();
+  const collector = relay.connect({ gateway: "collector", installation_id: "install-1", transport: { send: (message) => collectorMessages.push(message) } });
+  relay.connect({ gateway: "android", installation_id: "install-1", transport: { send: (message) => phoneMessages.push(message) } });
+  relay.receive(collector.connection_id, JSON.stringify(event({ sequence: 1, event_type: "task_started", task_id: "native-task", session_title: "Native original task", payload: {} })));
+  relay.receive(collector.connection_id, JSON.stringify(event({ event_id: "native-finished", sequence: 2, event_type: "task_finished", task_id: "native-task", session_title: "Native completion title", payload: {} })));
+  const completion = relay.snapshot("install-1").recent_completion!;
+  phoneMessages.length = 0;
+  relay.receive(collector.connection_id, JSON.stringify(event({ event_id: "native-renamed", sequence: 3, event_type: "session_title_updated", task_id: "native-task", session_title: "Updated native name", payload: {} })));
+  assert.deepEqual(phoneMessages.map((message) => message.type), ["event", "snapshot"]);
+  assert.equal(phoneMessages[0]?.type === "event" && phoneMessages[0].event_type, "session_title_updated");
+  const updated = relay.snapshot("install-1");
+  assert.equal(updated.claude_state, "idle");
+  assert.equal(updated.running_count, 0);
+  assert.ok(updated.activity && typeof updated.activity !== "string");
+  assert.equal(updated.activity.event_type, "task_finished");
+  assert.equal(updated.sessions?.[0]?.last_activity_sequence, 2);
+  assert.deepEqual(updated.recent_completion, { ...completion, display_name: "Updated native name" });
+
+  for (const bad of [
+    { session_title: "/private/path", payload: {} },
+    { session_title: "token=PRIVATE_CREDENTIAL", payload: {} },
+    { session_title: "Native name", payload: { title: "PRIVATE_PROMPT" } },
+    { session_title: undefined, payload: {} },
+  ]) {
+    relay.receive(collector.connection_id, JSON.stringify(event({ event_id: "invalid-native-title", sequence: 4, event_type: "session_title_updated", ...bad })));
+    const ack = collectorMessages.filter((message) => message.type === "event_ack").at(-1);
+    assert.ok(ack?.type === "event_ack" && !ack.accepted);
+    assert.equal(relay.snapshot("install-1").last_sequence, 3);
+    assert.equal(relay.snapshot("install-1").sessions?.[0]?.title, "Updated native name");
+  }
+  relay.receive(collector.connection_id, JSON.stringify(event({ event_id: "native-unsafe-finish", sequence: 4, session_id: "other", event_type: "task_finished", session_title: "/private/path", payload: {} })));
+  assert.equal(relay.repository.findEvent("native-unsafe-finish")?.event.session_title, undefined, "unsafe lifecycle labels are omitted");
+  assert.equal(JSON.stringify(phoneMessages).includes("PRIVATE"), false);
+  assert.equal(JSON.stringify(phoneMessages).includes("/private"), false);
+  relay.stop();
+});
+
 test("unknown finishes update legacy state and ACKs without presenting an attributed completion in memory and SQLite", () => {
   const directory = mkdtempSync(join(tmpdir(), "relay-unknown-finish-"));
   const now = () => new Date("2026-10-02T00:00:01.000Z");

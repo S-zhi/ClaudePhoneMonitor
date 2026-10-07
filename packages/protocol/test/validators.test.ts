@@ -119,7 +119,8 @@ test("validates optional Usage snapshot and collector-only absolute message", ()
 test("accepts the optional session contract while keeping its boundaries strict", () => {
   const started = { ...makeEvent(EVENT_TYPES.SESSION_STARTED, {}), session_title: "Release review" };
   assert.equal(validateEventEnvelope(started).success, true);
-  assert.equal(validateEventEnvelope({ ...started, event_type: EVENT_TYPES.TASK_STARTED }).success, false);
+  assert.equal(validateEventEnvelope({ ...started, event_type: EVENT_TYPES.TASK_STARTED }).success, true);
+  assert.equal(validateEventEnvelope({ ...started, event_type: EVENT_TYPES.TOOL_STARTED }).success, false);
   assert.equal(validateEventEnvelope({ ...started, session_title: "/private/path" }).success, false);
 
   const extended: Snapshot = {
@@ -147,6 +148,21 @@ test("accepts the optional session contract while keeping its boundaries strict"
   assert.equal(validateSnapshot({ ...extended, sessions: [{
     session_id: "unknown", title: "title", claude_state: "idle", last_activity_sequence: 0,
   }] }).success, false);
+});
+
+test("native lifecycle titles and metadata-only updates keep strict payload and privacy boundaries", () => {
+  for (const event_type of [EVENT_TYPES.SESSION_STARTED, EVENT_TYPES.TASK_STARTED, EVENT_TYPES.TASK_FINISHED, EVENT_TYPES.SESSION_TITLE_UPDATED]) {
+    const nativeTitle = { ...makeEvent(event_type, {}), session_title: "优化多 Session 标题" };
+    assert.equal(validateEventEnvelope(nativeTitle).success, true, event_type);
+    for (const session_title of ["/private/project", "https://example.test", "line\nbreak", "x".repeat(65), "Bearer abc.def12", "AKIA0123456789ABCDEF", "ghs_1234567890abcdef", "password=private"]) {
+      assert.equal(validateEventEnvelope({ ...nativeTitle, session_title }).success, false, `${event_type}: ${session_title}`);
+    }
+  }
+  const titleUpdate = { ...makeEvent(EVENT_TYPES.SESSION_TITLE_UPDATED, {}), session_title: "Native task title" };
+  assert.equal(validateEventEnvelope({ ...titleUpdate, session_title: undefined }).success, false);
+  assert.equal(validateEventEnvelope({ ...titleUpdate, payload: { title: "PRIVATE_PROMPT" } }).success, false);
+  assert.equal(validateEventPayload(EVENT_TYPES.SESSION_TITLE_UPDATED, {}).success, true);
+  assert.equal(validateEventPayload(EVENT_TYPES.SESSION_TITLE_UPDATED, { tool_name: "Read" }).success, false);
 });
 
 test("rejects case-insensitive URL and credential-like titles at both wire boundaries", () => {

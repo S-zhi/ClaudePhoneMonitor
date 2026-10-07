@@ -47,7 +47,7 @@ export interface NormalizedEvent {
   readonly event_type: MonitorEventType;
   readonly session_id: string;
   readonly task_id?: string;
-  /** Safe custom title from Claude SessionStart metadata. */
+  /** Safe native session/task label; never derived from prompts or paths. */
   readonly session_title?: string;
   readonly occurred_at: WireTimestamp;
   readonly payload: SafeEventPayload;
@@ -59,6 +59,7 @@ export type EmptyPayload = Readonly<Record<string, never>>;
 /** Only sanitized metadata crosses the event boundary; never prompt/tool input/result. */
 export interface EventPayloadByType {
   readonly [EVENT_TYPES.SESSION_STARTED]: EmptyPayload;
+  readonly [EVENT_TYPES.SESSION_TITLE_UPDATED]: EmptyPayload;
   readonly [EVENT_TYPES.TASK_STARTED]: EmptyPayload;
   readonly [EVENT_TYPES.TOOL_STARTED]: {
     readonly tool_name?: string;

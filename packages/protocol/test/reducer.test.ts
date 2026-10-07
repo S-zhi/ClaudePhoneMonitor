@@ -86,6 +86,20 @@ test("keeps Working ahead of Waiting when combining session statuses", () => {
   );
 });
 
+test("title metadata advances the sequence without changing state or an outcome deadline", () => {
+  const state = {
+    ...createInitialMonitorState(100, 1),
+    base_status: MONITOR_STATUS.WORKING,
+    overlay: { status: MONITOR_STATUS.FINISH, started_at: 100, expires_at: 5_100 },
+  } as const;
+  const renamed = monitorReducer(state, {
+    type: "event", event: { ...event(EVENT_TYPES.SESSION_TITLE_UPDATED, {}, 2), session_title: "Native task title" },
+  });
+  assert.equal(renamed.base_status, MONITOR_STATUS.WORKING);
+  assert.deepEqual(renamed.overlay, state.overlay);
+  assert.equal(renamed.last_sequence, 2);
+});
+
 test("reduces working and waiting transitions while ignoring duplicate/order violations", () => {
   let state = createInitialMonitorState();
   state = monitorReducer(state, {
