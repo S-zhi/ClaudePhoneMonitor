@@ -111,7 +111,8 @@ function errorClassification(base_status: BaseMonitorStatus): ActivityClassifica
 }
 
 /**
- * Resolve simultaneous durable activity signals. Transient FINISH/ERROR are
+ * Resolve simultaneous durable session signals with Working ahead of Waiting.
+ * Transient FINISH/ERROR are
  * handled by the reducer overlay; ERROR is accepted here as a convenience for
  * callers that merge already-classified signals.
  */
@@ -119,8 +120,8 @@ export function highestPriorityBaseStatus(
   statuses: readonly BaseMonitorStatus[],
 ): BaseMonitorStatus {
   if (statuses.includes(MONITOR_STATUS.OFFLINE)) return MONITOR_STATUS.OFFLINE;
-  if (statuses.includes(MONITOR_STATUS.WAITING)) return MONITOR_STATUS.WAITING;
   if (statuses.includes(MONITOR_STATUS.WORKING)) return MONITOR_STATUS.WORKING;
+  if (statuses.includes(MONITOR_STATUS.WAITING)) return MONITOR_STATUS.WAITING;
   return MONITOR_STATUS.IDLE;
 }
 
@@ -129,8 +130,8 @@ export function highestPriorityStatus(
 ): MonitorStatus {
   if (statuses.includes(MONITOR_STATUS.OFFLINE)) return MONITOR_STATUS.OFFLINE;
   if (statuses.includes(MONITOR_STATUS.ERROR)) return MONITOR_STATUS.ERROR;
-  if (statuses.includes(MONITOR_STATUS.WAITING)) return MONITOR_STATUS.WAITING;
   if (statuses.includes(MONITOR_STATUS.WORKING)) return MONITOR_STATUS.WORKING;
+  if (statuses.includes(MONITOR_STATUS.WAITING)) return MONITOR_STATUS.WAITING;
   if (statuses.includes(MONITOR_STATUS.FINISH)) return MONITOR_STATUS.FINISH;
   return MONITOR_STATUS.IDLE;
 }

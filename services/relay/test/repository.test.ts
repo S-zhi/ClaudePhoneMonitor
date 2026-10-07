@@ -288,6 +288,192 @@ test("pairing records are claimable once and expire", () => {
   assert.equal(repository.getPairing(expiring.pairing_id, "2026-10-02T00:00:01.001Z")?.status, "expired");
 });
 
+test("native title metadata preserves task ownership, activity ordering and TTL in memory and SQLite", () => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-native-titles-"));
+  const sqlite = new SqliteRelayRepository(join(directory, "relay.sqlite"));
+  try {
+    for (const repository of [new InMemoryRelayRepository(), sqlite]) {
+      let sequence = 0;
+      const base = Date.parse("2026-10-02T00:00:00.000Z");
+      const record = (session_id: string, event_type: EventEnvelope["event_type"], task_id?: string, session_title?: string, offset = sequence * 100) => {
+        sequence += 1;
+        const now = new Date(base + offset).toISOString();
+        const result = repository.recordEvent(event({ event_id: `native-${sequence}`, session_id, sequence, event_type, occurred_at: now,
+          ...(task_id ? { task_id } : {}), ...(session_title ? { session_title } : {}), payload: {},
+        }), now);
+        return { result, state: repository.getInstallationState("install-1", now)! };
+      };
+      const metadataOnly = record("unseen", "session_title_updated", undefined, "Unseen native title");
+      assert.equal(metadataOnly.state.activity, undefined);
+      assert.equal(metadataOnly.state.sessions, undefined);
+      assert.equal(metadataOnly.result.activity_applied, false);
+
+      record("target", "task_started", "old-task", "Original native task");
+      record("target", "task_started", "current-task", "Current native task");
+      const before = record("other", "session_started", undefined, "Other session").state;
+      const activitySequence = before.sessions?.find((row) => row.session_id === "target")?.last_activity_sequence;
+      const renamed = record("target", "session_title_updated", "current-task", "Renamed native task");
+      assert.equal(renamed.result.activity_applied, true, "metadata can reach clients without becoming an outcome");
+      assert.equal(renamed.state.running_count, 1);
+      assert.equal(renamed.state.claude_state, "working");
+      assert.equal(renamed.state.sessions?.[0]?.session_id, "other");
+      assert.equal(renamed.state.sessions?.find((row) => row.session_id === "target")?.title, "Renamed native task");
+      assert.equal(renamed.state.sessions?.find((row) => row.session_id === "target")?.last_activity_sequence, activitySequence);
+      assert.deepEqual(renamed.state.activity, before.activity);
+      assert.equal(renamed.state.updated_at, before.updated_at);
+      const unscoped = record("target", "session_title_updated", undefined, "Unscoped native title").state;
+      assert.equal(unscoped.sessions?.find((row) => row.session_id === "target")?.title, "Unscoped native title");
+      assert.equal(unscoped.sessions?.find((row) => row.session_id === "target")?.last_activity_sequence, activitySequence);
+      assert.equal(unscoped.running_count, 1);
+
+      for (const event_type of ["task_finished", "session_title_updated"] as const) {
+        const stale = record("target", event_type, "old-task", "Wrong old task name");
+        assert.equal(stale.result.activity_applied, false);
+        assert.equal(stale.state.sessions?.find((row) => row.session_id === "target")?.title, "Unscoped native title");
+        assert.equal(stale.state.running_count, 1);
+        assert.equal(stale.state.recent_completion, undefined);
+      }
+      const finished = record("target", "task_finished", undefined, "Final native task", 1_000).state;
+      assert.equal(finished.recent_completion?.task_id, "current-task");
+      assert.equal(finished.recent_completion?.display_name, "Final native task");
+      const completion = finished.recent_completion!;
+      record("target", "session_ended", undefined, undefined, 1_100);
+      const supplemented = record("target", "session_title_updated", "current-task", "Late native title", 2_000).state;
+      assert.deepEqual(supplemented.recent_completion, { ...completion, display_name: "Late native title" });
+      assert.equal(supplemented.running_count, 0);
+      assert.equal(supplemented.session_count, 1, "renaming an ended session must not reactivate it");
+      assert.equal(record("target", "session_title_updated", "other-task", "Incorrect terminal title", 2_100).state.recent_completion?.display_name, "Late native title");
+      const unscopedCompletion = record("target", "session_title_updated", undefined, "Unscoped completion title", 2_200).state;
+      assert.deepEqual(unscopedCompletion.recent_completion, { ...completion, display_name: "Unscoped completion title" });
+      assert.equal(record("target", "session_title_updated", undefined, "Expired native title", 6_001).state.recent_completion, undefined);
+
+      record("target", "session_started", undefined, "Restarted native session", 7_000);
+      record("target", "task_started", "next-task", "Next native task", 7_100);
+      const rejectedOldTitle = record("target", "session_title_updated", "current-task", "Previous completion title", 7_200);
+      assert.equal(rejectedOldTitle.result.activity_applied, false);
+      assert.equal(rejectedOldTitle.state.recent_completion, undefined);
+      assert.equal(rejectedOldTitle.state.sessions?.find((row) => row.session_id === "target")?.title, "Next native task");
+      const lateRename = record("target", "session_title_updated", undefined, "Still native title", 2 * 60 * 60 * 1_000 + 60_000).state;
+      assert.equal(lateRename.session_count, 0, "title updates must not extend activity TTL");
+      assert.equal(lateRename.running_count, 0);
+    }
+  } finally {
+    sqlite.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Top 5 presentation preserves all-session Working priority and most-active fallback in memory and SQLite", () => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-top-five-"));
+  const sqlite = new SqliteRelayRepository(join(directory, "relay.sqlite"));
+  try {
+    for (const repository of [new InMemoryRelayRepository(), sqlite]) {
+      let sequence = 0;
+      const now = "2026-10-02T00:00:00.000Z";
+      const record = (session_id: string, event_type: EventEnvelope["event_type"]) => {
+        sequence += 1;
+        repository.recordEvent(event({ event_id: `top-${sequence}`, session_id, event_type, sequence }), now);
+        return repository.getInstallationState("install-1", now)!;
+      };
+      for (let index = 0; index < 6; index += 1) record(`worker-${index}`, "task_started");
+      for (let index = 0; index < 5; index += 1) record(`idle-${index}`, "session_started");
+      let state = repository.getInstallationState("install-1", now)!;
+      assert.equal(state.claude_state, "working");
+      assert.equal(state.running_count, 6);
+      assert.equal(state.session_count, 11);
+      assert.deepEqual(state.sessions?.map((row) => row.session_id), ["idle-4", "idle-3", "idle-2", "idle-1", "idle-0"]);
+      for (let index = 0; index < 6; index += 1) state = record(`worker-${index}`, "task_finished");
+      assert.equal(state.running_count, 0);
+      assert.equal(record("idle-0", "waiting").claude_state, "waiting");
+      assert.equal(record("newest-idle", "session_started").claude_state, "idle");
+    }
+  } finally {
+    sqlite.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("stale task tails preserve status, activity order and TTL while advancing the watermark in memory and SQLite", () => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-task-tail-order-"));
+  const sqlite = new SqliteRelayRepository(join(directory, "relay.sqlite"));
+  try {
+    for (const repository of [new InMemoryRelayRepository(), sqlite]) {
+      let sequence = 0;
+      const base = Date.parse("2026-10-02T00:00:00.000Z");
+      const record = (session_id: string, event_type: EventEnvelope["event_type"], task_id?: string, offset = sequence * 100) => {
+        sequence += 1;
+        const occurred_at = new Date(base + offset).toISOString();
+        repository.recordEvent(event({ event_id: `tail-${sequence}`, session_id, event_type, sequence, occurred_at, ...(task_id ? { task_id } : {}) }), occurred_at);
+        return repository.getInstallationState("install-1", occurred_at)!;
+      };
+      record("target", "task_started", "old");
+      record("target", "task_started", "current");
+      assert.equal(record("target", "waiting").claude_state, "waiting", "legacy Waiting without task_id remains valid");
+      assert.equal(record("target", "tool_started").claude_state, "working", "unscoped live tool resumes the current task");
+      const expectedActivitySequence = sequence;
+      const before = record("other", "session_started");
+      for (const event_type of ["waiting", "tool_started", "tool_finished", "tool_failed", "task_finished", "task_failed"] as const) {
+        const state = record("target", event_type, "old");
+        assert.equal(state.claude_state, "working", event_type);
+        assert.equal(state.last_sequence, sequence, event_type);
+        assert.deepEqual(state.activity, before.activity, event_type);
+        assert.equal(state.updated_at, before.updated_at, event_type);
+        assert.equal(state.sessions?.[0]?.session_id, "other", event_type);
+        assert.equal(state.sessions?.find((row) => row.session_id === "target")?.last_activity_sequence, expectedActivitySequence, event_type);
+        assert.equal(state.recent_completion, undefined, event_type);
+      }
+      const finished = record("target", "task_finished");
+      assert.equal(finished.recent_completion?.task_id, "current");
+      assert.equal(finished.recent_completion?.display_name, finished.sessions?.find((row) => row.session_id === "target")?.title);
+      const terminalSequence = sequence;
+      const newer = record("other", "waiting");
+      for (const event_type of ["waiting", "tool_started", "tool_finished", "tool_failed", "task_finished", "task_failed"] as const) {
+        const state = record("target", event_type);
+        assert.equal(state.claude_state, "waiting", event_type);
+        assert.deepEqual(state.activity, newer.activity, event_type);
+        assert.equal(state.recent_completion?.sequence, terminalSequence, event_type);
+        assert.equal(state.sessions?.find((row) => row.session_id === "target")?.claude_state, "idle", event_type);
+      }
+      // A late ignored tail must not extend session liveness.
+      const expired = record("target", "waiting", "current", 2 * 60 * 60 * 1000 + 60_000);
+      assert.equal(expired.session_count, 0);
+      assert.equal(expired.last_sequence, sequence);
+      assert.equal(expired.recent_completion, undefined);
+      assert.equal(record("target", "task_started", "next", 2 * 60 * 60 * 1000 + 60_001).claude_state, "working");
+    }
+  } finally {
+    sqlite.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Codex session names distinguish safe identities and stay consistent on completion in memory and SQLite", () => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-codex-names-"));
+  const sqlite = new SqliteRelayRepository(join(directory, "relay.sqlite"));
+  try {
+    for (const repository of [new InMemoryRelayRepository(), sqlite]) {
+      let sequence = 0;
+      const now = "2026-10-02T00:00:00.000Z";
+      for (const hash of ["a".repeat(64), "b".repeat(64)]) {
+        const session_id = `codex:sess:${hash}`;
+        for (const event_type of ["session_started", "task_started", "task_finished"] as const) {
+          sequence += 1;
+          repository.recordEvent(event({ event_id: `name-${sequence}`, sequence, session_id, event_type, ...(event_type === "session_started" ? { session_title: "Codex" } : {}), ...(event_type === "task_started" ? { task_id: `codex:turn:${hash}` } : {}) }), now);
+        }
+        const state = repository.getInstallationState("install-1", now)!;
+        assert.equal(state.sessions?.[0]?.title, `Codex ${hash.slice(-6)}`);
+        assert.equal(state.recent_completion?.display_name, state.sessions?.[0]?.title);
+        assert.equal(state.recent_completion?.task_id, `codex:turn:${hash}`);
+      }
+      const titles = repository.getInstallationState("install-1", now)?.sessions?.map((row) => row.title);
+      assert.equal(new Set(titles).size, 2);
+    }
+  } finally {
+    sqlite.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("identified sessions aggregate across interleaved events with all-session counts and Top 5", () => {
   const repository = new InMemoryRelayRepository();
   const base = Date.parse("2026-10-02T00:00:00.000Z");
@@ -576,12 +762,21 @@ test("SQLite session state survives restart and old databases migrate additively
     first.recordEvent(event({ event_id: "event-2", session_id: "session-B", sequence: 2, event_type: "task_started", task_id: "task-B" }), "2026-10-02T00:00:01.000Z");
     first.close();
 
+    // Persisted session JSON from earlier versions has only the event watermark.
+    const legacyJson = new DatabaseSync(dbPath);
+    legacyJson.exec("UPDATE relay_sessions SET session_json = json_remove(session_json, '$.last_activity_sequence')");
+    legacyJson.close();
     const restarted = new SqliteRelayRepository(dbPath);
     const state = restarted.getInstallationState("install-1", "2026-10-02T00:00:02.000Z");
     assert.equal(state?.session_count, 2);
     assert.equal(state?.running_count, 1);
     assert.equal(state?.sessions?.[0]?.session_id, "session-B");
     assert.equal(state?.sessions?.[1]?.title, "A safe title");
+    restarted.recordEvent(event({ event_id: "legacy-tail", session_id: "session-B", sequence: 3, event_type: "waiting", task_id: "old-task" }), "2026-10-02T00:00:03.000Z");
+    const afterTail = restarted.getInstallationState("install-1", "2026-10-02T00:00:03.000Z");
+    assert.equal(afterTail?.last_sequence, 3);
+    assert.equal(afterTail?.sessions?.[0]?.last_activity_sequence, 2);
+    assert.equal(afterTail?.sessions?.[0]?.claude_state, "working");
     restarted.close();
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -614,6 +809,7 @@ test("SQLite migration rebuilds per-session state from legacy event storage", ()
     legacy.close();
 
     const migrated = new SqliteRelayRepository(dbPath);
+    assert.equal(migrated.findEvent("event-1")?.activity_applied, true, "preexisting events retain presentation compatibility");
     const state = migrated.getInstallationState("install-1", "2026-10-02T00:00:02.000Z");
     assert.equal(state?.session_count, 1);
     assert.equal(state?.running_count, 1);

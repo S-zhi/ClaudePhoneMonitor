@@ -2,7 +2,8 @@ import { constants, promises as fs } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { codexEvent, parseCodexLifecycleLine, type CodexLifecycleRecord } from "./codex-normalizer.js";
-import type { NormalizedHookEvent } from "./types.js";
+import { CodexTitleReader } from "./codex-titles.js";
+import type { EventType, NormalizedHookEvent } from "./types.js";
 
 const CHECKPOINT_VERSION = 1;
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
@@ -19,6 +20,7 @@ class CodexEmitError extends Error {}
 export interface CodexWatcherOptions {
   sessionsRoot: string;
   checkpointFile: string;
+  codexMetadataRoot?: string;
   emit: (event: NormalizedHookEvent) => Promise<void>;
   now?: () => number;
   pollIntervalMs?: number;
@@ -124,6 +126,8 @@ export class CodexSessionWatcher {
   private readonly knownSessionHashes = new Set<string>();
   private readonly liveAuthoritativeSessions = new Set<string>();
   private readonly now: () => number;
+  private readonly titles: CodexTitleReader;
+  private readonly titleDigests = new Map<string, string>();
   private readonly counters: CodexWatcherCounters = {
     files_seen: 0, records_parsed: 0, malformed_rows: 0, oversized_rows: 0,
     unknown_rows: 0, unsafe_ids: 0, duplicate_or_out_of_order: 0,
@@ -138,6 +142,7 @@ export class CodexSessionWatcher {
 
   public constructor(private readonly options: CodexWatcherOptions) {
     this.now = options.now ?? Date.now;
+    this.titles = new CodexTitleReader({ metadataRoot: options.codexMetadataRoot ?? path.dirname(options.sessionsRoot) });
   }
 
   public countersSnapshot(): Readonly<CodexWatcherCounters> { return { ...this.counters }; }
@@ -232,7 +237,15 @@ export class CodexSessionWatcher {
   private async saveCheckpoint(): Promise<void> {
     const checkpoint: Checkpoint = {
       version: CHECKPOINT_VERSION,
-      files: [...this.states.values()].slice(-DEFAULT_MAX_FILES).map(({ filePath: _path, pending: _pending, seenThisScan: _seen, restoreWorking: _restore, sessionMetaSeen: _metaSeen, needsRestartBaseline: _restartBaseline, baselineCandidate: _candidate, sameSessionCopy: _copy, liveTouched: _live, restartReconcile: _restartReconcile, needsReconcile: _needsReconcile, ...state }) => state),
+      files: [...this.states.values()].slice(-DEFAULT_MAX_FILES).map((state) => ({
+        pathHash: state.pathHash, dev: state.dev, ino: state.ino, offset: state.offset,
+        baseline: state.baseline, baselineUntilOffset: state.baselineUntilOffset,
+        discardingLongLine: state.discardingLongLine, sessionHash: state.sessionHash,
+        currentTurnHash: state.currentTurnHash, terminalTurnHash: state.terminalTurnHash,
+        active: state.active, sessionOpen: state.sessionOpen, reportedSession: state.reportedSession,
+        identityInvalid: state.identityInvalid, lastOrdinal: state.lastOrdinal,
+        lastActivityAt: state.lastActivityAt, observedSize: state.observedSize, observedMtime: state.observedMtime,
+      })),
       knownSessionHashes: [...this.knownSessionHashes].slice(-10_000),
     };
     const directory = path.dirname(this.options.checkpointFile);
@@ -300,6 +313,8 @@ export class CodexSessionWatcher {
   }
 
   private async pollUnlocked(): Promise<void> {
+    await this.titles.refresh([...this.states.values()].flatMap((state) => state.sessionHash ? [state.sessionHash] : []));
+    await this.publishTitleChanges();
     const files = await this.listFiles();
     if (files === null) {
       await this.expireStaleStates();
@@ -385,6 +400,8 @@ export class CodexSessionWatcher {
       catch (error) { if (!(error instanceof CodexEmitError)) throw error; }
     }
     this.initialized = true;
+    const reportedHashes = new Set([...this.states.values()].filter((state) => state.reportedSession).map((state) => state.sessionHash));
+    for (const hash of this.titleDigests.keys()) if (!reportedHashes.has(hash)) this.titleDigests.delete(hash);
     await this.saveCheckpoint();
   }
 
@@ -584,11 +601,11 @@ export class CodexSessionWatcher {
         // duplicate and cause a second task_started emission.
         if (!duplicateActiveTurn) this.supersedeOtherSessionFiles(state);
         if (!state.reportedSession && !reportedSessionExists && !duplicateActiveTurn) {
-          await this.emitEvent(codexEvent("session_started", state.sessionHash, undefined, parsed.occurredAt, true));
+          await this.sendLifecycle("session_started", state.sessionHash, undefined, parsed.occurredAt, true);
           state.reportedSession = true;
         }
         if (!duplicateActiveTurn) {
-          await this.emitEvent(codexEvent("task_started", state.sessionHash, parsed.turnHash, parsed.occurredAt));
+          await this.sendLifecycle("task_started", state.sessionHash, parsed.turnHash, parsed.occurredAt);
           state.reportedSession = true;
         } else {
           state.reportedSession = false;
@@ -626,9 +643,9 @@ export class CodexSessionWatcher {
           return;
         }
         if (!this.hasReportedSession(state)) {
-          await this.emitEvent(codexEvent("session_started", state.sessionHash, undefined, parsed.occurredAt, true));
+          await this.sendLifecycle("session_started", state.sessionHash, undefined, parsed.occurredAt, true);
         }
-        await this.emitEvent(codexEvent("task_started", state.sessionHash, parsed.turnHash, parsed.occurredAt));
+        await this.sendLifecycle("task_started", state.sessionHash, parsed.turnHash, parsed.occurredAt);
         state.reportedSession = true;
       }
       state.active = false;
@@ -637,7 +654,7 @@ export class CodexSessionWatcher {
       if (!historical) this.supersedeOtherSessionFiles(state);
       if (parsed.errorKind === "none") {
         if (!historical && state.reportedSession) {
-          await this.emitEvent(codexEvent("task_finished", state.sessionHash, parsed.turnHash, parsed.occurredAt));
+          await this.sendLifecycle("task_finished", state.sessionHash, parsed.turnHash, parsed.occurredAt);
         }
       } else {
         state.sessionOpen = false;
@@ -715,11 +732,11 @@ export class CodexSessionWatcher {
         const needsRehydrate = states.some((state) => state.restartReconcile);
         const nowIso = new Date(this.now()).toISOString();
         if (!alreadyReported || needsRehydrate) {
-          await this.emitEvent(codexEvent("session_started", sessionHash, undefined, nowIso, true));
+          await this.sendLifecycle("session_started", sessionHash, undefined, nowIso, true);
           selected.reportedSession = true;
           selected.restartReconcile = false;
         }
-        await this.emitEvent(codexEvent("task_started", sessionHash, selected.currentTurnHash, nowIso));
+        await this.sendLifecycle("task_started", sessionHash, selected.currentTurnHash, nowIso);
         for (const state of states) {
           state.baselineCandidate = false;
           state.restartReconcile = false;
@@ -753,7 +770,7 @@ export class CodexSessionWatcher {
     turnHash = state.currentTurnHash,
   ): Promise<void> {
     if (!state.reportedSession || !state.sessionHash) return;
-    await this.emitEvent(codexEvent(type, state.sessionHash, turnHash, occurredAt));
+    await this.sendLifecycle(type, state.sessionHash, turnHash, occurredAt);
     state.reportedSession = false;
   }
 
@@ -764,6 +781,34 @@ export class CodexSessionWatcher {
     } catch (error) {
       if (error instanceof CodexEmitError) return false;
       throw error;
+    }
+  }
+
+  private async sendLifecycle(
+    type: EventType, sessionHash: string, turnHash: string | undefined, occurredAt: string, sessionStarted = false,
+  ): Promise<void> {
+    const title = ["session_started", "task_started", "task_finished", "session_title_updated"].includes(type)
+      ? await this.titles.lookup(sessionHash) : undefined;
+    const event = codexEvent(type, sessionHash, turnHash, occurredAt, sessionStarted, title);
+    await this.emitEvent(event);
+    if (event.session_title !== undefined) this.titleDigests.set(sessionHash, digest(event.session_title));
+  }
+
+  private async publishTitleChanges(): Promise<void> {
+    const reported = new Map<string, FileState>();
+    for (const state of this.states.values()) {
+      if (state.reportedSession && state.sessionHash && !state.identityInvalid) reported.set(state.sessionHash, state);
+    }
+    for (const [hash, state] of reported) {
+      const title = await this.titles.lookup(hash) ?? `Codex ${hash.slice(-6)}`;
+      const previous = this.titleDigests.get(hash);
+      // A restart has no in-memory digest. Rehydration lifecycle events below supply the native
+      // title; do not pretend that losing process memory is a user rename.
+      if (previous === undefined || previous === digest(title)) continue;
+      try {
+        await this.sendLifecycle("session_title_updated", hash, state.currentTurnHash ?? state.terminalTurnHash,
+          new Date(this.now()).toISOString());
+      } catch (error) { if (!(error instanceof CodexEmitError)) throw error; }
     }
   }
 

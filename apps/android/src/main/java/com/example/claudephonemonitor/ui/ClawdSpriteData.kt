@@ -1575,41 +1575,63 @@ private fun typingPose(leftHandRaised: Boolean): List<String> {
         for (column in from..to) pixels[row][column] = pixel
     }
 
-    // Head and torso stay anchored while the compact eye arcs and smile remain visible.
-    paint(6, 9, 18, 'O')
-    paint(7, 8, 19, 'O')
-    paint(8, 7, 20, 'O')
-    paint(9, 7, 20, 'O')
-    paint(10, 8, 19, 'O')
-    paint(8, 10, 11, 'B')
-    pixels[9][12] = 'B'
-    paint(8, 16, 17, 'B')
-    pixels[9][15] = 'B'
-    for (row in 11..15) paint(row, 8, 19, 'O')
-    paint(13, 6, 21, 'O')
-    pixels[10][11] = 'B'
-    pixels[10][16] = 'B'
-    paint(11, 12, 15, 'B')
-
-    // The laptop lid is a broad, fixed gray panel in front of Clawd's chest.
-    paint(14, 6, 21, 'K')
-    for (row in 15..18) {
-        pixels[row][6] = 'K'
-        paint(row, 7, 20, 'L')
-        pixels[row][21] = 'K'
+    // The same broad rectangular head, side arms and left shading as the still Clawd. The seated
+    // pose starts two rows higher to leave room for the laptop in the existing 22-row canvas.
+    for (row in 4..7) {
+        paint(row, 5, 20, 'O')
+        paint(row, 5, 7, 'D')
     }
-    paint(19, 5, 22, 'K')
-    paint(20, 6, 21, 'L')
-    paint(20, 9, 18, 'K')
-    paint(21, 9, 18, 'L')
+    for (row in 8..11) {
+        paint(row, 2, 23, 'O')
+        paint(row, 2, 4, 'D')
+    }
+    for (row in 12..18) {
+        paint(row, 5, 20, 'O')
+        paint(row, 5, 7, 'D')
+    }
+    for (row in 19..20) {
+        paint(row, 5, 7, 'O')
+        pixels[row][5] = 'D'
+    }
 
-    // Raised hand rests just above the keyboard; the other hand is lowered onto it.
-    val raisedColumn = if (leftHandRaised) 9 else 18
-    val loweredColumn = if (leftHandRaised) 18 else 9
-    pixels[14][raisedColumn] = 'H'
-    pixels[15][raisedColumn] = 'H'
-    pixels[16][loweredColumn] = 'H'
-    pixels[17][loweredColumn] = 'H'
+    // Two compact ^ eyes, with no mouth: closed eyes match the supplied working reference.
+    for (eyeLeft in listOf(8, 16)) {
+        paint(7, eyeLeft + 1, eyeLeft + 2, 'B')
+        pixels[8][eyeLeft] = 'B'
+        pixels[8][eyeLeft + 3] = 'B'
+    }
+
+    // The keyboard/base recedes diagonally behind the foreground lid.
+    paint(18, 7, 10, 'K')
+    paint(19, 8, 10, 'L')
+    paint(20, 9, 10, 'K')
+    pixels[21][10] = 'L'
+
+    fun hand(left: Int, top: Int) {
+        paint(top, left + 1, left + 2, 'B')
+        for (row in top + 1..top + 2) {
+            pixels[row][left] = 'B'
+            paint(row, left + 1, left + 2, 'H')
+            pixels[row][left + 3] = 'B'
+        }
+        paint(top + 3, left + 1, left + 2, 'B')
+    }
+    // The left hand sits beside the keyboard; the right hand is visible above the lid. Each
+    // changes by one row in the opposite phase without moving the head, torso or laptop.
+    hand(left = 6, top = if (leftHandRaised) 15 else 16)
+    hand(left = 16, top = if (leftHandRaised) 12 else 11)
+
+    // A neutral-gray lid, in front of Clawd, with a thin lit top/left edge and stepped perspective.
+    // Painting it last also correctly occludes the lower right wrist.
+    paint(15, 11, 24, 'K')
+    paint(16, 11, 24, 'L')
+    pixels[16][11] = 'K'
+    for (row in 17..20) {
+        paint(row, 10, 24, 'L')
+        pixels[row][10] = 'K'
+    }
+    paint(21, 10, 23, 'L')
+    pixels[21][10] = 'K'
 
     return pixels.map { it.concatToString() }
 }

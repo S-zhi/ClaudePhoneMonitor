@@ -1,9 +1,7 @@
 package com.example.claudephonemonitor.ui
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -11,6 +9,14 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.constrainWidth
+import androidx.compose.ui.unit.constrainHeight
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 
 /**
  * Pure code 5x7 Heavy Block Pixel Font renderer for retro print typography.
@@ -391,9 +397,70 @@ object PixelFont {
     )
 }
 
-/**
- * Renders large retro print pixel typography on Compose Canvas.
- */
+/** Lowercase glyphs keep the mixed-case session labels faithful to the reference. */
+private val lowercaseGlyphs = mapOf(
+    'a' to listOf(".....", ".....", ".XXX.", "....X", ".XXXX", "X...X", ".XXXX"),
+    'b' to listOf("X....", "X....", "XXXX.", "X...X", "X...X", "X...X", "XXXX."),
+    'c' to listOf(".....", ".....", ".XXXX", "X....", "X....", "X....", ".XXXX"),
+    'd' to listOf("....X", "....X", ".XXXX", "X...X", "X...X", "X...X", ".XXXX"),
+    'e' to listOf(".....", ".....", ".XXX.", "X...X", "XXXXX", "X....", ".XXXX"),
+    'f' to listOf("..XX.", ".X..X", ".X...", "XXX..", ".X...", ".X...", ".X..."),
+    'g' to listOf(".....", ".XXXX", "X...X", "X...X", ".XXXX", "....X", ".XXX."),
+    'h' to listOf("X....", "X....", "XXXX.", "X...X", "X...X", "X...X", "X...X"),
+    'i' to listOf("..X..", ".....", ".XX..", "..X..", "..X..", "..X..", ".XXX."),
+    'j' to listOf("...X.", ".....", "..XX.", "...X.", "...X.", "X..X.", ".XX.."),
+    'k' to listOf("X....", "X....", "X..X.", "X.X..", "XX...", "X.X..", "X..X."),
+    'l' to listOf(".XX..", "..X..", "..X..", "..X..", "..X..", "..X..", ".XXX."),
+    'm' to listOf(".....", ".....", "XX.X.", "X.X.X", "X.X.X", "X...X", "X...X"),
+    'n' to listOf(".....", ".....", "XXXX.", "X...X", "X...X", "X...X", "X...X"),
+    'o' to listOf(".....", ".....", ".XXX.", "X...X", "X...X", "X...X", ".XXX."),
+    'p' to listOf(".....", "XXXX.", "X...X", "X...X", "XXXX.", "X....", "X...."),
+    'q' to listOf(".....", ".XXXX", "X...X", "X...X", ".XXXX", "....X", "....X"),
+    'r' to listOf(".....", ".....", "X.XX.", "XX..X", "X....", "X....", "X...."),
+    's' to listOf(".....", ".....", ".XXXX", "X....", ".XXX.", "....X", "XXXX."),
+    't' to listOf(".X...", ".X...", "XXX..", ".X...", ".X...", ".X..X", "..XX."),
+    'u' to listOf(".....", ".....", "X...X", "X...X", "X...X", "X..XX", ".XX.X"),
+    'v' to listOf(".....", ".....", "X...X", "X...X", "X...X", ".X.X.", "..X.."),
+    'w' to listOf(".....", ".....", "X...X", "X...X", "X.X.X", "X.X.X", ".X.X."),
+    'x' to listOf(".....", ".....", "X...X", ".X.X.", "..X..", ".X.X.", "X...X"),
+    'y' to listOf(".....", "X...X", "X...X", ".XXXX", "....X", "X...X", ".XXX."),
+    'z' to listOf(".....", ".....", "XXXXX", "...X.", "..X..", ".X...", "XXXXX"),
+    '?' to listOf(".XXX.", "X...X", "....X", "...X.", "..X..", ".....", "..X.."),
+)
+
+internal data class PixelTextGeometry(val width: Float, val height: Float, val scale: Float)
+
+/** One uniform scale keeps the final glyph complete under both width and height constraints. */
+internal fun calculatePixelTextGeometry(
+    characterCount: Int,
+    pixelSize: Float,
+    gap: Float,
+    charSpacing: Int,
+    maxWidth: Float = Float.POSITIVE_INFINITY,
+    maxHeight: Float = Float.POSITIVE_INFINITY,
+): PixelTextGeometry {
+    if (characterCount <= 0 || pixelSize <= 0f) return PixelTextGeometry(0f, 0f, 1f)
+    val step = pixelSize + gap.coerceAtLeast(0f)
+    val width = ((characterCount * 5 + (characterCount - 1) * charSpacing.coerceAtLeast(0)) - 1) * step + pixelSize
+    val height = 6 * step + pixelSize
+    val scale = minOf(1f, maxWidth.coerceAtLeast(0f) / width, maxHeight.coerceAtLeast(0f) / height)
+    return PixelTextGeometry(width * scale, height * scale, scale)
+}
+
+/** Measured, accessible single-line bitmap text. Sizes in sp follow Android font scaling. */
+@Composable
+fun PixelText(
+    text: String,
+    color: Color,
+    modifier: Modifier = Modifier,
+    textHeight: TextUnit = 14.sp,
+) {
+    val density = LocalDensity.current
+    val pixelSize = with(density) { textHeight.toPx() } / 7f
+    MeasuredPixelText(text, color, modifier, pixelSize, 0f, 1)
+}
+
+/** Compatibility entry point for callers specifying physical pixel block dimensions. */
 @Composable
 fun LargePixelText(
     text: String,
@@ -403,31 +470,55 @@ fun LargePixelText(
     gap: Dp = 1.dp,
     charSpacing: Int = 2,
 ) {
-    val upper = text.uppercase()
-    val glyphRows = 7
-    val glyphCols = 5
+    val density = LocalDensity.current
+    MeasuredPixelText(
+        text, color, modifier,
+        with(density) { pixelSize.toPx() }, with(density) { gap.toPx() }, charSpacing,
+    )
+}
 
-    Canvas(modifier = modifier) {
-        val px = pixelSize.toPx()
-        val spacing = gap.toPx()
-        val step = px + spacing
-
-        var currentX = 0f
-        for (char in upper) {
-            val glyph = PixelFont.GLYPHS[char] ?: PixelFont.GLYPHS[' ']!!
-            for (r in 0 until glyphRows) {
-                val rowStr = glyph[r]
-                for (c in 0 until glyphCols) {
-                    if (rowStr[c] == 'X') {
-                        drawRect(
-                            color = color,
-                            topLeft = Offset(currentX + c * step, r * step),
-                            size = Size(px, px),
-                        )
+@Composable
+private fun MeasuredPixelText(
+    text: String,
+    color: Color,
+    modifier: Modifier,
+    pixelSize: Float,
+    gap: Float,
+    charSpacing: Int,
+) {
+    Layout(
+        modifier = modifier.semantics { contentDescription = text },
+        content = {
+            Canvas(Modifier.fillMaxSize()) {
+                val geometry = calculatePixelTextGeometry(
+                    text.length, pixelSize, gap, charSpacing, size.width, size.height,
+                )
+                val px = pixelSize * geometry.scale
+                val step = (pixelSize + gap.coerceAtLeast(0f)) * geometry.scale
+                val top = (size.height - geometry.height) / 2f
+                text.forEachIndexed { index, character ->
+                    val glyph = lowercaseGlyphs[character] ?: PixelFont.GLYPHS[character] ?: lowercaseGlyphs.getValue('?')
+                    glyph.forEachIndexed { row, columns ->
+                        columns.forEachIndexed { column, point ->
+                            if (point == 'X') drawRect(
+                                color = color,
+                                topLeft = Offset(index * (5 + charSpacing.coerceAtLeast(0)) * step + column * step, top + row * step),
+                                size = Size(px, px),
+                            )
+                        }
                     }
                 }
             }
-            currentX += (glyphCols + charSpacing) * step
-        }
+        },
+    ) { measurables, constraints ->
+        val geometry = calculatePixelTextGeometry(
+            text.length, pixelSize, gap, charSpacing,
+            if (constraints.hasBoundedWidth) constraints.maxWidth.toFloat() else Float.POSITIVE_INFINITY,
+            if (constraints.hasBoundedHeight) constraints.maxHeight.toFloat() else Float.POSITIVE_INFINITY,
+        )
+        val width = constraints.constrainWidth(kotlin.math.ceil(geometry.width).toInt())
+        val height = constraints.constrainHeight(kotlin.math.ceil(geometry.height).toInt())
+        val placeable = measurables.single().measure(androidx.compose.ui.unit.Constraints.fixed(width, height))
+        layout(width, height) { placeable.place(0, 0) }
     }
 }

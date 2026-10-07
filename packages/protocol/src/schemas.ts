@@ -19,7 +19,7 @@ const sequenceSchema: JsonSchema = {
   maximum: Number.MAX_SAFE_INTEGER,
 };
 
-const safeTitlePattern = String.raw`^(?!.*(?:[Hh][Tt][Tt][Pp][Ss]?://|[/\\]|(?:[Aa][Pp][Ii][- _]?[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn])\s*[:=]|[Bb][Ee][Aa][Rr][Ee][Rr]\s+[A-Za-z0-9_-]{16,}|(?:[Ss][Kk]-|[Gg][Hh][Pp]_|[Gg][Hh][Oo]_|[Gg][Ii][Tt][Hh][Uu][Bb]_[Pp][Aa][Tt]_|[Xx][Oo][Xx][BbAaPpRrSs]-)[A-Za-z0-9_-]{8,}))[^\u0000-\u001F\u007F]+$`;
+const safeTitlePattern = String.raw`^(?!.*(?:[Hh][Tt][Tt][Pp][Ss]?://|[/\\]|(?:[Aa][Pp][Ii][- _]?[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn])\s*[:=]|[Bb][Ee][Aa][Rr][Ee][Rr]\s+[A-Za-z0-9._~+-]{8,}|(?:[Ss][Kk]-|[Gg][Hh][PpOoUuSsRr]_|[Gg][Ii][Tt][Hh][Uu][Bb]_[Pp][Aa][Tt]_|[Xx][Oo][Xx][BbAaPpRrSs]-)[A-Za-z0-9_-]{8,}|[Aa][Kk][Ii][Aa][0-9A-Za-z]{16}))[^\u0000-\u001F\u007F]+$`;
 const safeTitleSchema: JsonSchema = {
   type: "string",
   minLength: 1,
@@ -134,6 +134,7 @@ export const USAGE_SNAPSHOT_SCHEMA: JsonSchema = strictObject(
 
 const payloadSchemas: Record<MonitorEventType, JsonSchema> = {
   [EVENT_TYPES.SESSION_STARTED]: strictObject({}),
+  [EVENT_TYPES.SESSION_TITLE_UPDATED]: strictObject({}),
   [EVENT_TYPES.TASK_STARTED]: strictObject({}),
   [EVENT_TYPES.TOOL_STARTED]: strictObject({
     tool_name: { ...idSchema, maxLength: 128 },
@@ -177,7 +178,8 @@ const eventProperties = (
   installation_id: idSchema,
   session_id: idSchema,
   task_id: idSchema,
-  ...(eventType === EVENT_TYPES.SESSION_STARTED ? { session_title: safeTitleSchema } : {}),
+  ...([EVENT_TYPES.SESSION_STARTED, EVENT_TYPES.TASK_STARTED, EVENT_TYPES.TASK_FINISHED, EVENT_TYPES.SESSION_TITLE_UPDATED].some((type) => type === eventType)
+    ? { session_title: safeTitleSchema } : {}),
   sequence: sequenceSchema,
   occurred_at: wireTimestampSchema,
   event_type: { const: eventType },
@@ -200,6 +202,7 @@ const eventSchemas = Object.fromEntries(
         "occurred_at",
         "event_type",
         "payload",
+        ...(eventType === EVENT_TYPES.SESSION_TITLE_UPDATED ? ["session_title"] : []),
       ],
     ),
   ]),

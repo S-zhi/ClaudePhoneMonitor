@@ -198,8 +198,8 @@ internal fun resolvePixelColor(char: Char, isSilent: Boolean, state: PetState): 
 
     'B' -> Color(0xFF1E1917)
     'W' -> Color(0xFFFFFFFF)
-    'H' -> if (isSilent) Color(0xFF8B4A37) else Color(0xFFE89A72)
-    'L' -> Color(0xFF74808B)
-    'K' -> Color(0xFF454D56)
+    'H' -> if (isSilent) Color(0xFF8B4A37) else Color(0xFFE18B69)
+    'L' -> Color(0xFF686665)
+    'K' -> Color(0xFFA6A3A0)
     else -> null
 }

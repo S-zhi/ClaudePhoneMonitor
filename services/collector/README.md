@@ -37,6 +37,33 @@ that environment setting. The watcher reads `$CODEX_HOME/sessions`, or
 checkpoint is stored as `codex-checkpoint.json` under `COLLECTOR_DATA_DIR` with
 hashed identities and offsets, not transcript content.
 
+Native Codex names come from the configured sessions root's parent by default.
+`COLLECTOR_CODEX_METADATA_DIR`, `--codex-metadata-root PATH`, or the runtime's
+`codexMetadataRoot` option selects another metadata root explicitly. The reader
+only inspects that root and its `sqlite/` child; it does not search other Codex
+homes. It opens existing `state_*.sqlite` databases read-only and prefers the
+root's highest-version authority before nested copies. The displayed name comes
+from safe `threads.name`, then the latest same-UUID `session_index.jsonl`
+`thread_name`, then legacy `threads.title` when no native name exists. Index
+recency uses `updated_at` (or `updatedAt`), with the later line winning ties.
+
+An explicit nonempty but unsafe canonical name retracts the previous display
+instead of falling back to an old index or derived title. An unsafe latest index
+name similarly blocks old derived titles unless SQLite supplies a valid native
+name. Names must pass the shared 64-character/path/URL/control/credential checks;
+otherwise the existing `Codex` plus short identity hash remains the safe fallback.
+Transient read failures and SQLite locks retain the last validated safe value.
+No prompt, first user message, preview, body, or cwd becomes a title source.
+
+Title-only changes are polled even when rollout files do not grow. They produce
+`session_title_updated` with an empty payload and the matching current/terminal
+task identity, without replaying lifecycle events. Session/task starts and task
+finishes carry the current safe native name. Only RAM holds title values and
+rename digests; checkpoint serialization uses an explicit lifecycle-field
+allowlist and never writes names or raw UUIDs. Reads are bounded by line length,
+tail bytes, candidate entry counts, database bytes and 64-session SQL batches;
+title caches are also capped across polls.
+
 Usage collection is a separate opt-in from lifecycle monitoring. Enable it with
 `--watch-usage` or `COLLECTOR_WATCH_USAGE=1`; `--no-watch-usage` disables it.
 It reads `~/.claude/projects` and the Codex sessions root above (override the
