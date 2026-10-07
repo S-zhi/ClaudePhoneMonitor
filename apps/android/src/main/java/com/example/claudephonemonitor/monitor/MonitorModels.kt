@@ -56,6 +56,7 @@ enum class MonitorEventName(val wireValue: String) {
     TASK_FINISHED("task_finished"),
     TASK_FAILED("task_failed"),
     SESSION_STARTED("session_started"),
+    SESSION_TITLE_UPDATED("session_title_updated"),
     SESSION_ENDED("session_ended"),
     UNKNOWN("unknown"),
 }
@@ -246,7 +247,7 @@ data class MonitorEvent(
                         add(
                             SessionSummary(
                                 sessionId = id,
-                                title = item.optString("title").ifBlank { "会话 ${id.takeLast(4)}" },
+                                title = item.optString("title").ifBlank { fallbackSessionTitle(id) },
                                 claudeState = state,
                                 lastActivitySequence = item.longOrNull("last_activity_sequence") ?: 0L,
                             ),
@@ -264,7 +265,7 @@ data class MonitorEvent(
                     taskId = completion.stringOrNull("task_id"),
                     sequence = sequence,
                     occurredAt = completion.optString("occurred_at"),
-                    displayName = completion.optString("display_name").ifBlank { "未命名会话已完成" },
+                    displayName = completion.optString("display_name").ifBlank { fallbackSessionTitle(id) },
                 )
             },
             usage = json.optJSONObject("usage")?.let(::usageFromJson),
@@ -501,6 +502,7 @@ fun MonitorEventName.toPetState(): PetState = when (this) {
     MonitorEventName.TOOL_STARTED,
     MonitorEventName.TOOL_FINISHED -> PetState.WORKING
     MonitorEventName.SESSION_STARTED,
+    MonitorEventName.SESSION_TITLE_UPDATED,
     MonitorEventName.SESSION_ENDED,
     MonitorEventName.UNKNOWN -> PetState.IDLE
 }

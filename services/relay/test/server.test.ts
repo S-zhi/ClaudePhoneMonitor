@@ -6,6 +6,7 @@ import { createRelayServer } from "../src/server.js";
 
 interface TestClient {
   socket: WebSocket;
+  messages: Record<string, unknown>[];
   waitFor(predicate: (message: Record<string, unknown>) => boolean): Promise<Record<string, unknown>>;
 }
 
@@ -13,6 +14,7 @@ function open(url: string): Promise<TestClient> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url);
     const backlog: Record<string, unknown>[] = [];
+    const messages: Record<string, unknown>[] = [];
     const waiters: Array<{
       predicate: (message: Record<string, unknown>) => boolean;
       resolve: (message: Record<string, unknown>) => void;
@@ -28,6 +30,7 @@ function open(url: string): Promise<TestClient> {
       }
       if (typeof parsed !== "object" || parsed === null) return;
       const message = parsed as Record<string, unknown>;
+      messages.push(message);
       const waiterIndex = waiters.findIndex((waiter) => waiter.predicate(message));
       if (waiterIndex >= 0) {
         const waiter = waiters.splice(waiterIndex, 1)[0];
@@ -41,6 +44,7 @@ function open(url: string): Promise<TestClient> {
       socket.removeListener("error", reject);
       resolve({
         socket,
+        messages,
         waitFor(predicate) {
           const backlogIndex = backlog.findIndex(predicate);
           if (backlogIndex >= 0) {
@@ -153,6 +157,53 @@ test("Fastify health, pairing, and WebSocket gateways are runnable", async () =>
   } finally {
     await closeClient(collector);
     await closeClient(android);
+    await app.close();
+  }
+});
+
+test("WebSocket clients receive snapshots but no presentation for stale or terminal task tails", async () => {
+  const now = new Date("2026-10-02T00:00:01.000Z");
+  const { app } = createRelayServer({
+    config: { host: "127.0.0.1", port: 0, bookkeepingIntervalMs: 60_000, heartbeatIntervalMs: 60_000 },
+    relayOptions: { autoStart: false, now: () => now },
+  });
+  let collector: TestClient | undefined;
+  let phone: TestClient | undefined;
+  try {
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    assert.ok(address && typeof address === "object");
+    const base = `ws://127.0.0.1:${address.port}`;
+    collector = await open(`${base}/ws/collector?installation_id=install-1`);
+    phone = await open(`${base}/ws/android?installation_id=install-1`);
+    await collector.waitFor((message) => message.type === "hello_ack");
+    await phone.waitFor((message) => message.type === "hello_ack");
+    const records = [
+      { event_type: "task_started", task_id: "old" },
+      { event_type: "task_started", task_id: "current" },
+      { event_type: "task_finished", task_id: "old" },
+      { event_type: "waiting", task_id: "old" },
+      { event_type: "task_finished", task_id: "current" },
+      { event_type: "task_finished", task_id: "current" },
+      { event_type: "waiting" },
+    ];
+    for (const [index, record] of records.entries()) {
+      const sequence = index + 1;
+      collector.socket.send(JSON.stringify({ type: "event", schema_version: 1, installation_id: "install-1", session_id: "session-1", event_id: `socket-${sequence}`, sequence, occurred_at: now.toISOString(), payload: {}, ...record }));
+      const ack: Record<string, unknown> = await collector.waitFor((message) => message.type === "event_ack" && message.sequence === sequence);
+      assert.equal(ack.accepted, true);
+      const snapshot = await phone.waitFor((message) => message.type === "snapshot" && message.last_sequence === sequence);
+      assert.equal(snapshot.claude_state, sequence < 5 ? "working" : "idle");
+      if (sequence >= 5) assert.equal((snapshot.recent_completion as { sequence: number }).sequence, 5);
+    }
+    assert.deepEqual(phone.messages.filter((message) => message.type === "event").map((message) => message.sequence), [1, 2, 5]);
+    const offset = phone.messages.length;
+    phone.socket.send(JSON.stringify({ type: "resume", schema_version: 1, installation_id: "install-1", last_sequence: 2 }));
+    await phone.waitFor((message) => message.type === "snapshot" && message.last_sequence === 7);
+    assert.deepEqual(phone.messages.slice(offset).filter((message) => message.type === "event").map((message) => message.sequence), [5]);
+  } finally {
+    await closeClient(collector);
+    await closeClient(phone);
     await app.close();
   }
 });

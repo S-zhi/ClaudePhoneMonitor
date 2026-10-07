@@ -177,6 +177,16 @@ scripts/start-lan-monitor.sh --watch-codex
 生命周期字段，不安装 Hook、不修改 Codex 配置；如关闭监听，省略选项或使用
 `--no-watch-codex`。
 
+Codex 会话名称只从本机原生标题元数据读取：优先使用 `state_*.sqlite` 的
+`threads.name`，其次是 `session_index.jsonl` 中同 UUID 的最新 `thread_name`，
+旧版无 name 时才使用安全的 `threads.title`；不从 prompt、消息正文或预览生成名称。
+标题必须通过 64 字符、路径、URL、控制字符及凭据检查；明确无效的新名称会撤回为
+`Codex` 加短身份 hash，不沿用过去的名称。元数据目录默认是**已配置 sessions 目录的父目录**，
+可用 `COLLECTOR_CODEX_METADATA_DIR` 或 Collector 的 `--codex-metadata-root PATH`
+显式覆盖；同目录及其 `sqlite/` 子目录中的数据库都支持，不串读其他 Codex Home。
+读取为只读，名称和原 UUID 不写入 checkpoint。改名即使没有新增 rollout 行，也只发送
+`session_title_updated` 元事件，不重放任务开始、完成或改变运行数。
+
 Codex 会话记录格式随版本变化。当前投影只报告可核实的 WORKING、正常完成 FINISH、
 已确认的 `server_overloaded` 错误以及中性回稳；未知错误、中断、等待状态和工具活动
 不会被推断。源文件连续 30 分钟没有增长或修改会中性结束会话，不代表完成、错误或等待；
@@ -214,7 +224,7 @@ Tokens。只有缓存分子、分母和两个来源覆盖都完整时才给完�
 - Codex 监听需要显式启用。已核实桌面应用版本为 26.930.61225（内嵌 runtime 0.160.0），
   独立 CLI 二进制为 0.159.3；两种执行形态不可混称。当前 Codex 会话 JSONL 格式不稳定。
   本项不假定可观察显式等待、全部工具活动或所有错误。
-- 本轮明确跳过 Android 真机验收；设备上的 Compose 页面选择和 15 秒可见时长仍待后续录屏复验。JVM 测试验证 wire JSON、fake client、ViewModel 状态流及纯页面选择逻辑，不代表真机验收。
+- Android 真机上的原生 Compose fixture 四项通过，覆盖多 Session 列表、完成名称、Working 优先、短横屏和大字号布局。当前后端已更新并启用 Codex 监听，保留原配对；真机确认 Relay 已连接、当前聊天真实原生任务名称已显示，无可用安全名称的其他会话允许匿名回退，见 [issue #4 验证记录](docs/device-testing/issue4-reimplementation-2026-10-07.md)。含私人任务名的新截图仅留本地；真实完成页的完整 15 秒可见时长尚未录屏，截止与迟到补名逻辑由 JVM 测试验证。
 
 ## 目录
 

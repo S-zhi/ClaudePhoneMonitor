@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { EventType, NormalizedHookEvent } from "./types.js";
+import { safeSessionTitle } from "./normalize.js";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TURN_ID = SESSION_ID;
@@ -136,12 +137,14 @@ export function codexEvent(
   turnHash: string | undefined,
   occurred_at: string,
   sessionStarted = false,
+  nativeTitle?: string,
 ): NormalizedHookEvent {
   return {
     event_type,
     session_id: codexSessionId(sessionHash),
     ...(turnHash ? { task_id: codexTaskId(turnHash) } : {}),
-    ...(sessionStarted ? { session_title: "Codex" } : {}),
+    ...(["session_started", "task_started", "task_finished", "session_title_updated"].includes(event_type)
+      ? { session_title: safeSessionTitle(nativeTitle) ?? `Codex ${sessionHash.slice(-6)}` } : {}),
     occurred_at,
     payload: {},
   };

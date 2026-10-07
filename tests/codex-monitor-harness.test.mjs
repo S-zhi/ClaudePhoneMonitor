@@ -39,6 +39,8 @@ async function runSharedDaemonRelayCase(t, storageKind) {
   const codexTurnB = randomUUID();
   const sentinel = "never-export-this-private-fixture";
   await mkdir(sessionsRoot, { recursive: true, mode: 0o700 });
+  const metadataIndex = join(root, "session_index.jsonl");
+  await writeFile(metadataIndex, `${JSON.stringify({ id: codexSessionA, thread_name: "修复 Codex 真实任务名称", updated_at: "2026-10-07T00:00:00Z" })}\n`);
 
   const config = loadConfig({}, {
     host: "127.0.0.1",
@@ -94,9 +96,6 @@ async function runSharedDaemonRelayCase(t, storageKind) {
     const startA = rolloutRow("event_msg", {
       type: "task_started", turn_id: codexTurnA, command: sentinel, prompt: sentinel,
     }, 1);
-    const completeA = rolloutRow("event_msg", {
-      type: "task_complete", turn_id: codexTurnA, error: null, result: sentinel,
-    }, 2);
     await writeFile(rolloutA, `${sourcePreambleA}\n${startA}\n`, { mode: 0o600 });
     await waitFor(() => {
       const events = relay.repository.listEventsAfter(installationId, -1).map((row) => row.event);
@@ -104,6 +103,19 @@ async function runSharedDaemonRelayCase(t, storageKind) {
         ? events
         : undefined;
     });
+
+    const codexSessionIdForRename = `codex:sess:${sha(codexSessionA)}`;
+    const lifecycleCountBeforeRename = relay.repository.listEventsAfter(installationId, -1)
+      .filter((row) => ["session_started", "task_started", "task_finished"].includes(row.event.event_type)).length;
+    await appendFile(metadataIndex, `${JSON.stringify({ id: codexSessionA, thread_name: "Codex 原生名称已更新", updated_at: "2026-10-08T00:00:00Z" })}\n`);
+    await waitFor(() => relay.repository.listEventsAfter(installationId, -1).some((row) =>
+      row.event.event_type === "session_title_updated" && row.event.session_id === codexSessionIdForRename));
+    const renamedSnapshot = relay.snapshot(installationId);
+    assert.equal(renamedSnapshot.sessions.find((session) => session.session_id === codexSessionIdForRename)?.title, "Codex 原生名称已更新");
+    assert.equal(renamedSnapshot.sessions.find((session) => session.session_id === codexSessionIdForRename)?.claude_state, "working");
+    assert.equal(relay.repository.listEventsAfter(installationId, -1)
+      .filter((row) => ["session_started", "task_started", "task_finished"].includes(row.event.event_type)).length,
+    lifecycleCountBeforeRename, "rename emits metadata without replaying lifecycle");
 
     // Deliberately make valid Claude identities equal the canonical Codex IDs.
     // The shared Collector must namespace-escape them before Relay sees them.
@@ -135,6 +147,9 @@ async function runSharedDaemonRelayCase(t, storageKind) {
     await waitFor(() => relay.repository.listEventsAfter(installationId, -1).some((row) =>
       row.event.event_type === "task_started" && row.event.session_id === claudeSessionId));
 
+    const completeA = rolloutRow("event_msg", {
+      type: "task_complete", turn_id: codexTurnA, error: null, result: sentinel,
+    }, 2);
     await appendFile(rolloutA, `${completeA}\n`);
     const codexCompleted = await waitFor(() => {
       const events = relay.repository.listEventsAfter(installationId, -1).map((row) => row.event);
@@ -149,7 +164,8 @@ async function runSharedDaemonRelayCase(t, storageKind) {
     assert.equal(completedSnapshot.sessions.find((session) => session.session_id === codexSessionIdA)?.claude_state, "idle");
     assert.equal(completedSnapshot.recent_completion.session_id, codexSessionIdA);
     assert.equal(completedSnapshot.recent_completion.task_id, codexTaskIdA);
-    assert.equal(completedSnapshot.recent_completion.display_name, "Codex");
+    assert.equal(completedSnapshot.recent_completion.display_name, "Codex 原生名称已更新");
+    assert.equal(completedSnapshot.recent_completion.display_name, completedSnapshot.sessions.find((session) => session.session_id === codexSessionIdA)?.title);
 
     const rolloutB = join(sessionsRoot, "rollout-aborted.jsonl");
     const startB = rolloutRow("event_msg", {
@@ -176,7 +192,7 @@ async function runSharedDaemonRelayCase(t, storageKind) {
     assert.equal(finalSnapshot.sessions.find((session) => session.session_id === claudeSessionId)?.claude_state, "working");
     assert.equal(finalSnapshot.recent_completion.session_id, codexSessionIdA, "the completed Codex turn remains visible after an unrelated interruption");
     assert.equal(finalSnapshot.recent_completion.task_id, codexTaskIdA);
-    assert.equal(finalSnapshot.recent_completion.display_name, "Codex");
+    assert.equal(finalSnapshot.recent_completion.display_name, completedSnapshot.recent_completion.display_name);
     await waitFor(() => snapshots.some((snapshot) =>
       snapshot?.claude_state === "working" &&
       snapshot.sessions?.some((session) => session.session_id === claudeSessionId && session.claude_state === "working")));
@@ -200,6 +216,10 @@ async function runSharedDaemonRelayCase(t, storageKind) {
     const outbox = await readFile(join(dataDir, "outbox.json"), "utf8");
     assert.equal(checkpoint.includes(sentinel), false);
     assert.equal(checkpoint.includes(sessionsRoot), false);
+    assert.equal(checkpoint.includes("修复 Codex 真实任务名称"), false);
+    assert.equal(checkpoint.includes("Codex 原生名称已更新"), false);
+    assert.equal(checkpoint.includes(codexSessionA), false);
+    assert.equal(checkpoint.includes(codexSessionB), false);
     assert.equal(outbox.includes(sentinel), false);
     assert.equal(relay.snapshot(installationId).schema_version, 1);
     t.diagnostic(JSON.stringify({

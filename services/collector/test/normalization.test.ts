@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { normalizeHookEvent } from "../src/normalize.ts";
+import { normalizeHookEvent, safeSessionTitle } from "../src/normalize.ts";
 import { Collector } from "../src/collector.ts";
 
 const now = new Date("2026-10-02T11:00:00.000Z");
@@ -9,6 +9,7 @@ const now = new Date("2026-10-02T11:00:00.000Z");
 test("normalization maps hook lifecycle names to canonical v1 event types", () => {
   const cases: Array<[string, string]> = [
     ["SessionStart", "session_started"],
+    ["SessionTitleUpdated", "session_title_updated"],
     ["PreToolUse", "tool_started"],
     ["PostToolUse", "tool_finished"],
     ["PostToolUseFailure", "tool_failed"],
@@ -21,7 +22,7 @@ test("normalization maps hook lifecycle names to canonical v1 event types", () =
   ];
 
   for (const [hook_event_name, event_type] of cases) {
-    const normalized = normalizeHookEvent({ hook_event_name, session_id: "s1" }, { now });
+    const normalized = normalizeHookEvent({ hook_event_name, session_id: "s1", ...(hook_event_name === "SessionTitleUpdated" ? { session_title: "Native task title" } : {}) }, { now });
     assert.equal(normalized?.event_type, event_type, hook_event_name);
   }
 });
@@ -111,7 +112,7 @@ test("SessionStart carries only a safe explicit title and prompt_id fills task_i
   assert.equal(explicitTask?.session_title, undefined);
 });
 
-test("unsafe, overlong, and non-SessionStart titles are omitted", () => {
+test("unsafe, overlong, and unsupported lifecycle titles are omitted", () => {
   for (const title of [
     "/Users/alice/project", "C:\\private\\project", "\\\\server\\share",
     "https://example.test", "HTTPS://example.test", "token=sk-secret", "TOKEN=abc123",
@@ -132,9 +133,24 @@ test("unsafe, overlong, and non-SessionStart titles are omitted", () => {
     );
   }
   assert.equal(
-    normalizeHookEvent({ hook_event_name: "Stop", session_id: "s1", session_title: "must be ignored" }, { now })?.session_title,
+    normalizeHookEvent({ hook_event_name: "PreToolUse", session_id: "s1", session_title: "must be ignored" }, { now })?.session_title,
     undefined,
   );
+});
+
+test("native titles stay allowlisted on task lifecycle and title-only events", () => {
+  assert.equal(safeSessionTitle("  Native   task name  "), "Native task name");
+  assert.equal(safeSessionTitle("/private/source"), undefined);
+  for (const event_type of ["session_started", "task_started", "task_finished", "session_title_updated"]) {
+    const result = normalizeHookEvent({ event_type, session_id: "s1", task_id: "t1", session_title: "  Native   task name  ", prompt: "PRIVATE_PROMPT", command: "PRIVATE_COMMAND", cwd: "/private/source", tool_name: "Read" }, { now });
+    assert.equal(result?.session_title, "Native task name", event_type);
+    assert.equal(JSON.stringify(result).includes("PRIVATE"), false);
+    assert.equal(JSON.stringify(result).includes("/private"), false);
+    if (event_type === "session_title_updated") assert.deepEqual(result?.payload, {});
+  }
+  for (const session_title of [undefined, "/private/source", "line\nbreak", "Bearer abc.def12", "AKIA0123456789ABCDEF", "ghs_1234567890abcdef", "x".repeat(65)]) {
+    assert.equal(normalizeHookEvent({ event_type: "session_title_updated", session_id: "s1", session_title }, { now }), null);
+  }
 });
 
 test("collector preserves the sanitized title and normalized prompt_id on the wire", async () => {

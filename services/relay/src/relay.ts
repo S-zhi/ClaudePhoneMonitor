@@ -912,7 +912,7 @@ export class Relay {
       duplicate: result.duplicate,
     });
     if (!result.duplicate && !result.conflict) {
-      this.broadcastEventForInstallation(result.stored.event);
+      if (result.activity_applied) this.broadcastEventForInstallation(result.stored.event);
       this.broadcastSnapshotsForInstallation(safeEvent.installation_id);
     }
   }
@@ -1074,7 +1074,12 @@ export class Relay {
     }
 
     for (const stored of this.repository.listEventsAfter(installationId, lastSequence)) {
-      this.send(connectionId, stored.event);
+      // Older databases default presentation eligibility to true, but unknown
+      // completions still cannot identify a session or task to present.
+      if (stored.activity_applied !== false &&
+          !(stored.event.session_id === "unknown" && stored.event.event_type === "task_finished")) {
+        this.send(connectionId, stored.event);
+      }
     }
     this.sendSnapshotIfSubscribed(connectionId, installationId);
   }
@@ -1309,7 +1314,11 @@ export class Relay {
     const taskId = optionalString(message.task_id);
     const correlationId = optionalString(message.correlation_id);
     const sessionTitle =
-      eventType === "session_started" ? safeSessionTitle(message.session_title) : undefined;
+      ["session_started", "task_started", "task_finished", "session_title_updated"].includes(eventType)
+        ? safeSessionTitle(message.session_title) : undefined;
+    if (eventType === "session_title_updated" && (
+      !sessionTitle || !isRecord(message.payload) || Object.keys(message.payload).length !== 0
+    )) return undefined;
     return {
       type: "event",
       schema_version: RELAY_SCHEMA_VERSION,

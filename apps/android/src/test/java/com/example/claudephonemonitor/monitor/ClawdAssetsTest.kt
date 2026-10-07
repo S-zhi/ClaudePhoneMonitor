@@ -13,7 +13,6 @@ import androidx.compose.ui.graphics.Color
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -56,25 +55,6 @@ class ClawdAssetsTest {
         assertEquals(24, ClawdSpriteData.STILL_POSES.single().maxOf(String::length))
         assertEquals(28, ClawdSpriteData.TYPING_POSES.first().maxOf(String::length))
         assertEquals(28, ClawdSpriteData.POINT_POSES.maxOf { frame -> frame.maxOf(String::length) })
-        assertNotEquals(ClawdSpriteData.TYPING_POSES[0][16], ClawdSpriteData.TYPING_POSES[1][16])
-        assertTrue(ClawdSpriteData.TYPING_POSES.all { it[16].contains('H') })
-        assertEquals('H', ClawdSpriteData.TYPING_POSES[0][14][9])
-        assertEquals('H', ClawdSpriteData.TYPING_POSES[0][16][18])
-        assertEquals('H', ClawdSpriteData.TYPING_POSES[1][14][18])
-        assertEquals('H', ClawdSpriteData.TYPING_POSES[1][16][9])
-        assertEquals(
-            ClawdSpriteData.TYPING_POSES[0].mapIndexed { row, pixels ->
-                pixels.replace('H', if (row == 14) 'K' else 'L')
-            },
-            ClawdSpriteData.TYPING_POSES[1].mapIndexed { row, pixels ->
-                pixels.replace('H', if (row == 14) 'K' else 'L')
-            },
-        )
-        assertEquals(ClawdSpriteData.TYPING_POSES[0].drop(18), ClawdSpriteData.TYPING_POSES[1].drop(18))
-        assertEquals("BB", ClawdSpriteData.TYPING_POSES[0][8].substring(10, 12))
-        assertEquals('B', ClawdSpriteData.TYPING_POSES[0][9][12])
-        assertEquals('B', ClawdSpriteData.TYPING_POSES[0][11][12])
-        assertEquals('B', ClawdSpriteData.TYPING_POSES[0][11][15])
         assertEquals(320, resolveClawdAnimation(PetState.WORKING, ActivityVariation.TOOL).frameDurationMs)
     }
 
@@ -154,21 +134,80 @@ class ClawdAssetsTest {
     }
 
     @Test
-    fun typingRendererUsesStableLaptopAndAlternatingHandsWithDedicatedColors() {
+    fun typingRendererKeepsLaptopAndBodyAnchoredWhileBothHandsAlternate() {
+        val (first, second) = ClawdSpriteData.TYPING_POSES
         assertEquals(2, ClawdSpriteData.TYPING_POSES.size)
         ClawdSpriteData.TYPING_POSES.forEach { frame ->
             assertEquals(22, frame.size)
             assertTrue(frame.all { it.length == 28 })
             assertTrue(frame.flattenPixels().all { it in ".ODBWHKL" })
-            assertTrue(frame.joinToString().contains('L'))
-            assertTrue(frame.joinToString().contains('K'))
+            assertEquals(8, frame.flattenPixels().count { it == 'H' })
+            assertTrue(frame.flattenPixels().count { it == 'O' || it == 'D' } > 100)
         }
-        assertNotEquals(ClawdSpriteData.TYPING_POSES[0][14], ClawdSpriteData.TYPING_POSES[1][14])
-        assertNotEquals(ClawdSpriteData.TYPING_POSES[0][16], ClawdSpriteData.TYPING_POSES[1][16])
-        assertEquals(ClawdSpriteData.TYPING_POSES[0].drop(18), ClawdSpriteData.TYPING_POSES[1].drop(18))
-        assertEquals(Color(0xFFE89A72), resolvePixelColor('H', false, PetState.WORKING))
-        assertEquals(Color(0xFF74808B), resolvePixelColor('L', false, PetState.WORKING))
-        assertEquals(Color(0xFF454D56), resolvePixelColor('K', false, PetState.WORKING))
+        // The lid is the continuous foreground panel; its silhouette and highlight remain fixed.
+        val lid = first.pixelCoordinates { row, column, pixel -> column >= 10 && row >= 15 && pixel in "KL" }
+        assertTrue(lid.size > 80)
+        assertEquals(lid, second.pixelCoordinates { row, column, pixel -> column >= 10 && row >= 15 && pixel in "KL" })
+        first.indices.forEach { row ->
+            first[row].indices.forEach { column ->
+                if (first[row][column] != second[row][column]) {
+                    assertTrue("Only hands and their outlines may move at $row,$column",
+                        (column in 6..9 && row in 15..19) || (column in 16..19 && row in 11..14))
+                }
+            }
+        }
+        val firstLeft = first.pixelCoordinates { _, column, pixel -> column < 14 && pixel == 'H' }
+        val secondLeft = second.pixelCoordinates { _, column, pixel -> column < 14 && pixel == 'H' }
+        val firstRight = first.pixelCoordinates { _, column, pixel -> column >= 14 && pixel == 'H' }
+        val secondRight = second.pixelCoordinates { _, column, pixel -> column >= 14 && pixel == 'H' }
+        assertEquals(4, firstLeft.size)
+        assertEquals(4, firstRight.size)
+        assertEquals(firstLeft.map { (row, column) -> row + 1 to column }.toSet(), secondLeft)
+        assertEquals(firstRight.map { (row, column) -> row - 1 to column }.toSet(), secondRight)
+        assertEquals(Color(0xFFE18B69), resolvePixelColor('H', false, PetState.WORKING))
+        assertEquals(Color(0xFF686665), resolvePixelColor('L', false, PetState.WORKING))
+        assertEquals(Color(0xFFA6A3A0), resolvePixelColor('K', false, PetState.WORKING))
+    }
+
+    @Test
+    fun typingFaceUsesTwoClosedEyeArcsAndHasNoSmile() {
+        val first = ClawdSpriteData.TYPING_POSES.first()
+        assertEquals(first.take(11), ClawdSpriteData.TYPING_POSES.last().take(11))
+        val facePixels = first.pixelCoordinates { row, _, pixel -> row < 11 && pixel == 'B' }
+        assertEquals("Only the two eye arcs appear above the wrists", 8, facePixels.size)
+        val eyeRows = facePixels.map { it.first }.distinct().sorted()
+        assertEquals(2, eyeRows.size)
+        assertEquals(eyeRows[0] + 1, eyeRows[1])
+        val eyes = facePixels.groupBy { if (it.second < 14) "left" else "right" }
+        assertEquals(2, eyes.size)
+        eyes.values.forEach { eye ->
+            val top = eye.filter { it.first == eyeRows[0] }.map { it.second }.sorted()
+            val bottom = eye.filter { it.first == eyeRows[1] }.map { it.second }.sorted()
+            assertEquals(2, top.size)
+            assertEquals(2, bottom.size)
+            assertEquals(top[0] + 1, top[1])
+            assertEquals(top[0] - 1, bottom[0])
+            assertEquals(top[1] + 1, bottom[1])
+        }
+        assertTrue(first.slice(9..10).none { 'B' in it })
+    }
+
+    @Test
+    fun seatedTypingFramesRemainInsideEveryLandscapeCanvas() {
+        ClawdSpriteData.TYPING_POSES.forEach { frame ->
+            listOf(960f to 320f, 320f to 200f, 280f to 180f).forEach { (width, height) ->
+                val layout = requireNotNull(calculateClawdGridLayout(width, height, frame))
+                assertTrue(layout.pixelSize >= 1)
+                assertTrue(layout.left >= 0 && layout.top >= 0)
+                assertTrue(layout.left + layout.width <= width)
+                assertTrue(layout.top + layout.height <= height)
+                val painted = frame.pixelCoordinates { _, _, pixel -> pixel != '.' }
+                assertTrue(painted.all { (row, column) ->
+                    layout.left + (column + 1) * layout.pixelSize <= width &&
+                        layout.top + (row + 1) * layout.pixelSize <= height
+                })
+            }
+        }
     }
 
     @Test
@@ -203,3 +242,8 @@ class ClawdAssetsTest {
 }
 
 private fun List<String>.flattenPixels(): String = joinToString(separator = "")
+
+private fun List<String>.pixelCoordinates(predicate: (row: Int, column: Int, pixel: Char) -> Boolean): Set<Pair<Int, Int>> =
+    flatMapIndexed { row, pixels ->
+        pixels.mapIndexedNotNull { column, pixel -> if (predicate(row, column, pixel)) row to column else null }
+    }.toSet()

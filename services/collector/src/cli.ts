@@ -26,6 +26,7 @@ interface ParsedArgs {
   socketPath?: string;
   watchCodex?: boolean;
   watchUsage?: boolean;
+  codexMetadataRoot?: string;
   help?: boolean;
 }
 
@@ -36,6 +37,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     if (arg === "--event") parsed.mode = "event";
     else if (arg === "--collector" || arg === "--daemon") parsed.mode = "collector";
     else if (arg === "--socket" || arg === "--socket-path") parsed.socketPath = argv[++index];
+    else if (arg === "--codex-metadata-root") parsed.codexMetadataRoot = argv[++index];
     else if (arg === "--watch-codex") parsed.watchCodex = true;
     else if (arg === "--no-watch-codex") parsed.watchCodex = false;
     else if (arg === "--watch-usage") parsed.watchUsage = true;
@@ -64,6 +66,7 @@ export interface CollectorRuntimeOptions {
   installationId?: string;
   watchCodex?: boolean;
   sessionsRoot?: string;
+  codexMetadataRoot?: string;
   checkpointFile?: string;
   watchUsage?: boolean;
   claudeProjectsRoot?: string;
@@ -120,6 +123,7 @@ export async function createCollectorRuntime(
         (env.CODEX_HOME ? join(env.CODEX_HOME, "sessions") : join(homedir(), ".codex", "sessions"));
       codexWatcher = await startCodexWatcher({
         sessionsRoot,
+        codexMetadataRoot: options.codexMetadataRoot ?? env.COLLECTOR_CODEX_METADATA_DIR,
         checkpointFile:
           options.checkpointFile ?? join(dataDir, "codex-checkpoint.json"),
         emit: async (event) => {
@@ -221,6 +225,7 @@ export function helpText(): string {
     "  --event       Read one Claude hook JSON event from stdin and send it to the local Unix socket.",
     "  --collector   Run the local socket collector and optional WebSocket relay daemon.",
     "  --watch-codex Also watch local Codex session JSONL files (read-only; no Codex config or hooks are changed).",
+    "  --codex-metadata-root PATH Read native Codex titles from this root (default: parent of the configured sessions directory; COLLECTOR_CODEX_METADATA_DIR).",
     "  --no-watch-codex Disable Codex watching even when COLLECTOR_WATCH_CODEX=1.",
     "  --watch-usage  Read local Claude/Codex usage transcripts (read-only; opt-in).",
     "  --no-watch-usage Disable Usage watching even when COLLECTOR_WATCH_USAGE=1.",
@@ -243,7 +248,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return 0;
   }
   if (args.mode === "collector") {
-    await runCollector({ watchCodex: args.watchCodex, watchUsage: args.watchUsage });
+    await runCollector({ watchCodex: args.watchCodex, watchUsage: args.watchUsage, codexMetadataRoot: args.codexMetadataRoot });
     return 0;
   }
   process.stdout.write(`${helpText()}\n`);

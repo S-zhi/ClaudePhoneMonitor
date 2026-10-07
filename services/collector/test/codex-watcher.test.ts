@@ -5,13 +5,29 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { CodexSessionWatcher, startCodexWatcher, type CodexWatcherOptions } from "../src/codex-watcher.ts";
-import { parseCodexLifecycleLine } from "../src/codex-normalizer.ts";
+import { codexEvent, parseCodexLifecycleLine } from "../src/codex-normalizer.ts";
 
 const SESSION = "018f1f5e-7b2c-7abc-8def-0123456789ab";
 const SESSION_2 = "018f1f5e-7b2c-7abc-8def-0123456789b1";
 const PARENT_SESSION = "018f1f5e-7b2c-7abc-8def-0123456789b2";
 const TURN_1 = "018f1f5e-7b2c-7abc-8def-0123456789ac";
 const TURN_2 = "018f1f5e-7b2c-7abc-8def-0123456789ad";
+
+test("Codex titles distinguish sessions using only a short identity hash", () => {
+  const events = [SESSION, SESSION_2].map((id) => {
+    const parsed = parseCodexLifecycleLine(JSON.stringify({ type: "session_meta", payload: {
+      id, title: "PRIVATE_PROMPT", cwd: "/private/project", prompt: "PRIVATE_PROMPT",
+    } }));
+    assert.ok(parsed?.kind === "session_meta");
+    return codexEvent("session_started", parsed.sessionHash, undefined, "2026-10-07T00:00:00.000Z", true);
+  });
+  assert.notEqual(events[0]?.session_title, events[1]?.session_title);
+  for (const event of events) assert.match(event.session_title!, /^Codex [0-9a-f]{6}$/);
+  const wire = JSON.stringify(events);
+  for (const privateValue of [SESSION, SESSION_2, "PRIVATE_PROMPT", "/private/project"]) {
+    assert.equal(wire.includes(privateValue), false);
+  }
+});
 
 function row(type: string, payload?: Record<string, unknown>, ordinal?: number): string {
   return JSON.stringify({
@@ -315,7 +331,7 @@ test("existing history is silently baselined; a later new turn emits session and
   await watcher.pollOnce();
   assert.deepEqual(f.events.map((event) => event.event_type), ["session_started", "task_started"]);
   assert.match(String(f.events[0]?.session_id), /^codex:sess:[0-9a-f]{64}$/);
-  assert.equal(f.events[0]?.session_title, "Codex");
+  assert.equal(f.events[0]?.session_title, `Codex ${createHash("sha256").update(SESSION).digest("hex").slice(-6)}`);
   assert.match(String(f.events[1]?.task_id), /^codex:turn:[0-9a-f]{64}$/);
   assert.equal(JSON.stringify(f.events).includes("PRIVATE_PROMPT"), false);
   await watcher.stop();
