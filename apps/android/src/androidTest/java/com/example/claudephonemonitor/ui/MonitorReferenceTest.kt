@@ -58,7 +58,7 @@ class MonitorReferenceTest {
         compose.onNodeWithContentDescription("Session 1: Working").assertIsDisplayed()
         compose.onNodeWithContentDescription("Session 3: Waiting").assertIsDisplayed()
         compose.onNodeWithContentDescription("Session 4: Idle").assertIsDisplayed()
-        compose.onNodeWithContentDescription("Session 5: Done").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Session 5: DONE").assertIsDisplayed()
         compose.onNodeWithText("Total Running · 08 · Includes subagents").assertIsDisplayed()
         capture("status.png")
     }
@@ -91,7 +91,7 @@ class MonitorReferenceTest {
     @Test fun completedMainTaskUsesFullPosterAndCelebrates() {
         render(completedFixture(titles.first()))
         assertPosterLayout(titles.first())
-        compose.onNodeWithContentDescription("Clawd animation: FINISH").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Clawd animation: DONE").assertIsDisplayed()
         compose.onNodeWithText("仍有 0 项任务运行中").assertDoesNotExist()
         capture("finish-poster.png", "strong-reminder-screenshots")
     }
@@ -99,14 +99,14 @@ class MonitorReferenceTest {
     @Test fun strongPosterKeepsLongChineseNameVisibleOnShortLandscape() {
         render(completedFixture(titles[1]), short = true)
         assertPosterLayout(titles[1])
-        compose.onNodeWithContentDescription("Clawd animation: FINISH").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Clawd animation: DONE").assertIsDisplayed()
         capture("finish-poster-short.png", "strong-reminder-screenshots")
     }
 
     @Test fun strongPosterHandlesLargeFontsWithoutLosingTitleOrName() {
         render(completedFixture(titles[1]), short = true, fontScale = 2f)
         assertPosterLayout(titles[1])
-        compose.onNodeWithContentDescription("Clawd animation: FINISH").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Clawd animation: DONE").assertIsDisplayed()
         capture("finish-poster-large-font.png", "strong-reminder-screenshots")
     }
 

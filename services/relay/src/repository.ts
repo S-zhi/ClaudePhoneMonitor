@@ -386,6 +386,7 @@ function aggregatedState(
       session_kind: record.session_kind ?? "main",
       title: sessionDisplayName(record),
       claude_state: record.claude_state,
+      task_completed: record.claude_state === "idle" && Boolean(record.completion) && (record.terminalTask ?? true),
       ...(record.claude_state === "waiting" && ["permission", "question", "approval", "input"].includes(String(record.waiting_reason))
         ? { waiting_reason: record.waiting_reason } : {}),
       last_activity_sequence: record.last_activity_sequence ?? record.last_sequence,

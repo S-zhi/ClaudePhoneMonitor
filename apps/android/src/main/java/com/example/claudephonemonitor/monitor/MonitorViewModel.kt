@@ -105,7 +105,7 @@ internal object MonitorPresentationReducer {
                 sessionKinds[it] != SessionKind.SUBAGENT
             }
             return MonitorPresentationReduction(current.copy(
-                baseState = resolvedSnapshot?.aggregatePetState() ?: if (
+                baseState = resolvedSnapshot?.aggregatePetState(current.recentSessionCompletion) ?: if (
                     current.baseState == PetState.WORKING && mainWorkingIds?.isEmpty() == true
                 ) PetState.IDLE else current.baseState,
                 lastSequence = incomingSequence ?: current.lastSequence,
@@ -114,14 +114,16 @@ internal object MonitorPresentationReducer {
                 sessionKinds = sessionKinds,
                 activeTasks = observedTasks,
                 workingSessionIds = resolvedSnapshot?.sessions?.filter {
-                    it.sessionKind != SessionKind.SUBAGENT && it.claudeState == ClaudeState.WORKING
+                    it.sessionKind != SessionKind.SUBAGENT &&
+                        it.displayState(current.recentSessionCompletion) == SessionDisplayState.WORKING
                 }?.mapTo(linkedSetOf()) { it.sessionId } ?: mainWorkingIds,
             ), accepted = true)
         }
-        val outcome = event.outcomeState()
+        val outcome = event.outcomeState()?.takeUnless { it == PetState.FINISH && event.sessionId == "unknown" }
+        val validCompletionOutcome = outcome == PetState.FINISH && event.sessionId != null && event.sessionId != "unknown"
         val outcomeIdentity = event.outcomeIdentity()
         val duplicateOutcome = outcomeIdentity != null && outcomeIdentity == current.lastOutcomeIdentity
-        val completion = event.snapshot?.recentCompletion?.takeUnless { sessionKinds[it.sessionId] == SessionKind.SUBAGENT }
+        val completion = event.snapshot?.recentCompletion?.takeUnless { it.sessionId == "unknown" || sessionKinds[it.sessionId] == SessionKind.SUBAGENT }
         val matchingEventCompletion = completion?.takeIf {
             event.type == MonitorEventType.EVENT && event.name == MonitorEventName.TASK_FINISHED &&
                 it.sessionId == event.sessionId && it.sequence == event.sequence &&
@@ -153,11 +155,16 @@ internal object MonitorPresentationReducer {
         val baseState = when {
             event.type == MonitorEventType.DISCONNECTED -> PetState.OFFLINE
             current.baseState == PetState.OFFLINE && event.snapshot == null -> PetState.OFFLINE
-            event.snapshot != null -> resolvedSnapshot!!.aggregatePetState()
-            outcome != null && current.baseState == PetState.WORKING -> PetState.WORKING
+            event.snapshot != null -> resolvedSnapshot!!.aggregatePetState(current.recentSessionCompletion)
+            outcome != null && current.baseState == PetState.WORKING -> if (
+                current.workingSessionIds?.none { it != event.sessionId } == true ||
+                    (current.workingSessionIds == null && current.activeTasks.isNotEmpty() &&
+                        current.activeTasks.keys.none { it != event.sessionId })
+            ) if (validCompletionOutcome) PetState.FINISH else PetState.IDLE else PetState.WORKING
             outcome != null && current.baseState == PetState.OFFLINE -> PetState.OFFLINE
-            outcome != null -> PetState.IDLE
+            outcome != null -> if (validCompletionOutcome) PetState.FINISH else PetState.IDLE
             event.type == MonitorEventType.EVENT && event.name == MonitorEventName.TASK_STARTED -> PetState.WORKING
+            event.type == MonitorEventType.EVENT && event.name == MonitorEventName.SESSION_STARTED && current.baseState != PetState.WORKING -> PetState.IDLE
             event.type == MonitorEventType.EVENT && event.name == MonitorEventName.WAITING && current.baseState != PetState.WORKING -> PetState.WAITING
             else -> current.baseState
         }
@@ -186,7 +193,10 @@ internal object MonitorPresentationReducer {
         }
         val snapshotStatusChanged = event.snapshot != null && current.hasSnapshot &&
             baseState != current.baseState
-        val suppressFinishTail = snapshotConfirmsCurrentFinish || toolFinishedClosesCurrentFinish || matchingFinishTailSnapshot
+        val equalSequenceIdleRefreshDuringFinish = equalSequenceSnapshotRefresh &&
+            baseState == PetState.IDLE && current.changeStatus == PetState.FINISH
+        val suppressFinishTail = snapshotConfirmsCurrentFinish || toolFinishedClosesCurrentFinish ||
+            matchingFinishTailSnapshot || equalSequenceIdleRefreshDuringFinish
         val seenCompletionParts = current.lastCompletionIdentity?.split('|')
         val eventConfirmsPresentedCompletion = event.type == MonitorEventType.EVENT && event.name == MonitorEventName.TASK_FINISHED &&
             (current.recentSessionCompletion?.let {
@@ -236,7 +246,7 @@ internal object MonitorPresentationReducer {
             disconnectChanged -> true
             newSnapshotCompletion != null -> true
             eventStatus != null && !(outcome != null && duplicateOutcome) && !suppressFinishTail && !eventConfirmsPresentedCompletion -> true
-            snapshotStatusChanged && !suppressFinishTail -> true
+            snapshotStatusChanged && baseState != PetState.FINISH && !suppressFinishTail -> true
             else -> false
         }
         // Ordinary changes can update the underlying state without taking over a strong result.
@@ -279,16 +289,18 @@ internal object MonitorPresentationReducer {
 
         var recentSessionCompletion = current.recentSessionCompletion
         var sessionCompletionDeadlineMs = current.sessionCompletionDeadlineMs
-        if (startsChange && changeStatus == PetState.FINISH && newSnapshotCompletion != null) {
+        if (newSnapshotCompletion != null) {
             recentSessionCompletion = newSnapshotCompletion
             sessionCompletionDeadlineMs = nowMs + reminderDuration
-        } else if (startsChange && changeStatus == PetState.FINISH && event.sessionId != null && event.sequence != null) {
+        } else if (validCompletionOutcome && event.sessionId != null && event.sequence != null && !duplicateOutcome && !eventConfirmsPresentedCompletion) {
             recentSessionCompletion = matchingEventCompletion ?: RecentCompletion(
                 sessionId = event.sessionId,
                 taskId = event.taskId,
                 sequence = event.sequence,
                 occurredAt = event.occurredAt.ifBlank { event.updatedAt },
-                displayName = requireNotNull(completionName),
+                displayName = event.sessionTitle?.takeIf { it.isNotBlank() }
+                    ?: event.snapshot?.sessions?.firstOrNull { it.sessionId == event.sessionId }?.title
+                    ?: fallbackSessionTitle(event.sessionId),
                 durationMs = duration,
             )
             sessionCompletionDeadlineMs = nowMs + reminderDuration
@@ -301,13 +313,11 @@ internal object MonitorPresentationReducer {
             event.snapshot?.sessions?.firstOrNull { it.sessionId == result.sessionId }
         }
         val completedSessionRestarted = event.type == MonitorEventType.EVENT &&
-            (event.name == MonitorEventName.TASK_STARTED || event.name == MonitorEventName.SESSION_STARTED) &&
+            (event.name in setOf(MonitorEventName.TASK_STARTED, MonitorEventName.SESSION_STARTED, MonitorEventName.TASK_FAILED, MonitorEventName.WAITING)) &&
             event.sessionId == recentSessionCompletion?.sessionId
-        val snapshotShowsRestart = completedSession != null && completedSession.claudeState != ClaudeState.IDLE &&
-            completedSession.lastActivitySequence > (recentSessionCompletion?.sequence ?: Long.MAX_VALUE)
-        val snapshotRenamedSession = completedSession != null &&
+        val snapshotShowsRestart = completedSession != null && completedSession.taskCompleted != true &&
             completedSession.lastActivitySequence > (recentSessionCompletion?.sequence ?: Long.MAX_VALUE) &&
-            completedSession.title != recentSessionCompletion?.displayName && event.snapshot?.recentCompletion == null
+            event.name != MonitorEventName.SESSION_TITLE_UPDATED
         // A weak finish suppressed by a strong reminder is still seen, so a following snapshot
         // cannot replay it after the strong reminder expires.
         val observedCompletionIdentity = newSnapshotCompletion?.identity ?: event.completionIdentity()
@@ -316,14 +326,15 @@ internal object MonitorPresentationReducer {
             (current.lastCompletionIdentity?.substringAfterLast('|')?.toLongOrNull() ?: -1L) >
             (observedCompletionIdentity?.substringAfterLast('|')?.toLongOrNull() ?: -1L)
         ) current.lastCompletionIdentity else observedCompletionIdentity
-        if (event.type == MonitorEventType.DISCONNECTED || completedSessionRestarted || snapshotShowsRestart || snapshotRenamedSession) {
+        if (completedSessionRestarted || snapshotShowsRestart) {
             recentSessionCompletion = null
             sessionCompletionDeadlineMs = null
         }
 
         val state = current.copy(
             sessionKinds = sessionKinds,
-            baseState = baseState,
+            baseState = if (event.type == MonitorEventType.DISCONNECTED) baseState
+                else resolvedSnapshot?.aggregatePetState(recentSessionCompletion) ?: baseState,
             lastSequence = incomingSequence ?: current.lastSequence,
             lastHandledEventSequence = event.sequence.takeIf { event.type == MonitorEventType.EVENT } ?: current.lastHandledEventSequence,
             hasSnapshot = current.hasSnapshot || event.snapshot != null,
@@ -343,9 +354,17 @@ internal object MonitorPresentationReducer {
                 else -> current.finishTailSequence
             },
             workingSessionIds = event.snapshot?.let { snapshot ->
-                snapshot.sessions?.filter { sessionKinds[it.sessionId] != SessionKind.SUBAGENT && it.claudeState == ClaudeState.WORKING }
+                snapshot.sessions?.filter { sessionKinds[it.sessionId] != SessionKind.SUBAGENT &&
+                    it.displayState(recentSessionCompletion) == SessionDisplayState.WORKING }
                     ?.mapTo(linkedSetOf()) { it.sessionId }
-            } ?: if (event.snapshot != null) null else current.workingSessionIds,
+            } ?: if (event.snapshot != null) null else when {
+                event.type == MonitorEventType.EVENT && event.sessionId != null && event.name == MonitorEventName.TASK_STARTED ->
+                    current.workingSessionIds?.plus(event.sessionId)
+                event.type == MonitorEventType.EVENT && event.sessionId != null &&
+                    event.name in setOf(MonitorEventName.TASK_FINISHED, MonitorEventName.TASK_FAILED, MonitorEventName.SESSION_ENDED) ->
+                    current.workingSessionIds?.minus(event.sessionId)
+                else -> current.workingSessionIds
+            },
             activeTasks = updateTasks(observedTasks, event, sessionKinds, nowMs),
         )
         return MonitorPresentationReduction(state, accepted = true)
@@ -362,7 +381,8 @@ internal object MonitorPresentationReducer {
             changeDeadlineMs = if (changeExpired) null else state.changeDeadlineMs,
             changeStrength = if (changeExpired) ReminderStrength.WEAK else state.changeStrength,
             completionName = if (changeExpired) null else state.completionName,
-            recentSessionCompletion = if (completionExpired) null else state.recentSessionCompletion,
+            // The reminder expires; the confirmed task result remains until newer activity.
+            recentSessionCompletion = state.recentSessionCompletion,
             sessionCompletionDeadlineMs = if (completionExpired) null else state.sessionCompletionDeadlineMs,
         )
     }
@@ -468,7 +488,7 @@ data class MonitorUiState(
     val isConnected: Boolean = false,
     val controlsVisible: Boolean = false,
     val eventCount: Int = 0,
-    /** Identity-bound result retained for the corresponding reminder's duration. */
+    /** Confirmed result retained until newer activity, independently of reminder expiry. */
     val recentSessionCompletion: RecentCompletion? = null,
     /** Local presentation route; it never changes the server-authoritative monitor snapshot. */
     val usagePageVisible: Boolean = false,
@@ -496,7 +516,7 @@ enum class ReminderStrength { STRONG, WEAK }
 private fun MonitorPresentationState.withoutOrdinaryReminder(): MonitorPresentationState = copy(
     changeStatus = null, changeIdentity = null, changeSessionId = null, changeDeadlineMs = null,
     changeStrength = ReminderStrength.WEAK, completionName = null,
-    recentSessionCompletion = null, sessionCompletionDeadlineMs = null,
+    sessionCompletionDeadlineMs = null,
 )
 
 class MonitorViewModel(
@@ -635,7 +655,8 @@ class MonitorViewModel(
             incomingSnapshot?.recentCompletion != null &&
                 presentationState.sessionKinds[incomingSnapshot.recentCompletion.sessionId] != SessionKind.SUBAGENT -> incomingSnapshot.recentCompletion
             presentationEvent.type == MonitorEventType.EVENT && presentationEvent.name == MonitorEventName.TASK_FINISHED &&
-                presentationEvent.sessionId != null && presentationEvent.sequence != null -> RecentCompletion(
+                presentationEvent.sessionId != null && presentationEvent.sessionId != "unknown" &&
+                presentationEvent.sequence != null -> RecentCompletion(
                 sessionId = presentationEvent.sessionId,
                 taskId = presentationEvent.taskId,
                 sequence = presentationEvent.sequence,

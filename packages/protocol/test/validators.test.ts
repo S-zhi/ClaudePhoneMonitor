@@ -421,3 +421,15 @@ test("classification metadata requires a known identity, valid kind and empty pa
   assert.equal(validateSnapshot({ ...snapshot, main_running_count: 0, main_session_count: 0, total_running_count: 3 }).success, true);
   assert.equal(validateSnapshot({ ...snapshot, total_running_count: -1 }).success, false);
 });
+
+
+test("durable task completion is an optional boolean session field", () => {
+  const row = { session_id: "done", title: "Release", claude_state: "idle", last_activity_sequence: 4 };
+  for (const task_completed of [true, false]) {
+    assert.equal(validateSnapshot({ ...snapshot, sessions: [{ ...row, task_completed }] }).success, true);
+  }
+  assert.equal(validateSnapshot({ ...snapshot, sessions: [row] }).success, true);
+  for (const task_completed of ["true", 1, null]) {
+    assert.equal(validateSnapshot({ ...snapshot, sessions: [{ ...row, task_completed }] }).success, false);
+  }
+});

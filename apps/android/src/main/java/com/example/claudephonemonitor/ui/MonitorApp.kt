@@ -773,7 +773,7 @@ private fun StateChangePanel(
                     // Fit the display lettering to the left panel; normal text still follows font scale.
                     LargePixelText(
                         text = userAction?.title ?: status.title,
-                        color = if (status == PetState.FINISH) TerracottaColor else statusColor(status),
+                        color = statusColor(status),
                         pixelSize = 48.dp,
                         gap = 0.8.dp,
                         charSpacing = 1,

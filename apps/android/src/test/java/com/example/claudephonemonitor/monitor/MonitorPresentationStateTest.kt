@@ -294,7 +294,7 @@ class MonitorPresentationStateTest {
                 recentCompletion = RecentCompletion("s", "task", 29, "", "older result"),
             ),
         ), 200L)
-        assertEquals(PetState.IDLE, state.baseState)
+        assertEquals(PetState.FINISH, state.baseState)
         assertEquals(PetState.FINISH, MonitorPresentationReducer.stateChange(state, 200L)?.status)
         assertEquals("older result", state.recentSessionCompletion?.displayName)
     }
@@ -345,7 +345,7 @@ class MonitorPresentationStateTest {
 
             client.emit("""{"type":"event","event_type":"task_finished","session_id":"s-7","task_id":"task-3","session_title":"release prep","sequence":2,"occurred_at":"2026-10-07T01:00:00Z","payload":{"duration_ms":300001}}""")
             runCurrent()
-            assertEquals(PetState.IDLE, vm.uiState.value.petState)
+            assertEquals(PetState.FINISH, vm.uiState.value.petState)
             assertEquals(PetState.FINISH, vm.uiState.value.stateChange?.status)
             assertEquals("release prep", vm.uiState.value.stateChange?.completionName)
             assertEquals(15_000L, vm.uiState.value.stateChange?.remainingMs)
@@ -420,7 +420,7 @@ class MonitorPresentationStateTest {
             client.emit(usageSnapshotJson(sequence = 3, revision = 2))
             runCurrent()
             assertEquals(2L, vm.uiState.value.snapshot.usage?.revision)
-            assertEquals(PetState.IDLE, vm.uiState.value.petState)
+            assertEquals(PetState.FINISH, vm.uiState.value.petState)
             assertEquals(PetState.FINISH, vm.uiState.value.stateChange?.status)
             assertEquals(finishDeadline, monotonicMs + requireNotNull(vm.uiState.value.stateChange).remainingMs)
 

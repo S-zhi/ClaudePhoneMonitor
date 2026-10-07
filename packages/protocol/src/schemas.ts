@@ -287,6 +287,7 @@ export const SNAPSHOT_SCHEMA: JsonSchema = {
             title: safeTitleSchema,
             session_kind: { enum: ["main", "subagent"] },
             claude_state: { enum: ["idle", "working", "waiting"] },
+            task_completed: { type: "boolean" },
             waiting_reason: { enum: ["permission", "question", "approval", "input"] },
             last_activity_sequence: sequenceSchema,
           },

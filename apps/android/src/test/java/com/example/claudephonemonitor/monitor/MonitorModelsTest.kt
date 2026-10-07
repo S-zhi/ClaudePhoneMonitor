@@ -6,6 +6,26 @@ import org.junit.Test
 
 class MonitorModelsTest {
     @Test
+    fun durableSessionResultsRoundTripAndMalformedFlagsStayUnknown() {
+        val rows = listOf(
+            SessionSummary("done", "Done task", ClaudeState.IDLE, 3, taskCompleted = true),
+            SessionSummary("unused", "Unused", ClaudeState.IDLE, 1, taskCompleted = false),
+            SessionSummary("legacy", "Legacy", ClaudeState.IDLE, 2),
+        )
+        val snapshot = MonitorSnapshot(sessions = rows)
+        val decoded = requireNotNull(MonitorEvent.fromWireJson(MonitorEvent(MonitorEventType.SNAPSHOT, snapshot = snapshot).toWireJson()))
+        assertEquals(snapshot, decoded.snapshot)
+        listOf("\"true\"", "1", "null").forEach { flag ->
+            val malformed = requireNotNull(MonitorEvent.fromWireJson(
+                """{"type":"snapshot","sessions":[{"session_id":"a","claude_state":"idle","task_completed":$flag}]}"""))
+            assertEquals(null, malformed.snapshot?.sessions?.single()?.taskCompleted)
+        }
+        assertEquals("DONE", PetState.FINISH.title)
+        assertEquals("DONE", PetState.FINISH.shortLabel)
+        assertEquals(0xFF93BE81, PetState.FINISH.color)
+    }
+
+    @Test
     fun parsesCanonicalSnapshotFields() {
         val event = MonitorEvent.fromWireJson(
             """

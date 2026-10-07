@@ -13,7 +13,7 @@ enum class PetState(
     IDLE("IDLE", "REST", 0xFF8A90A8),
     WORKING("WORKING", "WORK", 0xFF8DE6A8),
     WAITING("WAITING", "WAIT", 0xFFF6C76D),
-    FINISH("FINISH", "DONE", 0xFF8FE1FF),
+    FINISH("DONE", "DONE", 0xFF93BE81),
     ERROR("ERROR", "ERR", 0xFFFF7B85),
     OFFLINE("OFFLINE", "DOWN", 0xFF65718B),
 }
@@ -208,6 +208,8 @@ data class SessionSummary(
     val lastActivitySequence: Long,
     val sessionKind: SessionKind? = null,
     val waitingReason: String? = null,
+    /** Null identifies older Relay versions without a durable task result. */
+    val taskCompleted: Boolean? = null,
 )
 
 data class RecentCompletion(
@@ -369,6 +371,7 @@ data class MonitorEvent(
                         add(
                             SessionSummary(
                                 sessionId = id,
+                                taskCompleted = (item.opt("task_completed") as? Boolean),
                                 sessionKind = item.sessionKindOrNull(),
                                 title = item.optString("title").ifBlank { fallbackSessionTitle(id) },
                                 claudeState = state,
@@ -582,6 +585,7 @@ fun MonitorSnapshot.toJson(): JSONObject = JSONObject().apply {
                     session.sessionKind?.let { put("session_kind", it.wireValue) }
                     put("title", session.title)
                     put("claude_state", session.claudeState.wireValue)
+                    session.taskCompleted?.let { put("task_completed", it) }
                     put("last_activity_sequence", session.lastActivitySequence)
                     session.waitingReason?.takeIf { session.claudeState == ClaudeState.WAITING }?.let { put("waiting_reason", it) }
                 })
