@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { EventType, NormalizedHookEvent } from "./types.js";
+import type { EventType, NormalizedHookEvent, SessionKind } from "./types.js";
 import { safeSessionTitle } from "./normalize.js";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -19,7 +19,7 @@ const KNOWN_NON_LIFECYCLE_EVENTS = new Set([
 export type IgnoredCodexReason = "known_non_lifecycle" | "unknown_shape" | "unsafe_identity";
 
 export type CodexLifecycleRecord =
-  | { kind: "session_meta"; sessionHash: string }
+  | { kind: "session_meta"; sessionHash: string; sessionKind: SessionKind }
   | { kind: "task_started"; sessionHash: string; turnHash: string; occurredAt: string; ordinal?: number }
   | { kind: "task_complete"; sessionHash: string; turnHash: string; occurredAt: string; errorKind: "none" | "server_overloaded" | "unknown"; ordinal?: number }
   | { kind: "turn_aborted"; sessionHash: string; turnHash?: string; occurredAt: string; ordinal?: number }
@@ -85,7 +85,16 @@ export function parseCodexLifecycleLine(line: string, now = Date.now(), currentS
     );
     const rawId = hasThreadId ? payload?.id : (hasParentThread ? undefined : payload?.session_id);
     const sessionHash = uuidHash(rawId, SESSION_ID);
-    return sessionHash ? { kind: "session_meta", sessionHash } : { kind: "ignored", reason: "unsafe_identity", invalidSessionMeta: true };
+    const sessionKind: SessionKind = payload?.thread_source === "subagent" ||
+      (typeof source?.subagent === "string" && ["review", "compact", "other"].includes(source.subagent)) ||
+      (subagentSource !== undefined && (
+        record(subagentSource.thread_spawn) !== undefined ||
+        // Codex also serializes its Other(String) subagent variant as an
+        // externally tagged object, including guardian-review threads.
+        (typeof subagentSource.other === "string" && subagentSource.other.length > 0)
+      ))
+      ? "subagent" : "main";
+    return sessionHash ? { kind: "session_meta", sessionHash, sessionKind } : { kind: "ignored", reason: "unsafe_identity", invalidSessionMeta: true };
   }
   if (!KNOWN_TOP_LEVEL_TYPES.has(row.type)) return { kind: "ignored", reason: "unknown_shape" };
   if (row.type !== "event_msg") return { kind: "ignored", reason: "known_non_lifecycle" };
@@ -138,9 +147,11 @@ export function codexEvent(
   occurred_at: string,
   sessionStarted = false,
   nativeTitle?: string,
+  sessionKind?: SessionKind,
 ): NormalizedHookEvent {
   return {
     event_type,
+    ...(sessionKind ? { session_kind: sessionKind } : {}),
     session_id: codexSessionId(sessionHash),
     ...(turnHash ? { task_id: codexTaskId(turnHash) } : {}),
     ...(["session_started", "task_started", "task_finished", "session_title_updated"].includes(event_type)

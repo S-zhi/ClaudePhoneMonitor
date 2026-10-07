@@ -58,8 +58,11 @@ enum class MonitorEventName(val wireValue: String) {
     SESSION_STARTED("session_started"),
     SESSION_TITLE_UPDATED("session_title_updated"),
     SESSION_ENDED("session_ended"),
+    SESSION_CLASSIFICATION_UPDATED("session_classification_updated"),
     UNKNOWN("unknown"),
 }
+
+enum class SessionKind(val wireValue: String) { MAIN("main"), SUBAGENT("subagent") }
 
 data class MonitorSnapshot(
     val installationId: String = "demo-installation",
@@ -70,6 +73,9 @@ data class MonitorSnapshot(
     val updatedAt: String = "",
     /** Present only on new Relay snapshots. Its presence means the list is authoritative. */
     val sessions: List<SessionSummary>? = null,
+    val mainRunningCount: Int? = null,
+    val mainSessionCount: Int? = null,
+    val totalRunningCount: Int? = null,
     val runningCount: Int? = null,
     val sessionCount: Int? = null,
     val recentCompletion: RecentCompletion? = null,
@@ -133,6 +139,7 @@ data class SessionSummary(
     val title: String,
     val claudeState: ClaudeState,
     val lastActivitySequence: Long,
+    val sessionKind: SessionKind? = null,
 )
 
 data class RecentCompletion(
@@ -159,6 +166,7 @@ data class MonitorEvent(
     val taskId: String? = null,
     val sessionTitle: String? = null,
     val occurredAt: String = "",
+    val sessionKind: SessionKind? = null,
 ) {
     fun toWireJson(): String = JSONObject().apply {
         put("type", type.wireValue)
@@ -170,6 +178,7 @@ data class MonitorEvent(
         if (updatedAt.isNotBlank()) put("updated_at", updatedAt)
         probeLatencyMs?.let { put("latency_ms", it) }
         sessionId?.let { put("session_id", it) }
+        sessionKind?.let { put("session_kind", it.wireValue) }
         taskId?.let { put("task_id", it) }
         sessionTitle?.let { put("session_title", it) }
         if (occurredAt.isNotBlank()) put("occurred_at", occurredAt)
@@ -204,7 +213,10 @@ data class MonitorEvent(
             } else {
                 type
             }
+            val sessionKind = root.sessionKindOrNull()
+            if (eventName == MonitorEventName.SESSION_CLASSIFICATION_UPDATED && sessionKind == null) return null
             MonitorEvent(
+                sessionKind = sessionKind,
                 type = resolvedType,
                 name = eventName,
                 snapshot = snapshot,
@@ -247,6 +259,7 @@ data class MonitorEvent(
                         add(
                             SessionSummary(
                                 sessionId = id,
+                                sessionKind = item.sessionKindOrNull(),
                                 title = item.optString("title").ifBlank { fallbackSessionTitle(id) },
                                 claudeState = state,
                                 lastActivitySequence = item.longOrNull("last_activity_sequence") ?: 0L,
@@ -255,6 +268,9 @@ data class MonitorEvent(
                     }
                 }
             },
+            mainRunningCount = json.intOrNull("main_running_count"),
+            mainSessionCount = json.intOrNull("main_session_count"),
+            totalRunningCount = json.intOrNull("total_running_count"),
             runningCount = json.intOrNull("running_count"),
             sessionCount = json.intOrNull("session_count"),
             recentCompletion = json.optJSONObject("recent_completion")?.let { completion ->
@@ -363,6 +379,7 @@ fun MonitorSnapshot.toJson(): JSONObject = JSONObject().apply {
             rows.forEach { session ->
                 put(JSONObject().apply {
                     put("session_id", session.sessionId)
+                    session.sessionKind?.let { put("session_kind", it.wireValue) }
                     put("title", session.title)
                     put("claude_state", session.claudeState.wireValue)
                     put("last_activity_sequence", session.lastActivitySequence)
@@ -370,6 +387,9 @@ fun MonitorSnapshot.toJson(): JSONObject = JSONObject().apply {
             }
         })
     }
+    mainRunningCount?.let { put("main_running_count", it) }
+    mainSessionCount?.let { put("main_session_count", it) }
+    totalRunningCount?.let { put("total_running_count", it) }
     runningCount?.let { put("running_count", it) }
     sessionCount?.let { put("session_count", it) }
     recentCompletion?.let { completion ->
@@ -503,6 +523,7 @@ fun MonitorEventName.toPetState(): PetState = when (this) {
     MonitorEventName.TOOL_FINISHED -> PetState.WORKING
     MonitorEventName.SESSION_STARTED,
     MonitorEventName.SESSION_TITLE_UPDATED,
+    MonitorEventName.SESSION_CLASSIFICATION_UPDATED,
     MonitorEventName.SESSION_ENDED,
     MonitorEventName.UNKNOWN -> PetState.IDLE
 }
@@ -515,3 +536,6 @@ fun String?.toActivityVariation(): ActivityVariation = when (this?.lowercase(Loc
     "alert", "error", "failed", "task_failed", "tool_failed" -> ActivityVariation.ALERT
     else -> ActivityVariation.BREATH
 }
+
+private fun JSONObject.sessionKindOrNull(): SessionKind? =
+    SessionKind.entries.firstOrNull { it.wireValue == stringOrNull("session_kind") }

@@ -820,3 +820,98 @@ test("SQLite migration rebuilds per-session state from legacy event storage", ()
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("subagent classification separates main presentation from independent total thread counts", () => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-subagent-counts-"));
+  const path = join(directory, "relay.sqlite");
+  const now = "2026-10-02T00:00:00.000Z";
+  let sqlite = new SqliteRelayRepository(path);
+  const memory = new InMemoryRelayRepository();
+  try {
+    for (const repository of [memory, sqlite]) {
+      let sequence = 0;
+      const record = (overrides: Partial<EventEnvelope>) => {
+        sequence++;
+        return repository.recordEvent(event({ event_id: `classification-${sequence}`, sequence,
+          event_type: "task_started", payload: {}, ...overrides }), now);
+      };
+      record({ session_id: "parent-a" });
+      record({ session_id: "parent-b" });
+      const mainActivity = repository.getInstallationState("install-1", now)?.activity;
+      for (let i = 0; i < 3; i++) record({ session_id: `child-${i}`, session_kind: "subagent", task_id: "shared-parent-task" });
+      let state = repository.getInstallationState("install-1", now)!;
+      assert.equal(state.main_running_count, 2);
+      assert.equal(state.total_running_count, 5);
+      assert.equal(state.running_count, 2);
+      assert.equal(state.main_session_count, 2);
+      assert.deepEqual(state.sessions?.map((item) => item.session_id), ["parent-b", "parent-a"]);
+      assert.deepEqual(state.activity, mainActivity);
+      const finish = record({ session_id: "child-0", event_type: "task_finished", task_id: "shared-parent-task" });
+      assert.equal(finish.stored.event.session_kind, "subagent");
+      state = repository.getInstallationState("install-1", now)!;
+      assert.equal(state.total_running_count, 4);
+      assert.equal(state.main_running_count, 2);
+      assert.equal(state.recent_completion, undefined);
+      assert.deepEqual(state.activity, mainActivity);
+      assert.equal(repository.recordEvent(finish.stored.event, now).duplicate, true);
+      record({ session_id: "child-1", event_type: "waiting" });
+      record({ session_id: "child-2", event_type: "task_failed" });
+      state = repository.getInstallationState("install-1", now)!;
+      assert.equal(state.claude_state, "working");
+      assert.deepEqual(state.activity, mainActivity);
+      for (let i = 0; i < 6; i++) record({ session_id: `main-${i}` });
+      state = repository.getInstallationState("install-1", now)!;
+      assert.equal(state.sessions?.length, 5);
+      assert.equal(state.main_running_count, 8);
+      assert.equal(state.total_running_count, 8);
+      assert.equal(state.main_session_count, 8);
+      assert.equal(repository.getInstallationState("install-1", "2026-10-02T02:00:00.000Z")?.total_running_count, 0);
+    }
+    sqlite.close();
+    sqlite = new SqliteRelayRepository(path);
+    assert.equal(sqlite.getInstallationState("install-1", now)?.main_running_count, 8);
+    assert.equal(sqlite.listEventsAfter("install-1", 0).find((item) => item.event.session_id === "child-0")?.event.session_kind, "subagent");
+  } finally {
+    sqlite.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("late classification hides prior completion and replay without changing activity times or TTL", () => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-classification-metadata-"));
+  const now = "2026-10-02T00:00:00.000Z";
+  const sqlite = new SqliteRelayRepository(join(directory, "relay.sqlite"));
+  try {
+    for (const repository of [new InMemoryRelayRepository(), sqlite]) {
+      repository.recordEvent(event({ event_id: "pre-kind", event_type: "task_started", payload: {} }), now);
+      repository.recordEvent(event({ event_id: "pre-kind-finish", event_type: "task_finished", sequence: 2, payload: {} }), now);
+      const before = repository.getInstallationState("install-1", now)!;
+      assert.ok(before.recent_completion);
+      repository.recordEvent(event({ event_id: "kind", event_type: "session_classification_updated", sequence: 3,
+        session_kind: "subagent", occurred_at: "2026-10-02T01:59:59.000Z", payload: {} }), now);
+      const after = repository.getInstallationState("install-1", now)!;
+      assert.equal(after.main_session_count, 0);
+      assert.equal(after.recent_completion, undefined);
+      assert.equal(after.activity, undefined);
+      assert.equal(after.updated_at, before.updated_at);
+      assert.equal(after.last_sequence, 3);
+      assert.ok(repository.listEventsAfter("install-1", 0).every((item) => item.event.session_kind === "subagent"));
+      // Metadata must not keep a working thread alive past its original activity TTL.
+      repository.recordEvent(event({ event_id: "other-start", session_id: "other", event_type: "task_started", sequence: 4, payload: {} }), now);
+      repository.recordEvent(event({ event_id: "other-kind", session_id: "other", event_type: "session_classification_updated", sequence: 5,
+        session_kind: "subagent", occurred_at: "2026-10-02T01:59:59.000Z", payload: {} }), now);
+      assert.equal(repository.getInstallationState("install-1", now)?.total_running_count, 1);
+      assert.equal(repository.getInstallationState("install-1", now)?.main_running_count, 0);
+      assert.equal(repository.getInstallationState("install-1", "2026-10-02T02:00:00.000Z")?.total_running_count, 0);
+      repository.recordEvent(event({ event_id: "kind-before-lifecycle", session_id: "future", event_type: "session_classification_updated", sequence: 6,
+        session_kind: "subagent", payload: {} }), now);
+      assert.equal(repository.getInstallationState("install-1", now)?.total_running_count, 1);
+      repository.recordEvent(event({ event_id: "future-start", session_id: "future", event_type: "task_started", sequence: 7, payload: {} }), now);
+      assert.equal(repository.getInstallationState("install-1", now)?.total_running_count, 2);
+      assert.equal(repository.getInstallationState("install-1", now)?.main_running_count, 0);
+    }
+  } finally {
+    sqlite.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

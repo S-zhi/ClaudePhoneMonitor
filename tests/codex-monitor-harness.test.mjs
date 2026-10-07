@@ -249,3 +249,140 @@ for (const storageKind of ["memory", "sqlite"]) {
     await runSharedDaemonRelayCase(t, storageKind);
   });
 }
+
+for (const storageKind of ["memory", "sqlite"]) {
+  test(`real Codex subagent collection keeps main presentation isolated through ${storageKind} Relay`, { timeout: 30_000 }, async () => {
+    const root = await mkdtemp(join(tmpdir(), `subagent-monitor-${storageKind}-`));
+    const sessionsRoot = join(root, "sessions");
+    const dataDir = join(root, "collector-data");
+    const installationId = `subagent-smoke-${randomUUID()}`;
+    await mkdir(sessionsRoot, { recursive: true });
+    const config = loadConfig({}, {
+      host: "127.0.0.1", port: 0, authMode: "development",
+      ...(storageKind === "sqlite" ? { databasePath: join(root, "relay.sqlite") } : {}),
+      staleAfterMs: 60_000, offlineAfterMs: 120_000,
+      bookkeepingIntervalMs: 60_000, heartbeatIntervalMs: 60_000,
+    });
+    const logger = new JsonLogger({ sink: () => undefined });
+    let relay;
+    let server;
+    let runtime;
+    let phone;
+    const deliveredEvents = [];
+    const deliveredSnapshots = [];
+    const mainIds = [randomUUID(), randomUUID()];
+    const childIds = [randomUUID(), randomUUID(), randomUUID()];
+    const turns = new Map();
+    const wireId = (id) => `codex:sess:${sha(id)}`;
+    async function startServices() {
+      relay = new Relay({ config, logger });
+      server = createRelayServer({ relay, logger });
+      await server.app.listen({ host: config.host, port: config.port });
+      const port = server.app.server.address().port;
+      phone = new WebSocket(`ws://127.0.0.1:${port}/ws/android?installation_id=${installationId}&client_id=subagent-phone`);
+      phone.addEventListener("message", (message) => {
+        const value = JSON.parse(String(message.data));
+        if (value.type === "event") deliveredEvents.push(value);
+        const snapshot = value.type === "hello_ack" ? value.snapshot : value;
+        if (snapshot?.type === "snapshot") deliveredSnapshots.push(snapshot);
+      });
+      await waitFor(() => phone.readyState === WebSocket.OPEN);
+      runtime = await createCollectorRuntime({
+        dataDir, socketPath: join(root, "collector.sock"),
+        relayUrl: `ws://127.0.0.1:${port}/ws/collector`, installationId,
+        watchCodex: true, sessionsRoot, checkpointFile: join(dataDir, "codex-checkpoint.json"),
+      });
+    }
+    async function stopServices() {
+      await runtime?.stop();
+      runtime = undefined;
+      if (phone && phone.readyState < WebSocket.CLOSING) {
+        const closed = new Promise((resolve) => phone.addEventListener("close", resolve, { once: true }));
+        phone.close();
+        await closed;
+      }
+      if (server) await waitFor(() => relay.stats().active_connections === 0);
+      await server?.app.close();
+      server = undefined;
+    }
+    async function writeThread(id, metadata) {
+      const turn = randomUUID();
+      turns.set(id, turn);
+      await writeFile(join(sessionsRoot, `rollout-${id}.jsonl`), [
+        rolloutRow("session_meta", { id, session_id: mainIds[0], ...metadata }, 0),
+        rolloutRow("event_msg", { type: "task_started", turn_id: turn }, 1),
+      ].join("\n") + "\n");
+    }
+    async function finishThread(id) {
+      await appendFile(join(sessionsRoot, `rollout-${id}.jsonl`), rolloutRow("event_msg", {
+        type: "task_complete", turn_id: turns.get(id), error: null,
+      }, 2) + "\n");
+      await waitFor(() => relay.repository.listEventsAfter(installationId, -1).some((row) =>
+        row.event.event_type === "task_finished" && row.event.session_id === wireId(id)));
+    }
+    try {
+      await startServices();
+      await writeThread(mainIds[0], { source: "cli" });
+      // An ordinary derived session is still main when only a parent is present.
+      await writeThread(mainIds[1], { parent_thread_id: mainIds[0], source: "unknown-format" });
+      await writeThread(childIds[0], { thread_source: "subagent", parent_thread_id: mainIds[0] });
+      await writeThread(childIds[1], { source: { subagent: { thread_spawn: { parent_thread_id: mainIds[0] } } } });
+      await writeThread(childIds[2], { source: { subagent: { other: "guardian_review" } } });
+      await waitFor(() => relay.snapshot(installationId).total_running_count === 5);
+      const first = relay.snapshot(installationId);
+      assert.equal(first.main_running_count, 2);
+      assert.equal(first.main_session_count, 2);
+      assert.deepEqual(new Set(first.sessions.map((session) => session.session_id)), new Set(mainIds.map(wireId)));
+      assert.equal(first.claude_state, "working");
+
+      await finishThread(mainIds[0]);
+      const mainCompleted = relay.snapshot(installationId);
+      assert.equal(mainCompleted.main_running_count, 1);
+      assert.equal(mainCompleted.total_running_count, 4);
+      assert.equal(mainCompleted.recent_completion.session_id, wireId(mainIds[0]));
+      const activity = mainCompleted.activity;
+      await finishThread(childIds[0]);
+      const childCompleted = relay.snapshot(installationId);
+      assert.equal(childCompleted.main_running_count, 1);
+      assert.equal(childCompleted.total_running_count, 3);
+      assert.deepEqual(childCompleted.recent_completion, mainCompleted.recent_completion);
+      assert.deepEqual(childCompleted.activity, activity);
+
+      await finishThread(mainIds[1]);
+      const childrenOnly = relay.snapshot(installationId);
+      assert.equal(childrenOnly.main_running_count, 0);
+      assert.equal(childrenOnly.total_running_count, 2);
+      assert.equal(childrenOnly.claude_state, "idle");
+      for (let index = 0; index < 6; index++) {
+        await writeThread(randomUUID(), { thread_source: "subagent", parent_thread_id: mainIds[0] });
+      }
+      await waitFor(() => relay.snapshot(installationId).total_running_count === 8);
+      assert.equal(relay.snapshot(installationId).sessions.length, 2);
+      assert.equal(relay.snapshot(installationId).main_session_count, 2);
+      assert.equal(relay.snapshot(installationId).claude_state, "idle");
+      await waitFor(() => deliveredEvents.some((event) => event.event_type === "task_finished" && event.session_id === wireId(childIds[0])));
+      const childFinish = deliveredEvents.find((event) => event.event_type === "task_finished" && event.session_id === wireId(childIds[0]));
+      assert.equal(childFinish.session_kind, "subagent");
+      assert.ok(deliveredSnapshots.some((snapshot) => snapshot.main_running_count === 0 && snapshot.total_running_count === 8));
+      const beforeRestart = relay.repository.listEventsAfter(installationId, -1);
+      assert.deepEqual(beforeRestart.map((row) => row.event.sequence), beforeRestart.map((_, index) => index + 1));
+      const finishes = beforeRestart.filter((row) => row.event.event_type === "task_finished").length;
+      if (storageKind === "sqlite") {
+        await stopServices();
+        await startServices();
+        await waitFor(() => relay.snapshot(installationId).total_running_count === 8);
+        const restored = relay.snapshot(installationId);
+        assert.equal(restored.main_running_count, 0);
+        // Existing restart reconciliation neutrally closes already-completed sessions.
+        assert.equal(restored.main_session_count, 0);
+        assert.equal(restored.claude_state, "idle");
+        assert.equal(restored.sessions.length, 0);
+        assert.equal(relay.repository.listEventsAfter(installationId, -1)
+          .filter((row) => row.event.event_type === "task_finished").length, finishes);
+      }
+    } finally {
+      await stopServices();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}

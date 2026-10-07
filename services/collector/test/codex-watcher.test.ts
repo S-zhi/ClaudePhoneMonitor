@@ -511,3 +511,164 @@ test("symlinked rollout and symlinked sessions root are rejected", async (t) => 
   await fs.symlink(f.sessionsRoot, linkRoot);
   await assert.rejects(startCodexWatcher({ ...f.options, sessionsRoot: linkRoot }), { code: "codex_watch_start_failed" });
 });
+
+test("Codex classification uses explicit source and never parent, title or IDs", () => {
+  for (const extra of [
+    { thread_source: "subagent" },
+    { source: { subagent: { thread_spawn: { parent_thread_id: PARENT_SESSION } } } },
+    { source: { subagent: "review" } },
+    { source: { subagent: { other: "guardian_review" } } },
+  ]) {
+    const parsed = parseCodexLifecycleLine(row("session_meta", { id: SESSION, ...extra }));
+    assert.ok(parsed?.kind === "session_meta");
+    assert.equal(parsed.sessionKind, "subagent");
+  }
+  for (const extra of [
+    { parent_thread_id: PARENT_SESSION }, { thread_source: "unknown" },
+    { title: "subagent" }, { source: { subagent: null } },
+    { source: { subagent: 123 } }, { source: { subagent: { future: true } } },
+    { source: { subagent: "future" } }, {},
+    { source: { subagent: { other: 123 } } },
+    { source: { subagent: { other: "" } } },
+  ]) {
+    const parsed = parseCodexLifecycleLine(row("session_meta", { id: SESSION, ...extra }));
+    assert.ok(parsed?.kind === "session_meta");
+    assert.equal(parsed.sessionKind, "main");
+  }
+});
+
+test("guardian other variant corrects a cached main classification without replaying completion", async (t) => {
+  const f = await fixture(t);
+  const file = logFile(f.sessionsRoot);
+  await fs.writeFile(file, `${row("session_meta", { id: SESSION, source: { subagent: { other: "guardian_review" } } })}\n${start()}\n`);
+  const first = new CodexSessionWatcher(f.options);
+  await first.start();
+  await first.stop();
+  const saved = JSON.parse(await fs.readFile(f.checkpointFile, "utf8"));
+  // Emulate the previous parser's incorrect persisted classification.
+  for (const state of saved.files) state.sessionKind = "main";
+  await fs.writeFile(f.checkpointFile, JSON.stringify(saved));
+  await fs.appendFile(file, `${complete(TURN_1, null)}\n`);
+  f.events.length = 0;
+  const restarted = new CodexSessionWatcher(f.options);
+  await restarted.start();
+  assert.equal(f.events.filter((event) => event.event_type === "session_classification_updated").length, 1);
+  assert.equal(f.events.find((event) => event.event_type === "session_classification_updated")?.session_kind, "subagent");
+  assert.equal(f.events.some((event) => event.event_type === "task_finished"), false);
+  assert.equal(f.events.some((event) => event.event_type === "task_started"), false);
+  await restarted.stop();
+  assert.equal(JSON.parse(await fs.readFile(f.checkpointFile, "utf8")).files[0].sessionKind, "subagent");
+});
+
+test("old checkpoint reclassifies from bounded header without replaying completion", async (t) => {
+  const f = await fixture(t);
+  const file = logFile(f.sessionsRoot);
+  await fs.writeFile(file, `${row("session_meta", { id: SESSION, thread_source: "subagent", parent_thread_id: PARENT_SESSION })}\n${start()}\n`);
+  const first = new CodexSessionWatcher(f.options);
+  await first.start();
+  await first.stop();
+  assert.ok(f.events.length > 0);
+  assert.ok(f.events.every((event) => event.session_kind === "subagent"));
+  const saved = JSON.parse(await fs.readFile(f.checkpointFile, "utf8"));
+  for (const state of saved.files) delete state.sessionKind;
+  await fs.writeFile(f.checkpointFile, JSON.stringify(saved));
+  // A completion that occurred while the collector was stopped remains historical.
+  await fs.appendFile(file, `${complete(TURN_1, null)}\n`);
+  f.events.length = 0;
+  const restarted = new CodexSessionWatcher(f.options);
+  await restarted.start();
+  assert.equal(f.events.filter((event) => event.event_type === "session_classification_updated").length, 1);
+  assert.equal(f.events.some((event) => event.event_type === "task_finished"), false);
+  assert.equal(f.events.some((event) => event.event_type === "task_started"), false);
+  assert.ok(f.events.every((event) => event.session_kind === "subagent"));
+  await restarted.stop();
+  const migrated = JSON.parse(await fs.readFile(f.checkpointFile, "utf8"));
+  assert.equal(migrated.files[0].sessionKind, "subagent");
+  assert.equal(JSON.stringify(migrated).includes(PARENT_SESSION), false);
+});
+
+test("known subagent classification survives restart when source metadata becomes unknown", async (t) => {
+  const f = await fixture(t);
+  const file = logFile(f.sessionsRoot);
+  const childMeta = row("session_meta", { id: SESSION, thread_source: "subagent" });
+  await fs.writeFile(file, `${childMeta}\n${start()}\n`);
+  const first = new CodexSessionWatcher(f.options);
+  await first.start();
+  await first.stop();
+  // Keep inode, size and cursor identical while simulating an older metadata shape.
+  const mainMeta = row("session_meta", { id: SESSION, thread_source: "unknown " });
+  assert.equal(mainMeta.length, childMeta.length);
+  const handle = await fs.open(file, "r+");
+  await handle.write(mainMeta, 0, "utf8");
+  await handle.close();
+  f.events.length = 0;
+  const restarted = new CodexSessionWatcher(f.options);
+  await restarted.start();
+  assert.ok(f.events.every((event) => event.session_kind === "subagent"));
+  assert.equal(f.events.some((event) => event.event_type === "session_classification_updated"), false);
+  await fs.appendFile(file, `${complete(TURN_1, null)}\n`);
+  await restarted.pollOnce();
+  assert.equal(f.events.find((event) => event.event_type === "task_finished")?.session_kind, "subagent");
+  await restarted.stop();
+});
+
+test("old idle checkpoint corrects retained classification without lifecycle replay", async (t) => {
+  const f = await fixture(t);
+  const file = logFile(f.sessionsRoot);
+  await fs.writeFile(file, `${row("session_meta", { id: SESSION, source: { subagent: "review" } })}\n${start()}\n${complete(TURN_1, null)}\n`);
+  const first = new CodexSessionWatcher(f.options);
+  await first.start();
+  await first.stop();
+  assert.deepEqual(f.events, []);
+  const saved = JSON.parse(await fs.readFile(f.checkpointFile, "utf8"));
+  for (const state of saved.files) delete state.sessionKind;
+  await fs.writeFile(f.checkpointFile, JSON.stringify(saved));
+  const restarted = new CodexSessionWatcher(f.options);
+  await restarted.start();
+  assert.deepEqual(f.events.map((event) => event.event_type), ["session_classification_updated"]);
+  assert.equal(f.events[0]?.session_kind, "subagent");
+  await restarted.stop();
+  f.events.length = 0;
+  const restored = new CodexSessionWatcher(f.options);
+  await restored.start();
+  assert.deepEqual(f.events, []);
+  await restored.stop();
+});
+
+test("explicit child metadata in a silent copy corrects the reported peer once and retries safely", async (t) => {
+  const f = await fixture(t);
+  const active = logFile(f.sessionsRoot, "rollout-active.jsonl");
+  await fs.writeFile(active, `${meta()}\n${start()}\n`);
+  let rejectCorrection = false;
+  const watcher = new CodexSessionWatcher({ ...f.options, emit: async (event) => {
+    if (rejectCorrection && event.event_type === "session_classification_updated") {
+      rejectCorrection = false;
+      throw new Error("temporary sink unavailable");
+    }
+    f.events.push(event as unknown as Record<string, unknown>);
+  } });
+  await watcher.start();
+  await fs.appendFile(active, `${start(TURN_2, 4)}\n`);
+  await watcher.pollOnce();
+  assert.ok(f.events.every((event) => event.session_kind === "main"));
+  f.events.length = 0;
+  const copy = logFile(f.sessionsRoot, "rollout-child-copy.jsonl");
+  await fs.writeFile(copy, `${row("session_meta", { id: SESSION, thread_source: "subagent" })}\n${start()}\n${complete(TURN_1, null)}\n`);
+  const historicalTime = new Date(Date.now() - 60_000);
+  await fs.utimes(copy, historicalTime, historicalTime);
+  rejectCorrection = true;
+  await watcher.pollOnce();
+  assert.deepEqual(f.events, []);
+  await watcher.pollOnce();
+  assert.deepEqual(f.events.map((event) => event.event_type), ["session_classification_updated"]);
+  assert.equal(f.events[0]?.session_kind, "subagent");
+  await watcher.pollOnce();
+  assert.equal(f.events.length, 1);
+  // Completion on the live stream still arrives, carrying the corrected classification.
+  await fs.appendFile(active, `${complete(TURN_2, null, 5)}\n`);
+  await watcher.pollOnce();
+  assert.equal(f.events.filter((event) => event.event_type === "session_classification_updated").length, 1);
+  assert.equal(f.events.filter((event) => event.event_type === "task_finished").length, 1);
+  assert.equal(f.events.find((event) => event.event_type === "task_finished")?.session_kind, "subagent");
+  await watcher.stop();
+});

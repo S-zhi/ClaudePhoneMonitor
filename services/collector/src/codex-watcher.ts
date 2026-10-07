@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { codexEvent, parseCodexLifecycleLine, type CodexLifecycleRecord } from "./codex-normalizer.js";
 import { CodexTitleReader } from "./codex-titles.js";
-import type { EventType, NormalizedHookEvent } from "./types.js";
+import type { EventType, NormalizedHookEvent, SessionKind } from "./types.js";
 
 const CHECKPOINT_VERSION = 1;
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
@@ -63,6 +63,7 @@ interface PersistedFile {
   baselineUntilOffset: number;
   discardingLongLine: boolean;
   sessionHash?: string;
+  sessionKind?: SessionKind;
   currentTurnHash?: string;
   terminalTurnHash?: string;
   active: boolean;
@@ -109,6 +110,7 @@ function checkpointFileState(value: unknown): value is PersistedFile {
     Number.isFinite(v.observedMtime) && (v.sessionHash === undefined || /^[0-9a-f]{64}$/.test(v.sessionHash)) &&
     (v.currentTurnHash === undefined || /^[0-9a-f]{64}$/.test(v.currentTurnHash)) &&
     (v.terminalTurnHash === undefined || /^[0-9a-f]{64}$/.test(v.terminalTurnHash)) &&
+    (v.sessionKind === undefined || v.sessionKind === "main" || v.sessionKind === "subagent") &&
     (v.lastOrdinal === undefined || (Number.isSafeInteger(v.lastOrdinal) && v.lastOrdinal >= 0));
 }
 
@@ -241,6 +243,7 @@ export class CodexSessionWatcher {
         pathHash: state.pathHash, dev: state.dev, ino: state.ino, offset: state.offset,
         baseline: state.baseline, baselineUntilOffset: state.baselineUntilOffset,
         discardingLongLine: state.discardingLongLine, sessionHash: state.sessionHash,
+        sessionKind: state.sessionKind,
         currentTurnHash: state.currentTurnHash, terminalTurnHash: state.terminalTurnHash,
         active: state.active, sessionOpen: state.sessionOpen, reportedSession: state.reportedSession,
         identityInvalid: state.identityInvalid, lastOrdinal: state.lastOrdinal,
@@ -348,6 +351,7 @@ export class CodexSessionWatcher {
       state.seenThisScan = true;
 
       if (state.needsRestartBaseline) {
+        await this.recheckSessionClassification(state);
         state.needsRestartBaseline = false;
         state.baseline = true;
         state.baselineUntilOffset = file.size;
@@ -546,6 +550,7 @@ export class CodexSessionWatcher {
     if (parsed.kind === "session_meta") {
       const wasKnownSession = this.knownSessionHashes.has(parsed.sessionHash);
       state.sessionHash = parsed.sessionHash;
+      await this.updateSessionClassification(state, parsed.sessionKind);
       this.knownSessionHashes.add(parsed.sessionHash);
       if (!historical && wasKnownSession && !state.sessionMetaSeen) {
         // A copied rollout for a known session is history, never a fresh stream.
@@ -784,12 +789,52 @@ export class CodexSessionWatcher {
     }
   }
 
+  /** Re-read metadata only, never historical lifecycle rows, when restoring an old checkpoint. */
+  private async recheckSessionClassification(state: FileState): Promise<void> {
+    let handle: fs.FileHandle | undefined;
+    try {
+      handle = await fs.open(state.filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      const stat = await handle.stat();
+      if (!stat.isFile() || stat.dev !== state.dev || stat.ino !== state.ino) return;
+      const bytes = Buffer.alloc(Math.min(stat.size, this.options.maxLineBytes ?? DEFAULT_MAX_LINE_BYTES));
+      const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+      const header = bytes.subarray(0, bytesRead);
+      const newline = header.indexOf(0x0a);
+      if (newline < 0) return;
+      const parsed = parseCodexLifecycleLine(header.subarray(0, newline).toString("utf8"), this.now());
+      if (parsed?.kind === "session_meta" && parsed.sessionHash === state.sessionHash) {
+        await this.updateSessionClassification(state, parsed.sessionKind);
+      }
+    } catch (error) {
+      if (error instanceof CodexEmitError) throw error;
+      // Optional metadata failure preserves known classification and the lifecycle cursor.
+    } finally { await handle?.close().catch(() => undefined); }
+  }
+
+  private async updateSessionClassification(state: FileState, kind: SessionKind): Promise<void> {
+    const peers = [...this.states.values()].filter((candidate) => candidate.sessionHash === state.sessionHash);
+    const next: SessionKind = kind === "subagent" || peers.some((candidate) => candidate.sessionKind === "subagent")
+      ? "subagent" : "main";
+    const publishedPeers = peers.filter((candidate) => candidate.reportedSession || candidate.needsRestartBaseline);
+    const changed = publishedPeers.some((candidate) => candidate.sessionKind !== next);
+    if (changed && state.sessionHash) {
+      // Metadata correction must not synthesize a task transition or completion.
+      await this.emitEvent(codexEvent("session_classification_updated", state.sessionHash,
+        undefined, new Date(this.now()).toISOString(), false, undefined, next));
+    }
+    state.sessionKind = next;
+    for (const peer of peers) peer.sessionKind = next;
+  }
+
   private async sendLifecycle(
     type: EventType, sessionHash: string, turnHash: string | undefined, occurredAt: string, sessionStarted = false,
   ): Promise<void> {
     const title = ["session_started", "task_started", "task_finished", "session_title_updated"].includes(type)
       ? await this.titles.lookup(sessionHash) : undefined;
-    const event = codexEvent(type, sessionHash, turnHash, occurredAt, sessionStarted, title);
+    const states = [...this.states.values()].filter((state) => state.sessionHash === sessionHash);
+    const kind: SessionKind | undefined = states.some((state) => state.sessionKind === "subagent")
+      ? "subagent" : states.find((state) => state.sessionKind)?.sessionKind;
+    const event = codexEvent(type, sessionHash, turnHash, occurredAt, sessionStarted, title, kind);
     await this.emitEvent(event);
     if (event.session_title !== undefined) this.titleDigests.set(sessionHash, digest(event.session_title));
   }

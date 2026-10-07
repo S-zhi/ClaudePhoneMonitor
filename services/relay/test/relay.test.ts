@@ -898,3 +898,31 @@ test("paired phones receive sanitized live events before snapshots only for thei
 
   relay.stop();
 });
+
+test("relay forwards stored child classification and authoritative zero main counts through heartbeat and replay", () => {
+  const now = "2026-10-02T00:00:00.000Z";
+  const relay = new Relay({ autoStart: false, now: () => new Date(now) });
+  const collectorMessages = messages();
+  const phoneMessages = messages();
+  const collector = relay.connect({ gateway: "collector", installation_id: "install-1", transport: { send: (message) => collectorMessages.push(message) } });
+  const phone = relay.connect({ gateway: "android", installation_id: "install-1", transport: { send: (message) => phoneMessages.push(message) } });
+  relay.receive(collector.connection_id, JSON.stringify(event({ event_type: "task_started", session_kind: "subagent", payload: {} })));
+  assert.equal(relay.snapshot("install-1").main_running_count, 0);
+  assert.equal(relay.snapshot("install-1").total_running_count, 1);
+  phoneMessages.length = 0;
+  relay.receive(collector.connection_id, JSON.stringify(event({ event_id: "child-wait", sequence: 2, event_type: "waiting", payload: {} })));
+  const forwarded = phoneMessages.find((message) => message.type === "event");
+  assert.equal(forwarded?.type === "event" ? forwarded.session_kind : undefined, "subagent");
+  assert.equal(relay.snapshot("install-1").claude_state, "idle");
+  phoneMessages.length = 0;
+  relay.receive(phone.connection_id, JSON.stringify({ type: "resume", installation_id: "install-1", last_sequence: 0 }));
+  assert.ok(phoneMessages.filter((message) => message.type === "event").every((message) => message.type === "event" && message.session_kind === "subagent"));
+  const resumedSnapshot = phoneMessages.find((message) => message.type === "snapshot");
+  assert.equal(resumedSnapshot?.type === "snapshot" ? resumedSnapshot.main_session_count : undefined, 0);
+  phoneMessages.length = 0;
+  relay.receive(collector.connection_id, JSON.stringify({ type: "heartbeat", schema_version: 1, installation_id: "install-1" }));
+  const heartbeat = [...collectorMessages].reverse().find((message) => message.type === "heartbeat");
+  assert.equal(heartbeat?.type === "heartbeat" ? heartbeat.last_sequence : undefined, 2);
+  assert.equal(relay.snapshot("install-1").total_running_count, 0);
+  relay.stop();
+});

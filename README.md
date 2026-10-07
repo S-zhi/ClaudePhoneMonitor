@@ -111,7 +111,8 @@ apps/android/build/outputs/apk/debug/android-debug.apk
 - 横屏沉浸式暖炭黑舞台，待机居中，状态变化短暂以大字和 Clawd 分屏展示；
 - 有意义的状态变化与任务结果显示 15 秒改变状态页，倒计时由单调时钟截止；重复事件、心跳及同状态工具事件不会重置计时；
 - 连接后常态展示状态页；真实状态变化或任务结果会切换到改变状态页 15 秒，然后回到最新状态页；
-- 多会话中单个任务完成时保留全局 `WORKING` 聚合状态，同时显示该任务的 `FINISH` 提示与完成会话名称；
+- 多主会话中单个任务完成时保留其他主任务的 `WORKING` 聚合状态，同时显示该任务的 `FINISH` 提示与完成会话名称；
+- 主列表先过滤已识别子代理，再展示最近的五个主会话；`Main Running` 与 `Main Sessions` 统计全部有效主会话，`Total Running` 统计主会话及子代理的独立运行线程，旁边显示 `Includes subagents`。旧服务缺少明确统计时显示 `—`；
 - `WORKING` 使用 Clawd 坐在灰色笔记本电脑后打字的动作；
 - 首次启动 QR 配对页；
 - Android Keystore 加密保存令牌；
@@ -187,6 +188,13 @@ Codex 会话记录格式随版本变化。当前投影只报告可核实的 WORK
 `codex_jsonl_unsupported_shape`、`codex_jsonl_malformed_row` 和
 `codex_source_read_failed`；这些代码提示本机来源格式或可读性需要复查，不代表任务失败，
 也不包含计数、路径或源数据。
+
+Codex 子代理只依据明确的 `thread_source = "subagent"` 或已支持的 `source.subagent`
+元数据识别，包含 `{ other: "guardian_review" }` 形式的后台审核线程；父线程 ID、标题和 UUID 外形都不作为分类依据，未知格式继续视作主会话。
+子代理仍被采集、持久化并推进事件序号，但不参与主会话列表、聚合状态或完成/错误提醒。
+分类保存在本地 checkpoint 和 Relay 会话存储中；旧 checkpoint 重启时有界补读来源元数据，
+用 `session_classification_updated` 纠正分类，不重放历史完成，也不改变任务状态、活动排序或过期时间。
+统计范围仅包含监控器实际采集到的线程，不扩展 Claude Hook 的内部子任务采集能力。
 
 需要在 Usage 页汇总本机 Claude Code 与 Codex 的 token 用量时，可另外显式开启只读账本：
 

@@ -135,6 +135,7 @@ export const USAGE_SNAPSHOT_SCHEMA: JsonSchema = strictObject(
 const payloadSchemas: Record<MonitorEventType, JsonSchema> = {
   [EVENT_TYPES.SESSION_STARTED]: strictObject({}),
   [EVENT_TYPES.SESSION_TITLE_UPDATED]: strictObject({}),
+  [EVENT_TYPES.SESSION_CLASSIFICATION_UPDATED]: strictObject({}),
   [EVENT_TYPES.TASK_STARTED]: strictObject({}),
   [EVENT_TYPES.TOOL_STARTED]: strictObject({
     tool_name: { ...idSchema, maxLength: 128 },
@@ -176,7 +177,8 @@ const eventProperties = (
   schema_version: { const: PROTOCOL_VERSION },
   event_id: idSchema,
   installation_id: idSchema,
-  session_id: idSchema,
+  session_id: eventType === EVENT_TYPES.SESSION_CLASSIFICATION_UPDATED ? identifiedSessionIdSchema : idSchema,
+  session_kind: { enum: ["main", "subagent"] },
   task_id: idSchema,
   ...([EVENT_TYPES.SESSION_STARTED, EVENT_TYPES.TASK_STARTED, EVENT_TYPES.TASK_FINISHED, EVENT_TYPES.SESSION_TITLE_UPDATED].some((type) => type === eventType)
     ? { session_title: safeTitleSchema } : {}),
@@ -203,6 +205,7 @@ const eventSchemas = Object.fromEntries(
         "event_type",
         "payload",
         ...(eventType === EVENT_TYPES.SESSION_TITLE_UPDATED ? ["session_title"] : []),
+        ...(eventType === EVENT_TYPES.SESSION_CLASSIFICATION_UPDATED ? ["session_kind"] : []),
       ],
     ),
   ]),
@@ -251,12 +254,16 @@ export const SNAPSHOT_SCHEMA: JsonSchema = {
           {
             session_id: identifiedSessionIdSchema,
             title: safeTitleSchema,
+            session_kind: { enum: ["main", "subagent"] },
             claude_state: { enum: ["idle", "working", "waiting"] },
             last_activity_sequence: sequenceSchema,
           },
           ["session_id", "title", "claude_state", "last_activity_sequence"],
         ),
       },
+      main_running_count: sequenceSchema,
+      main_session_count: sequenceSchema,
+      total_running_count: sequenceSchema,
       running_count: sequenceSchema,
       session_count: sequenceSchema,
       recent_completion: strictObject(

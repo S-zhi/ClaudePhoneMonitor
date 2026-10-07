@@ -33,6 +33,7 @@ export class Collector {
       session_id: normalized.session_id,
       ...(normalized.task_id ? { task_id: normalized.task_id } : {}),
       ...(normalized.session_title ? { session_title: normalized.session_title } : {}),
+      ...(normalized.session_kind ? { session_kind: normalized.session_kind } : {}),
       sequence,
       occurred_at: normalized.occurred_at,
       event_type: normalized.event_type,

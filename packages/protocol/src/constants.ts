@@ -26,6 +26,7 @@ export const ALL_MESSAGE_TYPES = MESSAGE_TYPE_VALUES;
 
 export const EVENT_TYPES = {
   SESSION_STARTED: "session_started",
+  SESSION_CLASSIFICATION_UPDATED: "session_classification_updated",
   SESSION_TITLE_UPDATED: "session_title_updated",
   TASK_STARTED: "task_started",
   TOOL_STARTED: "tool_started",
