@@ -144,18 +144,21 @@ def _quote_command(command: str) -> str:
     return " ".join(shlex.quote(word) for word in words)
 
 
-def _command(hook_command: str, event: str, marker: str) -> str:
+def _command(hook_command: str, event: str, marker: str, approval_bridge: bool = False, socket_path: str = "") -> str:
     # The event names are fixed today, but quote both values so future names or
     # installation paths cannot turn into shell syntax.  `|| true` is the
     # fail-open contract: a broken phone monitor must never block Claude Code.
+    bridge_flag = " --approval-bridge" if approval_bridge and event == "PermissionRequest" else ""
+    socket_flag = f" --socket {shlex.quote(socket_path)}" if socket_path else ""
     return (
-        f"{_quote_command(hook_command)} --event {shlex.quote(event)} "
+        f"{_quote_command(hook_command)} --event {shlex.quote(event)}{socket_flag}{bridge_flag} "
         f"|| true # {marker}"
     )
 
 
 def add_owned(
-    root: dict[str, Any], hook_command: str, events: list[str], marker: str
+    root: dict[str, Any], hook_command: str, events: list[str], marker: str,
+    approval_bridge: bool = False, socket_path: str = "",
 ) -> int:
     hooks = root.setdefault("hooks", {})
     if not isinstance(hooks, dict):
@@ -174,8 +177,8 @@ def add_owned(
                 "hooks": [
                     {
                         "type": "command",
-                        "command": _command(hook_command, event, marker),
-                        "timeout": 5,
+                        "command": _command(hook_command, event, marker, approval_bridge, socket_path),
+                        "timeout": 610 if approval_bridge and event == "PermissionRequest" else 5,
                     }
                 ]
             }
@@ -235,6 +238,8 @@ def main() -> int:
     parser.add_argument("--hook-command", default="")
     parser.add_argument("--events", default="")
     parser.add_argument("--marker", default=DEFAULT_MARKER)
+    parser.add_argument("--approval-bridge", action="store_true")
+    parser.add_argument("--socket", default="")
     args = parser.parse_args()
     path = pathlib.Path(args.settings).expanduser()
     if args.action == "inspect":
@@ -248,7 +253,7 @@ def main() -> int:
         if args.action == "add":
             if not args.hook_command:
                 _die("--hook-command is required for add")
-            count = add_owned(root, args.hook_command, _parse_events(args.events), args.marker)
+            count = add_owned(root, args.hook_command, _parse_events(args.events), args.marker, args.approval_bridge, args.socket)
             _write(path, root, mode)
             print(json.dumps({"added": count, **_inspect(root, args.marker)}, sort_keys=True))
             return 0

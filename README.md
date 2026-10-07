@@ -81,7 +81,7 @@ skills/claude-monitor/scripts/install
 skills/claude-monitor/scripts/doctor --strict
 ```
 
-Hook 使用 `services/collector/dist/cli.js --event EVENT`，launchd 使用同一个 CLI 的 `--collector` 模式。Collector 令牌通过环境文件加载，Hook 仍然 fail-open，不会阻塞 Claude Code。
+Hook 使用 `services/collector/dist/cli.js --event EVENT`，launchd 使用同一个 CLI 的 `--collector` 模式。Collector 令牌通过环境文件加载。默认遥测模式的 Hook 保持 fail-open，不等待用户审批；显式启用的[可选审批桥](docs/issue-23-approval-reminder.md)会暂时持有 `PermissionRequest`，等待手机决定或返回电脑处理。
 
 ### 5. Android 扫码
 
@@ -110,6 +110,7 @@ apps/android/build/outputs/apk/debug/android-debug.apk
 - 使用 `update_clawd_assets` 分支提供的 Clawd 帧矩阵作为主角，Compose Canvas 原生渲染；
 - 横屏沉浸式暖炭黑舞台；常态显示会话列表和 Clawd，强提醒的 15 秒改变状态页以左侧大字、右侧 Clawd 分屏展示；
 - 执行超过 5 分钟的任务完成、任务失败、明确需要用户操作的等待，以及长任务运行中断连，会显示 15 秒改变状态页；短任务与普通状态变化仅在当前页面内提示 5 秒；
+- 显式启用 Claude 审批桥后，真实 `PermissionRequest` 立即显示独立 `Awaiting approval` 页及相关任务、工具和可操作入口；未处理时最多强提醒 5 分钟，确认已处理后原页展示结果 15 秒再恢复正常页面。重复事件、刷新和重连不会重启期限，未决审批在状态页和 Usage 页持续保留入口；
 - 任务时长从 `task_started` 起算，等待时间计入；恰好 5 分钟或既无可靠起点、也无合法事件时长时采用弱提醒。重复事件、心跳与快照刷新不会重置提醒倒计时；
 - 多主会话中单个任务完成时保留其他主任务的 `WORKING` 聚合状态，同时显示该任务的 `FINISH` 提示与完成会话名称；
 - 主列表先过滤已识别子代理，再展示最近的五个主会话；`Main Running` 与 `Main Sessions` 统计全部有效主会话，`Total Running` 统计主会话及子代理的独立运行线程，旁边显示 `Includes subagents`。旧服务缺少明确统计时显示 `—`；
@@ -119,13 +120,31 @@ apps/android/build/outputs/apk/debug/android-debug.apk
 - 真实 WebSocket snapshot/event；
 - 无 Mock 客户端和 Demo 控件。
 
-提醒分级的时长、事件和抢占规则见 [Issue #17 说明](docs/issue-17-reminder-policy.md)。
+提醒分级见 [Issue #17 说明](docs/issue-17-reminder-policy.md)，独立审批页与可选决策桥见 [Issue #23 说明](docs/issue-23-approval-reminder.md)。
 
 展示方向见 [Clawd 界面整合设计](docs/clawd-ui-design.md)；[待机构图](docs/clawd-design-idle.png) 和 [完成构图](docs/clawd-design-finish.png) 是按分支 STILL 帧绘制的设计参考，不是 APK 或真机截图。强提醒沿用完成构图的左右分屏，任务名称取实际会话。
 
 ## 事件和隐私
 
-协议层和 Relay 都使用白名单字段。允许的事件元数据包括事件类型、工具名称、耗时、退出码、错误类别、等待原因、会话/任务 ID 和序号。禁止转发和持久化 prompt、工具输入/输出、命令、路径、stdout/stderr、密钥及授权头。
+协议层和 Relay 都使用白名单字段。允许的事件元数据包括事件类型、工具名称、耗时、退出码、错误类别、等待原因、会话/任务 ID 和序号；审批桥另传独立请求/决定 UUID、来源、明确交付状态及期限。监控器的 IPC、outbox 和日志不转发或持久化 prompt、工具输入/输出、命令、路径、stdout/stderr、密钥及授权头。桥 Hook 的本地提示也仅包含请求编号及工具元数据，不复制原始操作输入。
+
+## 可选 Claude 审批桥
+
+默认仍只观察 Hook。需要手机的真实审批入口及完整请求/结果链路时，先停止正在运行的 Collector，再显式运行：
+
+```bash
+scripts/start-lan-monitor.sh --approval-bridge
+```
+
+该选项会安装 monitor-owned 的阻塞 `PermissionRequest` Hook，并保存启用选择；只有通过现有配对令牌鉴权的手机才能提交决定。手机只显示工具和任务等元数据，**批准前先在电脑核对待执行操作；无法可靠识别时选“在电脑处理”**。请求编号标识本桥请求，不表示 Claude 原生弹窗中也显示同一编号。`Approve` / `Deny` 将决定交付给原 Hook；`在电脑处理` 立即释放 Hook，继续 Claude 的原生权限流程。存在同会话、同工具的多个未决请求时，手机禁止 `Approve`，仍可返回电脑处理。
+
+Hook 最多等待 10 分钟；超时、来源断连或恢复旧请求时，不替用户选择允许或拒绝，手机显示 `Approval status unavailable` 并提示核查电脑。`Approval sent` / `Denial sent` 仅表示决定已交付给 Claude Hook，实际执行仍受 Claude 其他权限规则和 Hooks 约束。关闭桥并恢复观察用 Hook：
+
+```bash
+scripts/start-lan-monitor.sh --no-approval-bridge
+```
+
+本桥覆盖 Claude 的 `PermissionRequest` 工具权限，不覆盖只发 `permission_prompt` 通知的 sandbox network 请求，也不代理 Codex 审批决定。`--watch-codex` 另外通过现有 Desktop IPC 只读观察原生审批待办，手机显示同一独立提醒页；电脑解除待办后显示结果 15 秒，再恢复正常页面。Codex sessions JSONL 本身不包含权威审批通道，普通等待和长时间静默不会被推断成审批。具体边界与验证见 [Issue #23 说明](docs/issue-23-approval-reminder.md)。
 
 ## 一键启动脚本
 
@@ -240,6 +259,7 @@ Tokens。只有缓存分子、分母和两个来源覆盖都完整时才给完�
 - Codex 监听需要显式启用。已核实桌面应用版本为 26.930.61225（内嵌 runtime 0.160.0），
   独立 CLI 二进制为 0.159.3；两种执行形态不可混称。当前 Codex 会话 JSONL 格式不稳定。
   本项不假定可观察显式等待、全部工具活动或所有错误。
+- 独立审批页在当前 Android ViewModel 中保存待处理的五分钟截止与确认结果的 15 秒截止，页面切换与 WebSocket 重连不会重置；App 进程结束后的期限恢复尚未持久化。此前七项实机用例的历史证据见[验证报告](docs/device-testing/issue23-2026-10-07.md)，真实 Codex 原生链路见 [Codex 实机复验](docs/device-testing/issue23-codex-2026-10-08.md)。阻塞问答仍仅覆盖 Claude 的明确工具和通知来源。
 - Android 真机上的原生 Compose fixture 四项通过，覆盖多 Session 列表、完成名称、Working 优先、短横屏和大字号布局。当前后端已更新并启用 Codex 监听，保留原配对；真机确认 Relay 已连接、当前聊天真实原生任务名称已显示，无可用安全名称的其他会话允许匿名回退，见 [issue #4 验证记录](docs/device-testing/issue4-reimplementation-2026-10-07.md)。含私人任务名的新截图仅留本地；真实完成页的完整 15 秒可见时长尚未录屏，截止与迟到补名逻辑由 JVM 测试验证。
 
 ## 目录

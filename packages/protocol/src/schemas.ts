@@ -36,6 +36,10 @@ const wireTimestampSchema: JsonSchema = {
   format: "date-time",
 };
 const utcTimestampSchema: JsonSchema = { ...wireTimestampSchema, pattern: "Z$" };
+const approvalIdSchema: JsonSchema = {
+  type: "string",
+  pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[45][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+};
 
 const protocolHeader = (type: string): JsonSchema => ({
   type: "object",
@@ -132,6 +136,17 @@ export const USAGE_SNAPSHOT_SCHEMA: JsonSchema = strictObject(
 
 
 
+function approvalPayloadSchema(source: "claude_code" | "codex", requested: boolean): JsonSchema {
+  return strictObject({
+    request_id: approvalIdSchema,
+    source: { const: source },
+    status: requested ? { const: "pending" } : { enum: source === "codex" ? ["resolved", "unknown"] : ["approved", "denied", "unknown"] },
+    can_respond: source === "codex" || !requested ? { const: false } : { type: "boolean" },
+    ...(source === "claude_code" ? { expires_at: wireTimestampSchema } : {}),
+    tool_name: { ...idSchema, maxLength: 128 },
+  }, ["request_id", "source", "status", "can_respond"]);
+}
+
 const payloadSchemas: Record<MonitorEventType, JsonSchema> = {
   [EVENT_TYPES.SESSION_STARTED]: strictObject({}),
   [EVENT_TYPES.SESSION_TITLE_UPDATED]: strictObject({}),
@@ -152,10 +167,13 @@ const payloadSchemas: Record<MonitorEventType, JsonSchema> = {
     exit_code: { type: "integer", minimum: -255, maximum: 255 },
   }),
   [EVENT_TYPES.WAITING]: strictObject({
+    tool_name: { ...idSchema, maxLength: 128 },
     reason: {
       enum: ["permission", "question", "approval", "input", "unknown"],
     },
   }),
+  [EVENT_TYPES.APPROVAL_REQUESTED]: { oneOf: [approvalPayloadSchema("claude_code", true), approvalPayloadSchema("codex", true)] },
+  [EVENT_TYPES.APPROVAL_RESOLVED]: { oneOf: [approvalPayloadSchema("claude_code", false), approvalPayloadSchema("codex", false)] },
   [EVENT_TYPES.TASK_FINISHED]: strictObject({
     duration_ms: { ...sequenceSchema, maximum: 86_400_000 },
     exit_code: { type: "integer", minimum: -255, maximum: 255 },
@@ -177,7 +195,7 @@ const eventProperties = (
   schema_version: { const: PROTOCOL_VERSION },
   event_id: idSchema,
   installation_id: idSchema,
-  session_id: eventType === EVENT_TYPES.SESSION_CLASSIFICATION_UPDATED ? identifiedSessionIdSchema : idSchema,
+  session_id: [EVENT_TYPES.SESSION_CLASSIFICATION_UPDATED, EVENT_TYPES.APPROVAL_REQUESTED, EVENT_TYPES.APPROVAL_RESOLVED].some((type) => type === eventType) ? identifiedSessionIdSchema : idSchema,
   session_kind: { enum: ["main", "subagent"] },
   task_id: idSchema,
   ...([EVENT_TYPES.SESSION_STARTED, EVENT_TYPES.TASK_STARTED, EVENT_TYPES.TASK_FINISHED, EVENT_TYPES.SESSION_TITLE_UPDATED].some((type) => type === eventType)
@@ -256,6 +274,7 @@ export const SNAPSHOT_SCHEMA: JsonSchema = {
             title: safeTitleSchema,
             session_kind: { enum: ["main", "subagent"] },
             claude_state: { enum: ["idle", "working", "waiting"] },
+            waiting_reason: { enum: ["permission", "question", "approval", "input"] },
             last_activity_sequence: sequenceSchema,
           },
           ["session_id", "title", "claude_state", "last_activity_sequence"],
@@ -288,6 +307,23 @@ export const SNAPSHOT_SCHEMA: JsonSchema = {
           },
           ["session_id", "started_at", "elapsed_ms"],
         ),
+      },
+      approvals: {
+        type: "array",
+        items: strictObject({
+          request_id: approvalIdSchema,
+          session_id: identifiedSessionIdSchema,
+          task_id: idSchema,
+          display_name: safeTitleSchema,
+          sequence: sequenceSchema,
+          requested_at: wireTimestampSchema,
+          resolved_at: wireTimestampSchema,
+          expires_at: wireTimestampSchema,
+          source: { enum: ["claude_code", "codex"] },
+          status: { enum: ["pending", "approved", "denied", "resolved", "unknown"] },
+          tool_name: { ...idSchema, maxLength: 128 },
+          can_respond: { type: "boolean" },
+        }, ["request_id", "session_id", "display_name", "sequence", "requested_at", "source", "status", "can_respond"]),
       },
       usage: USAGE_AGGREGATE_SCHEMA,
       last_sequence: { oneOf: [sequenceSchema, { type: "null" }] },
@@ -327,6 +363,7 @@ export const MESSAGE_SCHEMAS: Readonly<Record<string, JsonSchema>> = {
         schema_version: { const: PROTOCOL_VERSION },
         connection_id: idSchema,
         accepted: { type: "boolean" },
+        approval_bridge_available: { type: "boolean" },
         server_time: wireTimestampSchema,
         snapshot: SNAPSHOT_SCHEMA,
         resume: {
@@ -359,6 +396,29 @@ export const MESSAGE_SCHEMAS: Readonly<Record<string, JsonSchema>> = {
   },
   [MESSAGE_TYPES.EVENT]: EVENT_ENVELOPE_SCHEMA,
   [MESSAGE_TYPES.USAGE_SNAPSHOT]: USAGE_SNAPSHOT_SCHEMA,
+  [MESSAGE_TYPES.APPROVAL_DECISION]: strictObject({
+    type: { const: MESSAGE_TYPES.APPROVAL_DECISION },
+    schema_version: { const: PROTOCOL_VERSION },
+    installation_id: idSchema,
+    request_id: approvalIdSchema,
+    decision_id: approvalIdSchema,
+    decision: { enum: ["allow", "deny", "computer"] },
+  }, ["type", "schema_version", "installation_id", "request_id", "decision_id", "decision"]),
+  [MESSAGE_TYPES.APPROVAL_DECISION_ACK]: strictObject({
+    type: { const: MESSAGE_TYPES.APPROVAL_DECISION_ACK },
+    schema_version: { const: PROTOCOL_VERSION },
+    request_id: approvalIdSchema,
+    decision_id: approvalIdSchema,
+    accepted: { type: "boolean" },
+    reason: { enum: ["forwarded", "unavailable", "already_decided", "invalid_request", "forbidden"] },
+  }, ["type", "schema_version", "request_id", "decision_id", "accepted"]),
+  [MESSAGE_TYPES.APPROVAL_PRESENCE]: strictObject({
+    type: { const: MESSAGE_TYPES.APPROVAL_PRESENCE },
+    schema_version: { const: PROTOCOL_VERSION },
+    installation_id: idSchema,
+    request_ids: { type: "array", maxItems: 128, items: approvalIdSchema },
+    source: { enum: ["claude_code", "codex"] },
+  }, ["type", "schema_version", "installation_id", "request_ids"]),
   [MESSAGE_TYPES.EVENT_ACK]: strictObject(
     {
       type: { const: MESSAGE_TYPES.EVENT_ACK },

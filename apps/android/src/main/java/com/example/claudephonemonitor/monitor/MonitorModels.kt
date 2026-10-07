@@ -45,6 +45,7 @@ enum class MonitorEventType(val wireValue: String) {
     PROBE_RESULT("probe_result"),
     CONNECTED("connected"),
     DISCONNECTED("disconnected"),
+    APPROVAL_DECISION_ACK("approval_decision_ack"),
     UNKNOWN("unknown"),
 }
 
@@ -54,6 +55,8 @@ enum class MonitorEventName(val wireValue: String) {
     TOOL_FINISHED("tool_finished"),
     TOOL_FAILED("tool_failed"),
     WAITING("waiting"),
+    APPROVAL_REQUESTED("approval_requested"),
+    APPROVAL_RESOLVED("approval_resolved"),
     TASK_FINISHED("task_finished"),
     TASK_FAILED("task_failed"),
     SESSION_STARTED("session_started"),
@@ -84,6 +87,50 @@ data class MonitorSnapshot(
     val usage: UsageAggregate? = null,
     /** All current main tasks, independently of the five visible session rows. */
     val activeTasks: List<ActiveTask>? = null,
+    /** Explicit, identity-bound approval bridge state; absent on older sources. */
+    val approvals: List<ApprovalSummary>? = null,
+)
+
+enum class ApprovalStatus(val wireValue: String) {
+    PENDING("pending"), APPROVED("approved"), DENIED("denied"), UNKNOWN("unknown"), RESOLVED("resolved"),
+}
+
+enum class ApprovalSource(val wireValue: String) { CLAUDE_CODE("claude_code"), CODEX("codex") }
+
+enum class ApprovalDecision(val wireValue: String) { ALLOW("allow"), DENY("deny"), COMPUTER("computer") }
+
+data class ApprovalSummary(
+    val requestId: String,
+    val sessionId: String,
+    val taskId: String? = null,
+    val displayName: String,
+    val sequence: Long,
+    val requestedAt: String,
+    val status: ApprovalStatus,
+    val canRespond: Boolean,
+    val toolName: String? = null,
+    val expiresAt: String? = null,
+    val resolvedAt: String? = null,
+    val source: ApprovalSource = ApprovalSource.CLAUDE_CODE,
+) {
+    val isPending: Boolean get() = status == ApprovalStatus.PENDING
+    val isHandled: Boolean get() = status in setOf(ApprovalStatus.APPROVED, ApprovalStatus.DENIED, ApprovalStatus.RESOLVED)
+}
+
+data class ApprovalEventMetadata(
+    val requestId: String,
+    val status: ApprovalStatus,
+    val canRespond: Boolean,
+    val toolName: String? = null,
+    val expiresAt: String? = null,
+    val source: ApprovalSource = ApprovalSource.CLAUDE_CODE,
+)
+
+data class ApprovalDecisionAck(
+    val requestId: String,
+    val decisionId: String,
+    val accepted: Boolean,
+    val reason: String? = null,
 )
 
 data class ActiveTask(
@@ -150,6 +197,7 @@ data class SessionSummary(
     val claudeState: ClaudeState,
     val lastActivitySequence: Long,
     val sessionKind: SessionKind? = null,
+    val waitingReason: String? = null,
 )
 
 data class RecentCompletion(
@@ -180,6 +228,10 @@ data class MonitorEvent(
     val sessionKind: SessionKind? = null,
     val durationMs: Long? = null,
     val waitingReason: String? = null,
+    val approval: ApprovalEventMetadata? = null,
+    val approvalDecisionAck: ApprovalDecisionAck? = null,
+    val toolName: String? = null,
+    val correlationId: String? = null,
 ) {
     fun toWireJson(): String = JSONObject().apply {
         put("type", type.wireValue)
@@ -193,12 +245,22 @@ data class MonitorEvent(
         sessionId?.let { put("session_id", it) }
         sessionKind?.let { put("session_kind", it.wireValue) }
         taskId?.let { put("task_id", it) }
+        correlationId?.let { put("correlation_id", it) }
         sessionTitle?.let { put("session_title", it) }
         if (occurredAt.isNotBlank()) put("occurred_at", occurredAt)
-        if (durationMs != null || waitingReason != null) {
+        if (durationMs != null || waitingReason != null || approval != null || toolName != null) {
             put("payload", JSONObject().apply {
                 durationMs?.let { put("duration_ms", it) }
                 waitingReason?.let { put("reason", it) }
+                toolName?.let { put("tool_name", it) }
+                approval?.let {
+                    put("request_id", it.requestId)
+                    put("source", it.source.wireValue)
+                    put("status", it.status.wireValue)
+                    put("can_respond", it.canRespond)
+                    it.toolName?.let { name -> put("tool_name", name) }
+                    it.expiresAt?.let { expiry -> put("expires_at", expiry) }
+                }
             })
         }
     }.toString()
@@ -234,6 +296,18 @@ data class MonitorEvent(
             }
             val sessionKind = root.sessionKindOrNull()
             if (eventName == MonitorEventName.SESSION_CLASSIFICATION_UPDATED && sessionKind == null) return null
+            val approval = if (eventName in setOf(MonitorEventName.APPROVAL_REQUESTED, MonitorEventName.APPROVAL_RESOLVED)) {
+                val metadata = root.optJSONObject("payload")?.let(::approvalMetadataFromJson) ?: return null
+                if (root.stringOrNull("session_id").let { it == null || it == "unknown" }) return null
+                if ((eventName == MonitorEventName.APPROVAL_REQUESTED) != (metadata.status == ApprovalStatus.PENDING)) return null
+                metadata
+            } else null
+            val approvalAck = if (type == MonitorEventType.APPROVAL_DECISION_ACK) {
+                val requestId = root.uuidOrNull("request_id") ?: return null
+                val decisionId = root.uuidOrNull("decision_id") ?: return null
+                val accepted = root.opt("accepted") as? Boolean ?: return null
+                ApprovalDecisionAck(requestId, decisionId, accepted, root.stringOrNull("reason"))
+            } else null
             MonitorEvent(
                 sessionKind = sessionKind,
                 type = resolvedType,
@@ -251,6 +325,10 @@ data class MonitorEvent(
                 durationMs = root.optJSONObject("payload")?.durationOrNull("duration_ms"),
                 waitingReason = root.optJSONObject("payload")?.stringOrNull("reason")
                     ?.takeIf { it in WAITING_REASONS },
+                approval = approval,
+                approvalDecisionAck = approvalAck,
+                toolName = root.optJSONObject("payload")?.stringOrNull("tool_name"),
+                correlationId = root.stringOrNull("correlation_id"),
             )
         }.getOrNull()
 
@@ -285,6 +363,8 @@ data class MonitorEvent(
                                 title = item.optString("title").ifBlank { fallbackSessionTitle(id) },
                                 claudeState = state,
                                 lastActivitySequence = item.longOrNull("last_activity_sequence") ?: 0L,
+                                waitingReason = item.stringOrNull("waiting_reason")
+                                    ?.takeIf { state == ClaudeState.WAITING && it in USER_ACTION_WAITING_REASONS },
                             ),
                         )
                     }
@@ -320,7 +400,39 @@ data class MonitorEvent(
                     }
                 }
             },
+            approvals = json.optJSONArray("approvals")?.let { array ->
+                val records = buildList {
+                    for (index in 0 until array.length()) {
+                        val item = array.optJSONObject(index) ?: continue
+                        val metadata = approvalMetadataFromJson(item) ?: continue
+                        val id = item.stringOrNull("session_id")?.takeUnless { it == "unknown" } ?: continue
+                        val sequence = item.safeIntegerOrNull("sequence") ?: continue
+                        val requestedAt = item.stringOrNull("requested_at")?.takeIf { wireTimestampMillis(it) != null } ?: continue
+                        val resolvedAt = item.stringOrNull("resolved_at")
+                        if (resolvedAt != null && wireTimestampMillis(resolvedAt) == null) continue
+                        add(ApprovalSummary(metadata.requestId, id, item.stringOrNull("task_id"),
+                            item.optString("display_name").ifBlank { fallbackSessionTitle(id) }, sequence,
+                            requestedAt, metadata.status, metadata.canRespond, metadata.toolName, metadata.expiresAt, resolvedAt, metadata.source))
+                    }
+                }
+                // Ambiguous identities never expose an approval action.
+                records.groupBy { it.requestId }.values.mapNotNull { it.singleOrNull() }
+            },
         )
+
+        private fun approvalMetadataFromJson(json: JSONObject): ApprovalEventMetadata? {
+            val source = ApprovalSource.entries.firstOrNull { it.wireValue == json.optString("source") } ?: return null
+            val requestId = json.uuidOrNull("request_id") ?: return null
+            val status = ApprovalStatus.entries.firstOrNull { it.wireValue == json.optString("status") } ?: return null
+            val canRespond = json.opt("can_respond") as? Boolean ?: return null
+            if (canRespond && status != ApprovalStatus.PENDING) return null
+            if (source == ApprovalSource.CODEX && (canRespond || status in setOf(ApprovalStatus.APPROVED, ApprovalStatus.DENIED))) return null
+            if (source == ApprovalSource.CLAUDE_CODE && status == ApprovalStatus.RESOLVED) return null
+            val expiresAt = json.stringOrNull("expires_at")
+            if (expiresAt != null && wireTimestampMillis(expiresAt) == null) return null
+            return ApprovalEventMetadata(requestId, status, canRespond,
+                json.stringOrNull("tool_name")?.takeIf { it.length <= 128 }, expiresAt, source)
+        }
 
         private fun usageFromJson(json: JSONObject): UsageAggregate? = runCatching {
             val epochId = json.stringOrNull("epoch_id") ?: return null
@@ -418,6 +530,7 @@ fun MonitorSnapshot.toJson(): JSONObject = JSONObject().apply {
                     put("title", session.title)
                     put("claude_state", session.claudeState.wireValue)
                     put("last_activity_sequence", session.lastActivitySequence)
+                    session.waitingReason?.takeIf { session.claudeState == ClaudeState.WAITING }?.let { put("waiting_reason", it) }
                 })
             }
         })
@@ -450,6 +563,24 @@ fun MonitorSnapshot.toJson(): JSONObject = JSONObject().apply {
                     put("elapsed_ms", task.elapsedMs)
                 })
             }
+        })
+    }
+    approvals?.let { requests ->
+        put("approvals", org.json.JSONArray().apply {
+            requests.forEach { request -> put(JSONObject().apply {
+                put("request_id", request.requestId)
+                put("session_id", request.sessionId)
+                request.taskId?.let { put("task_id", it) }
+                put("display_name", request.displayName)
+                put("sequence", request.sequence)
+                put("requested_at", request.requestedAt)
+                request.resolvedAt?.let { put("resolved_at", it) }
+                put("source", request.source.wireValue)
+                put("status", request.status.wireValue)
+                put("can_respond", request.canRespond)
+                request.toolName?.let { put("tool_name", it) }
+                request.expiresAt?.let { put("expires_at", it) }
+            }) }
         })
     }
 }
@@ -513,6 +644,7 @@ private fun JSONObject.intOrNull(key: String): Int? = longOrNull(key)?.takeIf {
 private const val MAX_SAFE_INTEGER = 9_007_199_254_740_991.0
 internal const val MAX_TASK_DURATION_MS = 86_400_000L
 private val WAITING_REASONS = setOf("permission", "question", "approval", "input", "unknown")
+internal val USER_ACTION_WAITING_REASONS = setOf("permission", "question", "approval", "input")
 private val WIRE_TIMESTAMP = Regex("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,3})?(?:Z|[+-]\\d{2}:\\d{2})$")
 
 internal fun wireTimestampMillis(value: String): Long? =
@@ -535,6 +667,9 @@ private fun JSONObject.hasValidNullableInteger(key: String): Boolean =
 
 private fun JSONObject.stringOrNull(key: String): String? =
     if (!has(key) || isNull(key)) null else optString(key).takeIf(String::isNotBlank)
+
+private val APPROVAL_UUID = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[45][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+private fun JSONObject.uuidOrNull(key: String): String? = stringOrNull(key)?.takeIf { APPROVAL_UUID.matches(it) }
 
 sealed interface MonitorCommand {
     fun toWireJson(): String
@@ -569,10 +704,26 @@ sealed interface MonitorCommand {
             put("last_sequence", lastSequence)
         }.toString()
     }
+
+    data class DecideApproval(
+        val installationId: String,
+        val requestId: String,
+        val decisionId: String,
+        val decision: ApprovalDecision,
+    ) : MonitorCommand {
+        override fun toWireJson(): String = JSONObject().apply {
+            put("type", "approval_decision")
+            put("schema_version", 1)
+            put("installation_id", installationId)
+            put("request_id", requestId)
+            put("decision_id", decisionId)
+            put("decision", decision.wireValue)
+        }.toString()
+    }
 }
 
 fun MonitorEventName.toPetState(): PetState = when (this) {
-    MonitorEventName.WAITING -> PetState.WAITING
+    MonitorEventName.WAITING, MonitorEventName.APPROVAL_REQUESTED -> PetState.WAITING
     MonitorEventName.TASK_FINISHED -> PetState.FINISH
     MonitorEventName.TASK_FAILED,
     MonitorEventName.TOOL_FAILED -> PetState.ERROR
@@ -583,13 +734,14 @@ fun MonitorEventName.toPetState(): PetState = when (this) {
     MonitorEventName.SESSION_TITLE_UPDATED,
     MonitorEventName.SESSION_CLASSIFICATION_UPDATED,
     MonitorEventName.SESSION_ENDED,
+    MonitorEventName.APPROVAL_RESOLVED,
     MonitorEventName.UNKNOWN -> PetState.IDLE
 }
 
 fun String?.toActivityVariation(): ActivityVariation = when (this?.lowercase(Locale.US)) {
     "think", "thinking", "session_started", "task_started" -> ActivityVariation.THINK
     "tool", "working", "tool_started", "tool_finished" -> ActivityVariation.TOOL
-    "wait", "waiting" -> ActivityVariation.WAIT
+    "wait", "waiting", "approval_requested" -> ActivityVariation.WAIT
     "celebrate", "finish", "finished", "task_finished" -> ActivityVariation.CELEBRATE
     "alert", "error", "failed", "task_failed", "tool_failed" -> ActivityVariation.ALERT
     else -> ActivityVariation.BREATH

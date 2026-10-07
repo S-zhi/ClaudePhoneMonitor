@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { env, stderr, stdin } from "node:process";
 import { Collector } from "./collector.js";
@@ -10,6 +10,8 @@ import { FileOutbox, outboxFilePath } from "./outbox.js";
 import { RelayClient } from "./relay.js";
 import { UnixSocketIngestor } from "./socket.js";
 import { runHookAdapter } from "./hook-adapter.js";
+import { ApprovalBridge } from "./approval.js";
+import { CodexApprovalObserver } from "./codex-approvals.js";
 import {
   CodexWatcherStartError,
   startCodexWatcher,
@@ -27,7 +29,9 @@ interface ParsedArgs {
   watchCodex?: boolean;
   watchUsage?: boolean;
   codexMetadataRoot?: string;
+  codexIpcSocket?: string;
   help?: boolean;
+  approvalBridge?: boolean;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -38,10 +42,13 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === "--collector" || arg === "--daemon") parsed.mode = "collector";
     else if (arg === "--socket" || arg === "--socket-path") parsed.socketPath = argv[++index];
     else if (arg === "--codex-metadata-root") parsed.codexMetadataRoot = argv[++index];
+    else if (arg === "--codex-ipc-socket") parsed.codexIpcSocket = argv[++index];
     else if (arg === "--watch-codex") parsed.watchCodex = true;
     else if (arg === "--no-watch-codex") parsed.watchCodex = false;
     else if (arg === "--watch-usage") parsed.watchUsage = true;
     else if (arg === "--no-watch-usage") parsed.watchUsage = false;
+    else if (arg === "--approval-bridge") parsed.approvalBridge = true;
+    else if (arg === "--no-approval-bridge") parsed.approvalBridge = false;
     else if (arg === "--help" || arg === "-h") parsed.help = true;
   }
   return parsed;
@@ -53,7 +60,9 @@ export interface CollectorRuntime {
   socket: UnixSocketIngestor;
   relay?: RelayClient;
   codexWatcher?: CodexWatcherHandle;
+  codexApprovals?: CodexApprovalObserver;
   usageWatcher?: UsageWatcherHandle;
+  approvalBridge: ApprovalBridge;
   stop(): Promise<void>;
 }
 
@@ -67,10 +76,13 @@ export interface CollectorRuntimeOptions {
   watchCodex?: boolean;
   sessionsRoot?: string;
   codexMetadataRoot?: string;
+  codexIpcSocket?: string;
   checkpointFile?: string;
   watchUsage?: boolean;
   claudeProjectsRoot?: string;
   usageDatabaseFile?: string;
+  approvalBridge?: boolean;
+  approvalHoldMs?: number;
 }
 
 function validInstallationId(value: string | undefined): string | undefined {
@@ -88,6 +100,8 @@ export async function createCollectorRuntime(
     validInstallationId(options.installationId ?? env.COLLECTOR_INSTALLATION_ID) ?? (await identity.get());
   const outbox = new FileOutbox<RelayOutboundMessage>(outboxFilePath(dataDir));
   const collector = new Collector({ installationId, sequence, outbox });
+  let bridge: ApprovalBridge;
+  let codexApprovals: CodexApprovalObserver | undefined;
 
   const relayUrl = options.relayUrl ?? env.COLLECTOR_RELAY_URL;
   const relay = relayUrl
@@ -97,13 +111,27 @@ export async function createCollectorRuntime(
         outbox,
         challengeSecret: options.relaySecret ?? env.COLLECTOR_RELAY_SECRET,
         token: options.relayToken ?? env.COLLECTOR_RELAY_TOKEN,
+        onApprovalDecision: (message) => bridge.decide(message),
+        onApprovalReady: () => { bridge.publishPresence(); codexApprovals?.onRelayReady(); },
+        onApprovalDisconnected: () => { codexApprovals?.onRelayDisconnected(); return bridge.expireAll(); },
+        onEventAck: (message) => { bridge.handleEventAck(message); codexApprovals?.handleEventAck(message); },
       })
     : undefined;
+  bridge = new ApprovalBridge({
+    enabled: options.approvalBridge ?? env.COLLECTOR_APPROVAL_BRIDGE === "1",
+    installationId,
+    holdMs: options.approvalHoldMs,
+    emit: (event) => collector.ingestNormalized(event),
+    flush: async () => { await relay?.flushPending(); },
+    isConnected: () => relay?.approvalAvailable() ?? false,
+    publishPresence: (requestIds) => relay?.publishApprovalPresence(requestIds),
+  });
   relay?.start();
 
   const socket = new UnixSocketIngestor({
     socketPath,
-    onMessage: async (message) => {
+    onMessage: async (message, localSocket) => {
+      if (await bridge.handleLocalMessage(message, localSocket)) return;
       // Re-normalize at the daemon boundary. The socket is local, but another
       // local process must not be able to smuggle prompt/tool output into the
       // durable queue by pretending to be the hook adapter.
@@ -115,12 +143,10 @@ export async function createCollectorRuntime(
 
   let codexWatcher: CodexWatcherHandle | undefined;
   const watchCodex = options.watchCodex ?? env.COLLECTOR_WATCH_CODEX === "1";
+  const sessionsRoot = options.sessionsRoot ?? env.COLLECTOR_CODEX_SESSIONS_DIR ??
+    join(env.CODEX_HOME ?? join(homedir(), ".codex"), "sessions");
   if (watchCodex) {
     try {
-      const sessionsRoot =
-        options.sessionsRoot ??
-        env.COLLECTOR_CODEX_SESSIONS_DIR ??
-        (env.CODEX_HOME ? join(env.CODEX_HOME, "sessions") : join(homedir(), ".codex", "sessions"));
       codexWatcher = await startCodexWatcher({
         sessionsRoot,
         codexMetadataRoot: options.codexMetadataRoot ?? env.COLLECTOR_CODEX_METADATA_DIR,
@@ -140,6 +166,18 @@ export async function createCollectorRuntime(
       const code = error instanceof CodexWatcherStartError ? error.code : "codex_watch_start_failed";
       stderr.write(`${code}\n`);
     }
+  }
+
+  if (watchCodex && codexWatcher) {
+    codexApprovals = new CodexApprovalObserver({
+      socketPath: options.codexIpcSocket ?? env.COLLECTOR_CODEX_IPC_SOCKET ?? join(options.codexMetadataRoot ?? env.COLLECTOR_CODEX_METADATA_DIR ?? dirname(sessionsRoot), "ipc", "ipc.sock"),
+      getThreadIds: () => codexWatcher!.getApprovalThreadIds(),
+      emit: (event) => collector.ingestNormalized(event),
+      flush: async () => { await relay?.flushPending(); },
+      isRelayConnected: () => relay?.approvalAvailable() ?? false,
+      publishPresence: (requestIds) => relay?.publishApprovalPresence(requestIds, "codex"),
+    });
+    codexApprovals.start();
   }
 
   let usageWatcher: UsageWatcherHandle | undefined;
@@ -171,12 +209,17 @@ export async function createCollectorRuntime(
     socket,
     relay,
     codexWatcher,
+    codexApprovals,
     usageWatcher,
+    approvalBridge: bridge,
     async stop() {
+      await codexApprovals?.stop();
       await codexWatcher?.stop();
       await usageWatcher?.stop();
+      await bridge.stop();
       relay?.stop();
       await socket.stop();
+      await relay?.drain();
       await outbox.close();
     },
   };
@@ -193,6 +236,7 @@ export async function runCollector(options: CollectorRuntimeOptions = {}): Promi
           codes: [
             ...(codexDiagnostics?.codes.filter((code) => /^codex_[a-z_]+$/.test(code)) ?? []),
             ...(usageDiagnostics?.codes ?? []),
+            ...(runtime.codexApprovals?.getDiagnostics().codes ?? []),
           ],
         };
         const signature = JSON.stringify(summary);
@@ -224,12 +268,14 @@ export function helpText(): string {
     "claude-phone-monitor-collector",
     "  --event       Read one Claude hook JSON event from stdin and send it to the local Unix socket.",
     "  --collector   Run the local socket collector and optional WebSocket relay daemon.",
-    "  --watch-codex Also watch local Codex session JSONL files (read-only; no Codex config or hooks are changed).",
+    "  --watch-codex Watch Codex JSONL lifecycle and existing desktop IPC pending approvals (read-only; no Codex config or hooks are changed).",
+    "  --codex-ipc-socket PATH Override the existing desktop IPC socket (COLLECTOR_CODEX_IPC_SOCKET).",
     "  --codex-metadata-root PATH Read native Codex titles from this root (default: parent of the configured sessions directory; COLLECTOR_CODEX_METADATA_DIR).",
     "  --no-watch-codex Disable Codex watching even when COLLECTOR_WATCH_CODEX=1.",
     "  --watch-usage  Read local Claude/Codex usage transcripts (read-only; opt-in).",
     "  --no-watch-usage Disable Usage watching even when COLLECTOR_WATCH_USAGE=1.",
-    "  --socket PATH Override COLLECTOR_SOCKET_PATH for --event mode.",
+    "  --socket PATH Override COLLECTOR_SOCKET_PATH for hook and collector modes.",
+    "  --approval-bridge Opt in to paired-phone PermissionRequest decisions (10 minute local hold).",
   ].join("\n");
 }
 
@@ -244,11 +290,12 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     await runHookAdapter({
       socketPath: args.socketPath ?? env.COLLECTOR_SOCKET_PATH ?? DEFAULT_SOCKET_PATH,
       input: stdin as unknown as AsyncIterable<Uint8Array | string>,
+      approvalBridge: args.approvalBridge === true,
     });
     return 0;
   }
   if (args.mode === "collector") {
-    await runCollector({ watchCodex: args.watchCodex, watchUsage: args.watchUsage, codexMetadataRoot: args.codexMetadataRoot });
+    await runCollector({ socketPath: args.socketPath, watchCodex: args.watchCodex, watchUsage: args.watchUsage, codexMetadataRoot: args.codexMetadataRoot, codexIpcSocket: args.codexIpcSocket, approvalBridge: args.approvalBridge });
     return 0;
   }
   process.stdout.write(`${helpText()}\n`);

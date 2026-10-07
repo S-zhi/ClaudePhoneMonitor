@@ -9,6 +9,8 @@ export const EVENT_TYPES = [
   "tool_finished",
   "tool_failed",
   "waiting",
+  "approval_requested",
+  "approval_resolved",
   "task_finished",
   "task_failed",
   "session_ended",
@@ -18,6 +20,26 @@ export type SessionKind = "main" | "subagent";
 
 export type EventType = (typeof EVENT_TYPES)[number];
 export type WaitingReason = "permission" | "question" | "approval" | "input" | "unknown";
+export type ApprovalStatus = "pending" | "approved" | "denied" | "resolved" | "unknown";
+export type ApprovalSource = "claude_code" | "codex";
+
+export interface ApprovalDecisionMessage {
+  type: "approval_decision";
+  schema_version: 1;
+  installation_id: string;
+  request_id: string;
+  decision_id: string;
+  decision: "allow" | "deny" | "computer";
+}
+
+/** Ephemeral liveness proof; these messages are never replayed from the outbox. */
+export interface ApprovalPresenceMessage {
+  type: "approval_presence";
+  schema_version: 1;
+  installation_id: string;
+  request_ids: string[];
+  source?: ApprovalSource;
+}
 
 /**
  * The only data that may leave the workstation in an event payload.
@@ -29,6 +51,11 @@ export interface SafeEventPayload {
   duration_ms?: number;
   exit_code?: number;
   reason?: WaitingReason;
+  request_id?: string;
+  source?: ApprovalSource;
+  status?: ApprovalStatus;
+  can_respond?: boolean;
+  expires_at?: string;
 }
 
 /** Canonical v1 event wire envelope. */
@@ -130,6 +157,7 @@ export interface ServerControlMessage {
 }
 
 export type RelayInboundMessage =
+  | ApprovalDecisionMessage
   | HelloAckMessage
   | EventAckMessage
   | HeartbeatMessage
@@ -138,6 +166,7 @@ export type RelayInboundMessage =
   | ServerControlMessage;
 
 export type RelayOutboundMessage =
+  | ApprovalPresenceMessage
   | HelloMessage
   | EventEnvelope
   | UsageSnapshotMessage
@@ -228,10 +257,17 @@ export function isSafeEventPayload(value: unknown): value is SafeEventPayload {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   for (const key of Object.keys(record)) {
-    if (key !== "tool_name" && key !== "duration_ms" && key !== "exit_code" && key !== "reason") return false;
+    if (!["tool_name", "duration_ms", "exit_code", "reason", "request_id", "source", "status", "can_respond", "expires_at"].includes(key)) return false;
   }
   if (record.tool_name !== undefined && typeof record.tool_name !== "string") return false;
   if (record.reason !== undefined && !isWaitingReason(record.reason)) return false;
+  if (record.request_id !== undefined && !isApprovalId(record.request_id)) return false;
+  if (record.source !== undefined && !["claude_code", "codex"].includes(String(record.source))) return false;
+  if (record.status !== undefined && !["pending", "approved", "denied", "resolved", "unknown"].includes(String(record.status))) return false;
+  if (record.source === "codex" && (record.can_respond !== false || !["pending", "resolved", "unknown"].includes(String(record.status)))) return false;
+  if (record.source === "claude_code" && record.status === "resolved") return false;
+  if (record.can_respond !== undefined && typeof record.can_respond !== "boolean") return false;
+  if (record.expires_at !== undefined && (typeof record.expires_at !== "string" || Number.isNaN(Date.parse(record.expires_at)))) return false;
   if (
     record.duration_ms !== undefined &&
     (typeof record.duration_ms !== "number" || !Number.isInteger(record.duration_ms) || record.duration_ms < 0)
@@ -245,6 +281,10 @@ export function isSafeEventPayload(value: unknown): value is SafeEventPayload {
     return false;
   }
   return true;
+}
+
+export function isApprovalId(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[45][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
 export function isWaitingReason(value: unknown): value is WaitingReason {

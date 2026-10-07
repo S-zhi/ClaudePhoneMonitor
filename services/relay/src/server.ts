@@ -264,9 +264,8 @@ function attachSocket(
     gateway,
     transport: {
       send(message) {
-        if (socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify(message));
-        }
+        if (socket.readyState !== WebSocket.OPEN) throw new Error("websocket_closed");
+        socket.send(JSON.stringify(message));
       },
     },
     client_id: queryString(query.client_id),

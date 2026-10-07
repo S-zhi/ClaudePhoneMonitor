@@ -158,10 +158,17 @@ function normalizeToolName(value: unknown): string | undefined {
   return undefined;
 }
 
-function waitingReason(record: Record<string, unknown>, payload: Record<string, unknown>): WaitingReason | undefined {
+/** These native tools need an answer/plan review, which an allow/deny permission cannot supply. */
+export function nativeInteractionReason(toolName: unknown): "question" | "approval" | undefined {
+  if (toolName === "AskUserQuestion") return "question";
+  if (toolName === "ExitPlanMode") return "approval";
+  return undefined;
+}
+
+function waitingReason(record: Record<string, unknown>, payload: Record<string, unknown>, toolName?: string): WaitingReason | undefined {
   const hook = getString(record, "hook_event_name", "hookEventName", "event", "name")
     ?.toLowerCase().replace(/[\s_-]+/g, "");
-  if (hook === "permissionrequest") return "permission";
+  if (hook === "permissionrequest") return nativeInteractionReason(toolName) ?? "permission";
   // A canonical event is normalized twice on its way through the Unix socket.
   // Preserve a verified scalar reason without reading any notification text.
   if (isWaitingReason(record.reason)) return record.reason;
@@ -241,8 +248,11 @@ export function normalizeHookEvent(
   const record = asRecord(input);
   if (!record) return null;
 
-  const eventType = deriveEventType(record);
+  let eventType = deriveEventType(record);
   if (!eventType) return null;
+  // Approval events are emitted only by the live bridge after its handshake.
+  // An ordinary telemetry message cannot manufacture an approval result.
+  if (eventType === "approval_requested" || eventType === "approval_resolved") return null;
 
   const now = currentDate(options);
   const rawSessionId = getString(record, "session_id", "sessionId");
@@ -268,6 +278,8 @@ export function normalizeHookEvent(
   const toolName = normalizeToolName(
     getString(record, "tool_name", "toolName") ?? getString(nestedPayload, "tool_name", "toolName"),
   );
+  const interactionReason = eventType === "tool_started" ? nativeInteractionReason(toolName) : undefined;
+  if (interactionReason) eventType = "waiting";
   const duration =
     safeNumber(
       record,
@@ -296,7 +308,7 @@ export function normalizeHookEvent(
   if (duration !== undefined) payload.duration_ms = duration;
   if (exitCode !== undefined) payload.exit_code = exitCode;
   if (eventType === "waiting") {
-    const reason = waitingReason(record, nestedPayload);
+    const reason = interactionReason ?? waitingReason(record, nestedPayload, toolName);
     if (reason !== undefined) payload.reason = reason;
   }
 

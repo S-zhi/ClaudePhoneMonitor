@@ -5,6 +5,7 @@ import os
 import pty
 from pathlib import Path
 import shutil
+import shlex
 import signal
 import socket
 import socketserver
@@ -107,6 +108,7 @@ class StartLanMonitorTests(unittest.TestCase):
         env.pop("COLLECTOR_WATCH_CODEX", None)
         env.update({
             "CLAUDE_PHONE_MONITOR_HOME": str(self.state),
+            "CLAUDE_PHONE_MONITOR_SETTINGS": str(self.root / "settings.json"),
             "RELAY_PORT": str(port),
             "RELAY_LAN_IP": "192.0.2.20",
             "NO_BUILD": "1",
@@ -149,6 +151,8 @@ echo "$$" > "$FAKE_PID_DIR/collector.pid"
 printf '%s' "$COLLECTOR_WATCH_CODEX" > "$FAKE_PID_DIR/codex-choice"
 printf '%s\\n' "$@" > "$FAKE_PID_DIR/collector-args"
 printf '%s' "$COLLECTOR_WATCH_USAGE" > "$FAKE_PID_DIR/usage-choice"
+printf '%s' "$COLLECTOR_APPROVAL_BRIDGE" > "$FAKE_PID_DIR/approval-choice"
+printf '%s' "$COLLECTOR_SOCKET_PATH" > "$FAKE_PID_DIR/socket-path"
 exec /bin/sleep 120
 '''
         node_path = self.root / "fake-node"
@@ -160,6 +164,37 @@ import pathlib,sys
 pathlib.Path(sys.argv[3]).write_bytes(b"\\x89PNG\\r\\n\\x1a\\nfixture")
 ''')
         swift.chmod(0o700)
+
+    def test_approval_bridge_opt_in_off_and_custom_socket_survive_relaunch(self):
+        self._write_fake_programs()
+        HealthHandler.compatible = True
+        server = ThreadedServer(("127.0.0.1", 0), HealthHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            selected, _ = self._launch_choice(server.server_port, feature="approval")
+            self.assertEqual(selected, "0")
+            custom_socket = str((self.root / "private socket.sock").resolve())
+            env_path = self.state / "monitor.env"
+            env_path.write_text(env_path.read_text() + f"COLLECTOR_SOCKET_PATH={shlex.quote(custom_socket)}\n")
+            selected, _ = self._launch_choice(server.server_port, options=("--approval-bridge",), feature="approval")
+            self.assertEqual(selected, "1")
+            self.assertEqual((self.pid_dir / "socket-path").read_text(), custom_socket)
+            hooks = json.loads((self.root / "settings.json").read_text())["hooks"]
+            command = hooks["PermissionRequest"][0]["hooks"][0]["command"]
+            self.assertIn("--approval-bridge", command)
+            words = shlex.split(command)
+            self.assertEqual(words[words.index("--socket") + 1], custom_socket)
+            selected, _ = self._launch_choice(server.server_port, feature="approval")
+            self.assertEqual(selected, "1")
+            selected, _ = self._launch_choice(server.server_port, options=("--no-approval-bridge",), feature="approval")
+            self.assertEqual(selected, "0")
+            hooks = json.loads((self.root / "settings.json").read_text())["hooks"]
+            self.assertNotIn("--approval-bridge", hooks["PermissionRequest"][0]["hooks"][0]["command"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def _launch_choice(self, port, options=(), override=None, answer=None, codex_override=None, feature="usage"):
         choice = self.pid_dir / "usage-choice"

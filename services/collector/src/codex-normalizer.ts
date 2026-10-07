@@ -36,6 +36,22 @@ function uuidHash(value: unknown, pattern: RegExp): string | undefined {
   return createHash("sha256").update(value.toLowerCase()).digest("hex");
 }
 
+/** Shared identity mapping for JSONL lifecycle and native desktop observations. */
+export function codexIdentityHash(value: unknown): string | undefined {
+  return uuidHash(value, SESSION_ID);
+}
+
+/** RAM-only validated native identity; callers must never persist this value. */
+export function nativeCodexThreadId(line: string): string | undefined {
+  try {
+    const row = record(JSON.parse(line));
+    const payload = record(row?.payload);
+    if (row?.type !== "session_meta") return undefined;
+    const value = payload && Object.hasOwn(payload, "id") ? payload.id : payload?.session_id;
+    return codexIdentityHash(value) ? (value as string).toLowerCase() : undefined;
+  } catch { return undefined; }
+}
+
 export function codexSessionId(sessionHash: string): string {
   return `codex:sess:${sessionHash}`;
 }

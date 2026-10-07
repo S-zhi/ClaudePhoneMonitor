@@ -7,5 +7,7 @@ export * from "./socket.js";
 export * from "./challenge.js";
 export * from "./relay.js";
 export * from "./hook-adapter.js";
+export * from "./approval.js";
 export * from "./codex-normalizer.js";
 export * from "./codex-watcher.js";
+export * from "./codex-approvals.js";

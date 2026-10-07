@@ -1,10 +1,10 @@
 import net from "node:net";
-import { lstat, mkdir, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 
 export interface UnixSocketIngestorOptions {
   socketPath: string;
-  onMessage: (message: unknown) => Promise<void> | void;
+  onMessage: (message: unknown, socket: net.Socket) => Promise<void> | void;
   maxLineBytes?: number;
 }
 
@@ -32,6 +32,8 @@ export class UnixSocketIngestor {
   private readonly maxLineBytes: number;
   private server: net.Server | undefined;
   private started = false;
+  private readonly connections = new Set<net.Socket>();
+  private readonly messages = new Set<Promise<void>>();
 
   public constructor(private readonly options: UnixSocketIngestorOptions) {
     safeSocketPath(options.socketPath);
@@ -59,12 +61,16 @@ export class UnixSocketIngestor {
       server.once("listening", onListening);
       server.listen(this.options.socketPath);
     });
+    await chmod(this.options.socketPath, 0o600);
   }
 
   private handleConnection(socket: net.Socket): void {
+    this.connections.add(socket);
+    socket.once("close", () => this.connections.delete(socket));
     socket.setEncoding("utf8");
     let buffer = "";
     let closed = false;
+    let processing = Promise.resolve();
 
     const rejectLine = () => {
       // Drop malformed/oversized input and close the local connection. The hook
@@ -74,7 +80,7 @@ export class UnixSocketIngestor {
     };
 
     socket.on("data", (chunk: string) => {
-      if (closed) return;
+      if (closed || socket.destroyed) return;
       buffer += chunk;
       if (Buffer.byteLength(buffer, "utf8") > this.maxLineBytes * 2) {
         rejectLine();
@@ -97,7 +103,12 @@ export class UnixSocketIngestor {
             newline = buffer.indexOf("\n");
             continue;
           }
-          Promise.resolve(this.options.onMessage(parsed)).catch(() => undefined);
+          // Preserve order within a held hook connection, including the
+          // applied acknowledgement that follows an approval request.
+          processing = processing.then(() => this.options.onMessage(parsed, socket)).catch(() => undefined);
+          const handled = processing;
+          this.messages.add(handled);
+          void handled.finally(() => this.messages.delete(handled));
         }
         newline = buffer.indexOf("\n");
       }
@@ -109,6 +120,9 @@ export class UnixSocketIngestor {
     this.started = false;
     const server = this.server;
     this.server = undefined;
+    for (const socket of this.connections) socket.destroy();
+    this.connections.clear();
+    while (this.messages.size > 0) await Promise.all([...this.messages]);
     if (server) {
       await new Promise<void>((resolve) => {
         server.close(() => resolve());

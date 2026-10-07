@@ -27,6 +27,7 @@ import {
   type TokenValidation,
 } from "./types.js";
 import { isEventType, isGateway } from "./types.js";
+import { parseApprovalPayload, RelayApprovals } from "./approvals.js";
 
 export interface RelayTransport {
   send(message: ServerMessage): void;
@@ -320,6 +321,7 @@ export class Relay {
   private readonly probeStaleInstallations = new Set<string>();
   private readonly sessionSnapshotFingerprints = new Map<string, string>();
   private timer?: NodeJS.Timeout;
+  private readonly approvals: RelayApprovals;
 
   constructor(options: RelayOptions = {}) {
     this.config = loadConfig(undefined, options.config);
@@ -330,6 +332,13 @@ export class Relay {
       });
     this.logger = options.logger ?? new JsonLogger();
     this.now = options.now ?? (() => new Date());
+    this.approvals = new RelayApprovals({
+      repository: this.repository,
+      now: this.now,
+      ownerIsLive: (connectionId, installationId) => this.isPairedConnection(connectionId, "collector", installationId) &&
+        this.repository.getConnection(connectionId)?.status === "online",
+      sendDecision: (connectionId, message) => this.send(connectionId, message),
+    });
     if (options.autoStart !== false) this.start();
   }
 
@@ -392,6 +401,15 @@ export class Relay {
     this.sendError(connectionId, "unauthorized", "authentication required");
     return false;
   }
+
+  /** Remote decisions always require a real unexpired device token, including development mode. */
+  private isPairedConnection(connectionId: string, gateway: Gateway, installationId?: string): boolean {
+    const connection = this.connections.get(connectionId);
+    const record = this.repository.getConnection(connectionId);
+    return Boolean(connection && connection.gateway === gateway && connection.token_id && connection.token_installation_id &&
+      (!installationId || installationId === connection.token_installation_id) && record?.installation_id === connection.token_installation_id &&
+      this.repository.isTokenActive(connection.token_id, gateway, connection.token_installation_id, this.now().toISOString()));
+  }
   connect(options: ConnectOptions): { connection_id: string; record: ConnectionRecord } {
     const now = this.now().toISOString();
     const connectionId = `conn_${randomUUID()}`;
@@ -435,6 +453,7 @@ export class Relay {
       schema_version: RELAY_SCHEMA_VERSION,
       connection_id: connectionId,
       accepted: authenticated,
+      approval_bridge_available: this.isPairedConnection(connectionId, options.gateway, installationId),
       server_time: now,
       ...(installationId ? { installation_id: installationId } : {}),
       ...(options.gateway === "android" && installationId && authenticated
@@ -457,6 +476,7 @@ export class Relay {
       this.now().toISOString(),
     );
     this.connections.delete(connectionId);
+    this.approvals.invalidateConnection(connectionId);
     for (const [probeId, pending] of this.pendingProbes) {
       if (pending.sourceConnectionId === connectionId) this.clearPendingProbe(probeId);
     }
@@ -523,6 +543,26 @@ export class Relay {
       case "usage_snapshot":
         this.handleUsageSnapshot(connectionId, parsed);
         return;
+      case "approval_presence": {
+        const installationId = optionalString(parsed.installation_id);
+        if (!installationId || !this.isPairedConnection(connectionId, "collector", installationId)) {
+          this.sendError(connectionId, "unauthorized", "paired collector required");
+          return;
+        }
+        if (!this.approvals.presence(connectionId, installationId, parsed.request_ids, parsed.source)) {
+          this.sendError(connectionId, "invalid_message", "invalid approval presence");
+          return;
+        }
+        this.broadcastSnapshotsForInstallation(installationId);
+        return;
+      }
+      case "approval_decision": {
+        const installationId = connection.token_installation_id ?? "";
+        const ack = this.approvals.decide(connectionId, installationId, parsed, this.isPairedConnection(connectionId, "android", installationId));
+        this.send(connectionId, ack);
+        if (installationId) this.broadcastSnapshotsForInstallation(installationId);
+        return;
+      }
       case "heartbeat":
         this.handleHeartbeat(connectionId, parsed);
         return;
@@ -555,6 +595,7 @@ export class Relay {
       this.config.offlineAfterMs,
     );
     this.prunePendingChallenges(now.getTime());
+    const approvalChanged = this.approvals.refresh();
 
     let sessionChanged = false;
     for (const installationId of this.repository.listInstallationIds()) {
@@ -578,7 +619,7 @@ export class Relay {
       });
     }
 
-    if (changed || sessionChanged) this.broadcastAllSnapshots();
+    if (changed || sessionChanged || approvalChanged) this.broadcastAllSnapshots();
   }
 
   snapshot(installationId: string): SnapshotMessage {
@@ -608,6 +649,7 @@ export class Relay {
       session_count: state?.session_count ?? 0,
       ...(state?.recent_completion ? { recent_completion: state.recent_completion } : {}),
       active_tasks: state?.active_tasks ?? [],
+      approvals: this.approvals.snapshot(installationId),
       ...(state?.usage ? { usage: state.usage } : {}),
     };
   }
@@ -834,6 +876,7 @@ export class Relay {
       schema_version: RELAY_SCHEMA_VERSION,
       connection_id: connectionId,
       accepted: connection.authenticated || !this.authenticationRequired(),
+      approval_bridge_available: this.isPairedConnection(connectionId, connection.gateway, record.installation_id),
       server_time: this.now().toISOString(),
       ...(record.installation_id ? { installation_id: record.installation_id } : {}),
       ...(connection.gateway === "android" && record.installation_id && connection.authenticated
@@ -867,6 +910,12 @@ export class Relay {
         );
       }
       this.sendError(connectionId, "invalid_event", "invalid event envelope");
+      return;
+    }
+
+    if ((event.event_type === "approval_requested" || event.event_type === "approval_resolved") &&
+      !this.isPairedConnection(connectionId, "collector", event.installation_id)) {
+      this.sendRejectedEventAck(connectionId, event.event_id, "paired collector required", event.sequence);
       return;
     }
 
@@ -916,7 +965,19 @@ export class Relay {
       duplicate: result.duplicate,
     });
     if (!result.duplicate && !result.conflict) {
-      if (result.activity_applied) this.broadcastEventForInstallation(result.stored.event);
+      const isApproval = safeEvent.event_type === "approval_requested" || safeEvent.event_type === "approval_resolved";
+      const approvalApplied = isApproval && this.approvals.recordEvent(connectionId, result.stored.event);
+      const approval = isApproval ? this.approvals.snapshot(safeEvent.installation_id).find((item) =>
+        item.request_id === (safeEvent.payload as { request_id: string }).request_id) : undefined;
+      if ((!isApproval && result.activity_applied) || (approvalApplied && approval &&
+        (safeEvent.event_type === "approval_requested" ? approval.status === "pending" : approval.status !== "pending"))) {
+        // Availability comes from the ephemeral local-hook presence, never an
+        // event replay. Snapshots carry the authoritative history.
+        this.broadcastEventForInstallation(isApproval
+          ? { ...result.stored.event, payload: { ...(result.stored.event.payload as object),
+              ...(safeEvent.event_type === "approval_resolved" ? { status: approval?.status ?? "unknown" } : {}), can_respond: false } }
+          : result.stored.event);
+      }
       this.broadcastSnapshotsForInstallation(safeEvent.installation_id);
     }
   }
@@ -1070,7 +1131,7 @@ export class Relay {
     }
     if (
       connection &&
-      this.authenticationRequired() &&
+      (this.authenticationRequired() || Boolean(connection.token_installation_id)) &&
       connection.token_installation_id !== installationId
     ) {
       this.sendError(connectionId, "unauthorized", "installation does not match phone token");
@@ -1078,6 +1139,9 @@ export class Relay {
     }
 
     for (const stored of this.repository.listEventsAfter(installationId, lastSequence)) {
+      // Approval history is reconstructed only from the authoritative snapshot.
+      // Replaying old actionable payloads cannot prove that a hook is alive.
+      if (stored.event.event_type === "approval_requested" || stored.event.event_type === "approval_resolved") continue;
       // Older databases default presentation eligibility to true, but unknown
       // completions still cannot identify a session or task to present.
       if (stored.activity_applied !== false &&
@@ -1314,6 +1378,13 @@ export class Relay {
       return undefined;
     }
     if (Number.isNaN(Date.parse(occurredAt))) return undefined;
+    if (eventType === "approval_requested" || eventType === "approval_resolved") {
+      const approval = parseApprovalPayload(message.payload, eventType);
+      if (!approval || sessionId === "unknown") return undefined;
+      if (approval.source === "codex" ? !/^codex:sess:[0-9a-f]{64}$/.test(sessionId) : sessionId.startsWith("codex:")) return undefined;
+      if (approval.source === "codex" && message.task_id !== undefined &&
+        (typeof message.task_id !== "string" || !/^codex:turn:[0-9a-f]{64}$/.test(message.task_id))) return undefined;
+    }
 
     if (message.session_kind !== undefined && !["main", "subagent"].includes(String(message.session_kind))) return undefined;
     if (eventType === "session_classification_updated" && (!message.session_kind || sessionId === "unknown" ||
@@ -1442,7 +1513,7 @@ export class Relay {
   ): boolean {
     if (connection.gateway !== "android" || !connection.authenticated) return false;
     if (
-      this.authenticationRequired() &&
+      (this.authenticationRequired() || Boolean(connection.token_installation_id)) &&
       connection.token_installation_id !== installationId
     ) {
       return false;
@@ -1490,6 +1561,7 @@ export class Relay {
       total_running_count: state?.total_running_count,
       session_count: state?.session_count,
       recent_completion: state?.recent_completion,
+      approvals: this.approvals.snapshot(installationId),
       // Elapsed time is computed when a snapshot is sent; it is not a reason
       // to broadcast an otherwise identical snapshot on every Relay tick.
       active_tasks: state?.active_tasks?.map(({ session_id, task_id, started_at }) => ({ session_id, task_id, started_at })),

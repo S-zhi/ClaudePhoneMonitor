@@ -9,6 +9,8 @@ export const EVENT_TYPES = [
   "tool_finished",
   "tool_failed",
   "waiting",
+  "approval_requested",
+  "approval_resolved",
   "task_finished",
   "task_failed",
   "session_ended",
@@ -22,6 +24,7 @@ export type AuthMode = "development" | "paired";
 export type ConnectionStatus = "online" | "stale" | "offline";
 export type ComputerState = ConnectionStatus;
 export type ClaudeState = "idle" | "working" | "waiting";
+export type BlockingWaitingReason = "permission" | "question" | "approval" | "input";
 export type SequenceStatus = "initial" | "in_order" | "gap" | "out_of_order";
 export type EventAckStatus = "accepted" | "duplicate" | "rejected";
 
@@ -97,6 +100,7 @@ export interface SessionSummary {
   session_id: string;
   title: string;
   claude_state: ClaudeState;
+  waiting_reason?: BlockingWaitingReason;
   last_activity_sequence: number;
 }
 
@@ -114,6 +118,47 @@ export interface ActiveTask {
   task_id?: string;
   started_at: string;
   elapsed_ms: number;
+}
+
+export interface ApprovalSummary {
+  request_id: string;
+  session_id: string;
+  task_id?: string;
+  display_name: string;
+  sequence: number;
+  requested_at: string;
+  resolved_at?: string;
+  status: "pending" | "approved" | "denied" | "resolved" | "unknown";
+  source: "claude_code" | "codex";
+  tool_name?: string;
+  can_respond: boolean;
+  expires_at?: string;
+}
+
+export interface ApprovalDecisionMessage {
+  type: "approval_decision";
+  schema_version: 1;
+  installation_id: string;
+  request_id: string;
+  decision_id: string;
+  decision: "allow" | "deny" | "computer";
+}
+
+export interface ApprovalDecisionAckMessage {
+  type: "approval_decision_ack";
+  schema_version: 1;
+  request_id: string;
+  decision_id: string;
+  accepted: boolean;
+  reason: "forwarded" | "unavailable" | "already_decided" | "invalid_request" | "forbidden";
+}
+
+export interface ApprovalPresenceMessage {
+  type: "approval_presence";
+  schema_version: 1;
+  installation_id: string;
+  request_ids: string[];
+  source?: "claude_code" | "codex";
 }
 
 export interface SnapshotMessage {
@@ -134,6 +179,7 @@ export interface SnapshotMessage {
   recent_completion?: RecentCompletion;
   active_tasks?: ActiveTask[];
   usage?: UsageAggregate;
+  approvals?: ApprovalSummary[];
 }
 
 export interface HelloMessage {
@@ -152,6 +198,7 @@ export interface HelloAckMessage {
   schema_version: typeof RELAY_SCHEMA_VERSION;
   connection_id: string;
   accepted: boolean;
+  approval_bridge_available?: boolean;
   server_time: string;
   installation_id?: string;
   snapshot?: SnapshotMessage;
@@ -259,6 +306,8 @@ export interface ErrorMessage {
 }
 
 export type ClientMessage =
+  | ApprovalDecisionMessage
+  | ApprovalPresenceMessage
   | HelloMessage
   | EventEnvelope
   | UsageSnapshotMessage
@@ -270,6 +319,8 @@ export type ClientMessage =
   | ChallengeAckMessage;
 
 export type ServerMessage =
+  | ApprovalDecisionMessage
+  | ApprovalDecisionAckMessage
   | HelloAckMessage
   | EventEnvelope
   | EventAckMessage
