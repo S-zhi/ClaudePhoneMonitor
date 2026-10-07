@@ -102,7 +102,8 @@ export async function runSmoke(options = {}) {
       }
     };
     await Promise.race([startup(), aborted, relay.finished.then(() => { throw new Error('compiled relay exited during startup'); })]);
-    const tests = launch(['--test', '--test-reporter=tap', 'tests/real-lan-contract.test.mjs'], {
+    // One direct test process owns every socket; cancellation cannot orphan file workers.
+    const tests = launch(['--test', '--test-isolation=none', '--test-reporter=tap', 'tests/real-lan-contract.test.mjs'], {
       ...env, RELAY_REQUIRE_LIVE: "1", RELAY_BASE_URL: base, RELAY_BOOTSTRAP_SECRET: options.testSecret ?? secret,
       RELAY_TEST_TIMEOUT_MS: String(positive(options.testTimeoutMs, 2000)),
     }, 'contract');
