@@ -7,6 +7,7 @@ plugins {
 android {
     namespace = "com.example.claudephonemonitor"
     compileSdk = 35
+    buildToolsVersion = "35.0.0"
 
     defaultConfig {
         applicationId = "com.example.claudephonemonitor"

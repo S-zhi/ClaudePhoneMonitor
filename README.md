@@ -13,18 +13,10 @@
 
 ## JavaScript 测试
 
-需要 Node.js 20+：
+需要 Node.js 24.13.0（固定版本见 `.node-version`）；完整环境与 CI 复现见 [CI 指南](docs/ci.md)：
 
 ```bash
-npm install --prefix packages/protocol
-```
-
-```bash
-npm install --prefix services/collector
-```
-
-```bash
-npm install --prefix services/relay
+npm run ci:install
 ```
 
 ```bash
@@ -100,10 +92,10 @@ Android 端令牌存入 Android Keystore；重新配对会清除旧令牌。当�
 
 ## Android 构建
 
-当前构建环境：JDK 17、Gradle 8.14.5、Android SDK Platform 35、Build Tools 35.0.0。
+构建使用 JDK 21、提交的 Gradle 8.14.5 Wrapper、Android SDK Platform 35、Build Tools 35.0.0。Java/Kotlin 字节码目标仍为 17。SDK 配置与许可证要求见 [CI 指南](docs/ci.md)。
 
 ```bash
-gradle :apps:android:testDebugUnitTest :apps:android:assembleDebug
+./gradlew --no-daemon :apps:android:lintDebug :apps:android:testDebugUnitTest :apps:android:assembleDebug
 ```
 
 APK 输出：

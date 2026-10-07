@@ -5,7 +5,7 @@
   "description": "Privacy-preserving macOS collector for Claude phone monitor",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=24.13.0 <25"
   },
   "bin": {
     "claude-phone-monitor-collector": "dist/cli.js"

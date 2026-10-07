@@ -4,20 +4,27 @@ The service accepts Claude activity events from a macOS collector, tracks per-in
 
 ## Run locally
 
-From this directory:
+Use Node.js 24.13.0 (pinned in the root `.node-version`); see [CI and local reproduction](../../docs/ci.md) for the full environment. From this directory:
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
 The default listener is `0.0.0.0:8787`.
 
+`npm start` runs compiled output, so build first:
+
 ```bash
+npm run build
 npm start
+```
+
+Run checks separately:
+
+```bash
 npm test
 npm run typecheck
-npm run build
 ```
 
 Environment variables:

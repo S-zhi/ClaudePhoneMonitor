@@ -18,11 +18,15 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test test/*.test.ts"
+    "test": "tsx --test test/*.test.ts",
+    "build": "tsc --noEmit false --outDir dist --rootDir src --declaration src/index.ts src/schemas.ts --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --skipLibCheck"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=24.13.0 <25"
   }
 }

@@ -2,6 +2,7 @@ node_modules/
 dist/
 build/
 .gradle/
+.kotlin/
 .idea/
 *.iml
 *.apk
@@ -16,3 +17,8 @@ coverage/
 __pycache__/
 logs/
 *.apk
+
+local.properties
+reports/
+artifacts/
+ci-logs/

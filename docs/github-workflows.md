@@ -2,7 +2,7 @@
 
 本仓库的 `.github/` 复制自 [S-zhi/Juejin](https://github.com/S-zhi/Juejin)，源 commit：`b86acaa63e325e0bce565b8b8d21021e69c27b70`。
 
-三个工作流分别负责 issue 状态流转（`state-control.yaml`）、issue 动作控制（`action-control.yaml`）和标签同步（`sync-labels.yml`）。
+项目 CI 的检查、前置条件、制品和合并保护配置见 [CI 指南](ci.md)。以下三个工作流分别负责 issue 状态流转（`state-control.yaml`）、issue 动作控制（`action-control.yaml`）和标签同步（`sync-labels.yml`）。
 
 ## 启用
 
@@ -14,7 +14,7 @@
 
 ## 本地验证
 
-本地验证需要 Python 3.12 和 PyYAML 6.0.2。
+本地验证需要 Python 3.12 和 PyYAML 6.0.3。
 
 ```sh
 python3 -m unittest discover -s .github/tests -p 'test_*.py'
