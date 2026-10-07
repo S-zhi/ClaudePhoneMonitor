@@ -406,6 +406,14 @@ internal object MonitorPresentationReducer {
         return (occurredAtMs - timing.startedAtMs).takeIf { it >= 0L }?.coerceAtMost(MAX_TASK_DURATION_MS)
     }
 
+    internal fun inferTaskDuration(
+        tasks: Map<String, TaskTiming>,
+        sessionId: String?,
+        taskId: String?,
+        occurredAt: String,
+        nowMs: Long,
+    ): Long? = taskDuration(tasks, sessionId, taskId, occurredAt, nowMs)
+
     private fun updateTasks(
         observed: Map<String, TaskTiming>,
         event: MonitorEvent,
@@ -501,8 +509,21 @@ private fun MonitorPresentationState.withoutOrdinaryReminder(): MonitorPresentat
 
 class MonitorViewModel(
     private val client: MonitorClient,
-    private val monotonicClockMs: () -> Long = { System.nanoTime() / 1_000_000L },
+    private val cuePlayer: ReminderCuePlayer,
+    private val cueLedger: ReminderCueLedger,
+    private val cueInstallationId: String?,
+    private val monotonicClockMs: () -> Long,
 ) : ViewModel() {
+    constructor(client: MonitorClient) : this(
+        client, NoOpReminderCuePlayer, InMemoryReminderCueLedger(), null,
+        { System.nanoTime() / 1_000_000L },
+    )
+
+    /** Keeps the original positional clock constructor available to existing callers. */
+    constructor(client: MonitorClient, monotonicClockMs: () -> Long) : this(
+        client, NoOpReminderCuePlayer, InMemoryReminderCueLedger(), null, monotonicClockMs,
+    )
+
     private val _uiState = MutableStateFlow(MonitorUiState())
     val uiState: StateFlow<MonitorUiState> = _uiState.asStateFlow()
     private var presentationState = MonitorPresentationState()
@@ -584,15 +605,18 @@ class MonitorViewModel(
         } else event
         val nowMs = monotonicClockMs()
         val knownTaskIds = presentationState.activeTasks.mapValues { it.value.taskId }
+        val knownTasks = presentationState.activeTasks
         val reduction = MonitorPresentationReducer.reduce(presentationState, presentationEvent, nowMs)
         presentationState = reduction.state
         if (!reduction.accepted) {
             publishPresentation(nowMs)
             return
         }
+        processReminderCues(presentationEvent, previous.snapshot, knownTasks, nowMs)
         val wasPinned = approvalState.active != null
         userActionState = UserActionPresentationReducer.reduce(userActionState, presentationEvent, knownTaskIds)
         approvalState = ApprovalPresentationReducer.reduce(approvalState, presentationEvent, nowMs)
+        playPendingApprovalCues(cueInstallationId ?: presentationEvent.snapshot?.installationId ?: previous.snapshot.installationId)
         if (wasPinned || approvalState.active != null) presentationState = presentationState.withoutOrdinaryReminder()
 
         presentationEvent.snapshot?.sessions?.forEach { rememberSessionTitle(it.sessionId, it.title) }
@@ -678,6 +702,67 @@ class MonitorViewModel(
         }
     }
 
+    private fun processReminderCues(
+        event: MonitorEvent,
+        previousSnapshot: MonitorSnapshot,
+        taskTimings: Map<String, TaskTiming>,
+        nowMs: Long,
+    ) {
+        val installationId = cueInstallationId ?: event.snapshot?.installationId ?: previousSnapshot.installationId
+        val liveFinish = event.type == MonitorEventType.EVENT && event.name == MonitorEventName.TASK_FINISHED
+        val completion = event.snapshot?.recentCompletion?.takeUnless {
+            presentationState.sessionKinds[it.sessionId] == SessionKind.SUBAGENT
+        }
+        val liveCompletion = if (liveFinish && !event.sessionId.isNullOrBlank() && event.sequence != null &&
+            presentationState.sessionKinds[event.sessionId] != SessionKind.SUBAGENT
+        ) RecentCompletion(
+            sessionId = event.sessionId,
+            taskId = event.taskId,
+            sequence = event.sequence,
+            occurredAt = event.occurredAt.ifBlank { event.updatedAt },
+            displayName = "",
+            durationMs = event.durationMs.validTaskDuration(),
+        ) else null
+
+        listOfNotNull(liveCompletion, completion).distinctBy { it.sessionId to it.sequence }.forEach { result ->
+            val matchingSnapshot = completion?.takeIf {
+                it.sessionId == result.sessionId && it.sequence == result.sequence &&
+                    (it.taskId == null || result.taskId == null || it.taskId == result.taskId)
+            }
+            val duration = result.durationMs.validTaskDuration()
+                ?: matchingSnapshot?.durationMs.validTaskDuration()
+                ?: MonitorPresentationReducer.inferTaskDuration(
+                    taskTimings, result.sessionId, result.taskId,
+                    result.occurredAt, nowMs,
+                )
+            if (duration != null) {
+                val key = "completion|$installationId|${result.sessionId}|${result.sequence}"
+                val isFirstObservation = try { cueLedger.consumeIfNew(key) } catch (_: RuntimeException) { false }
+                if (isFirstObservation && duration >= MonitorPresentationReducer.LONG_TASK_THRESHOLD_MS) {
+                    try { cuePlayer.play(ReminderCue.LONG_TASK_COMPLETED) } catch (_: RuntimeException) { }
+                }
+            }
+        }
+    }
+
+    private fun playPendingApprovalCues(installationId: String) {
+        approvalState.requests.values.asSequence()
+            .filter { it.isPending }
+            .sortedWith(compareBy<ApprovalSummary> { it.sequence }.thenBy { it.requestId })
+            .forEach { request ->
+                val key = "approval|$installationId|${request.source.wireValue}|${request.requestId}"
+                consumeAndPlay(key, ReminderCue.APPROVAL_PENDING)
+            }
+    }
+
+    private fun consumeAndPlay(identity: String, cue: ReminderCue) {
+        try {
+            if (cueLedger.consumeIfNew(identity)) cuePlayer.play(cue)
+        } catch (_: RuntimeException) {
+            // Audio and persistence are best-effort side effects; monitor state must keep flowing.
+        }
+    }
+
     private fun refreshPresentationTimer() {
         val nowMs = monotonicClockMs()
         presentationState = MonitorPresentationReducer.expire(presentationState, nowMs)
@@ -740,6 +825,7 @@ class MonitorViewModel(
 
     override fun onCleared() {
         presentationTimerJob?.cancel()
+        cuePlayer.close()
         client.disconnect()
         super.onCleared()
     }
