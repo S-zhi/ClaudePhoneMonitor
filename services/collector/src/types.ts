@@ -3,6 +3,7 @@ export const SCHEMA_VERSION = 1 as const;
 export const EVENT_TYPES = [
   "session_started",
   "session_title_updated",
+  "session_classification_updated",
   "task_started",
   "tool_started",
   "tool_finished",
@@ -12,6 +13,8 @@ export const EVENT_TYPES = [
   "task_failed",
   "session_ended",
 ] as const;
+
+export type SessionKind = "main" | "subagent";
 
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -35,6 +38,7 @@ export interface EventEnvelope {
   session_id: string;
   task_id?: string;
   session_title?: string;
+  session_kind?: SessionKind;
   sequence: number;
   occurred_at: string;
   event_type: EventType;
@@ -204,6 +208,7 @@ export interface NormalizedHookEvent {
   session_id: string;
   task_id?: string;
   session_title?: string;
+  session_kind?: SessionKind;
   occurred_at: string;
   payload: SafeEventPayload;
   correlation_id?: string;

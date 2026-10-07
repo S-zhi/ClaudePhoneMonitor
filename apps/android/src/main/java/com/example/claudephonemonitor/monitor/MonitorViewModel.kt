@@ -19,6 +19,7 @@ internal data class MonitorPresentationState(
     val hasSnapshot: Boolean = false,
     val changeStatus: PetState? = null,
     val changeIdentity: String? = null,
+    val changeSessionId: String? = null,
     val changeDeadlineMs: Long? = null,
     val completionName: String? = null,
     val recentSessionCompletion: RecentCompletion? = null,
@@ -27,6 +28,7 @@ internal data class MonitorPresentationState(
     val lastCompletionIdentity: String? = null,
     val finishTailSequence: Long? = null,
     val workingSessionIds: Set<String>? = null,
+    val sessionKinds: Map<String, SessionKind> = emptyMap(),
 )
 
 internal data class MonitorPresentationReduction(
@@ -43,7 +45,7 @@ internal object MonitorPresentationReducer {
         event: MonitorEvent,
         nowMs: Long,
     ): MonitorPresentationReduction {
-        val current = expire(state, nowMs)
+        var current = expire(state, nowMs)
         val incomingSequence = event.sequenceWatermark()
         val atOrBehindSequence = incomingSequence != null &&
             current.lastSequence?.let { incomingSequence <= it } == true
@@ -54,10 +56,41 @@ internal object MonitorPresentationReducer {
             return MonitorPresentationReduction(current, accepted = false)
         }
 
+        val sessionKinds = current.sessionKinds.toMutableMap()
+        event.snapshot?.sessions?.forEach { row -> row.sessionKind?.let { if (sessionKinds[row.sessionId] != SessionKind.SUBAGENT) sessionKinds[row.sessionId] = it } }
+        event.sessionId?.let { id -> event.sessionKind?.let { if (sessionKinds[id] != SessionKind.SUBAGENT) sessionKinds[id] = it } }
+        val neutral = event.name == MonitorEventName.SESSION_CLASSIFICATION_UPDATED ||
+            (event.type == MonitorEventType.EVENT && sessionKinds[event.sessionId] == SessionKind.SUBAGENT)
+        val resolvedSnapshot = event.snapshot?.copy(sessions = event.snapshot.sessions?.map { row ->
+            row.copy(sessionKind = sessionKinds[row.sessionId] ?: row.sessionKind)
+        })
+        if (sessionKinds[current.changeSessionId] == SessionKind.SUBAGENT) {
+            current = current.copy(changeStatus = null, changeIdentity = null, changeSessionId = null,
+                changeDeadlineMs = null, completionName = null)
+        }
+        if (sessionKinds[current.recentSessionCompletion?.sessionId] == SessionKind.SUBAGENT) {
+            current = current.copy(recentSessionCompletion = null, sessionCompletionDeadlineMs = null)
+        }
+        if (neutral) {
+            val mainWorkingIds = current.workingSessionIds?.filterTo(linkedSetOf()) {
+                sessionKinds[it] != SessionKind.SUBAGENT
+            }
+            return MonitorPresentationReduction(current.copy(
+                baseState = resolvedSnapshot?.aggregatePetState() ?: if (
+                    current.baseState == PetState.WORKING && mainWorkingIds?.isEmpty() == true
+                ) PetState.IDLE else current.baseState,
+                lastSequence = incomingSequence ?: current.lastSequence,
+                hasSnapshot = current.hasSnapshot || resolvedSnapshot != null,
+                sessionKinds = sessionKinds,
+                workingSessionIds = resolvedSnapshot?.sessions?.filter {
+                    it.sessionKind != SessionKind.SUBAGENT && it.claudeState == ClaudeState.WORKING
+                }?.mapTo(linkedSetOf()) { it.sessionId } ?: mainWorkingIds,
+            ), accepted = true)
+        }
         val outcome = event.outcomeState()
         val outcomeIdentity = event.outcomeIdentity()
         val duplicateOutcome = outcomeIdentity != null && outcomeIdentity == current.lastOutcomeIdentity
-        val completion = event.snapshot?.recentCompletion
+        val completion = event.snapshot?.recentCompletion?.takeUnless { sessionKinds[it.sessionId] == SessionKind.SUBAGENT }
         val matchingEventCompletion = completion?.takeIf {
             event.type == MonitorEventType.EVENT && event.name == MonitorEventName.TASK_FINISHED &&
                 it.sessionId == event.sessionId && it.sequence == event.sequence &&
@@ -89,7 +122,7 @@ internal object MonitorPresentationReducer {
         val baseState = when {
             event.type == MonitorEventType.DISCONNECTED -> PetState.OFFLINE
             current.baseState == PetState.OFFLINE && event.snapshot == null -> PetState.OFFLINE
-            event.snapshot != null -> event.snapshot.aggregatePetState()
+            event.snapshot != null -> resolvedSnapshot!!.aggregatePetState()
             outcome != null && current.baseState == PetState.WORKING -> PetState.WORKING
             outcome != null && current.baseState == PetState.OFFLINE -> PetState.OFFLINE
             outcome != null -> PetState.IDLE
@@ -207,11 +240,13 @@ internal object MonitorPresentationReducer {
         }
 
         val state = current.copy(
+            sessionKinds = sessionKinds,
             baseState = baseState,
             lastSequence = incomingSequence ?: current.lastSequence,
             hasSnapshot = current.hasSnapshot || event.snapshot != null,
             changeStatus = changeStatus,
             changeIdentity = changeIdentity,
+            changeSessionId = if (startsChange) newSnapshotCompletion?.sessionId ?: event.sessionId else current.changeSessionId,
             changeDeadlineMs = changeDeadlineMs,
             completionName = completionName,
             recentSessionCompletion = recentSessionCompletion,
@@ -224,7 +259,7 @@ internal object MonitorPresentationReducer {
                 else -> current.finishTailSequence
             },
             workingSessionIds = event.snapshot?.let { snapshot ->
-                snapshot.sessions?.filter { it.claudeState == ClaudeState.WORKING }
+                snapshot.sessions?.filter { sessionKinds[it.sessionId] != SessionKind.SUBAGENT && it.claudeState == ClaudeState.WORKING }
                     ?.mapTo(linkedSetOf()) { it.sessionId }
             } ?: if (event.snapshot != null) null else current.workingSessionIds,
         )
@@ -238,6 +273,7 @@ internal object MonitorPresentationReducer {
         return state.copy(
             changeStatus = if (changeExpired) null else state.changeStatus,
             changeIdentity = if (changeExpired) null else state.changeIdentity,
+            changeSessionId = if (changeExpired) null else state.changeSessionId,
             changeDeadlineMs = if (changeExpired) null else state.changeDeadlineMs,
             completionName = if (changeExpired) null else state.completionName,
             recentSessionCompletion = if (completionExpired) null else state.recentSessionCompletion,
@@ -369,10 +405,13 @@ class MonitorViewModel(
             presentationEvent.sessionTitle?.let { rememberSessionTitle(presentationEvent.sessionId, it) }
         }
 
+        val isNeutral = presentationEvent.name == MonitorEventName.SESSION_CLASSIFICATION_UPDATED ||
+            (presentationEvent.type == MonitorEventType.EVENT &&
+                presentationState.sessionKinds[presentationEvent.sessionId] == SessionKind.SUBAGENT)
         val isTitleUpdate = presentationEvent.type == MonitorEventType.EVENT &&
             presentationEvent.name == MonitorEventName.SESSION_TITLE_UPDATED
         val activityFromEvent = when {
-            isTitleUpdate -> null
+            isTitleUpdate || isNeutral -> null
             presentationEvent.type == MonitorEventType.EVENT && presentationEvent.name != MonitorEventName.UNKNOWN -> presentationEvent.name.wireValue
             else -> presentationEvent.activity
         }
@@ -380,7 +419,8 @@ class MonitorViewModel(
             val highestSequence = listOfNotNull(snapshot.lastSequence, presentationEvent.sequence, previous.snapshot.lastSequence).maxOrNull() ?: 0L
             snapshot.copy(
                 lastSequence = highestSequence,
-                activity = if (isTitleUpdate) previous.snapshot.activity else activityFromEvent ?: snapshot.activity,
+                sessions = snapshot.sessions?.map { it.copy(sessionKind = presentationState.sessionKinds[it.sessionId] ?: it.sessionKind) },
+                activity = if (isTitleUpdate || isNeutral) previous.snapshot.activity else activityFromEvent ?: snapshot.activity,
             )
         }
         val nextSnapshot = incomingSnapshot ?: previous.snapshot.copy(
@@ -389,7 +429,11 @@ class MonitorViewModel(
             updatedAt = presentationEvent.updatedAt.ifBlank { previous.snapshot.updatedAt },
         )
         val completion = when {
-            incomingSnapshot?.recentCompletion != null -> incomingSnapshot.recentCompletion
+            isNeutral -> previous.snapshot.recentCompletion?.takeUnless {
+                presentationState.sessionKinds[it.sessionId] == SessionKind.SUBAGENT
+            }
+            incomingSnapshot?.recentCompletion != null &&
+                presentationState.sessionKinds[incomingSnapshot.recentCompletion.sessionId] != SessionKind.SUBAGENT -> incomingSnapshot.recentCompletion
             presentationEvent.type == MonitorEventType.EVENT && presentationEvent.name == MonitorEventName.TASK_FINISHED &&
                 presentationEvent.sessionId != null && presentationEvent.sequence != null -> RecentCompletion(
                 sessionId = presentationEvent.sessionId,
@@ -401,8 +445,11 @@ class MonitorViewModel(
             incomingSnapshot != null -> null
             else -> previous.snapshot.recentCompletion
         }
-        val presentationSnapshot = nextSnapshot.copy(recentCompletion = completion)
-        val activity = if (isTitleUpdate) previous.activity else {
+        val presentationSnapshot = nextSnapshot.copy(
+            recentCompletion = completion,
+            sessions = nextSnapshot.sessions?.map { it.copy(sessionKind = presentationState.sessionKinds[it.sessionId] ?: it.sessionKind) },
+        )
+        val activity = if (isTitleUpdate || isNeutral) previous.activity else {
             (activityFromEvent ?: nextSnapshot.activity ?: event.name.wireValue).toActivityVariation()
         }
         val detail = presentationEvent.detail.ifBlank { defaultMessage(presentationEvent, nextSnapshot) }
@@ -412,7 +459,7 @@ class MonitorViewModel(
                 petState = presentationState.baseState,
                 stateChange = MonitorPresentationReducer.stateChange(presentationState, nowMs),
                 activity = activity,
-                message = detail,
+                message = if (isNeutral) current.message else detail,
                 isConnected = when (presentationEvent.type) {
                     MonitorEventType.CONNECTED -> true
                     MonitorEventType.DISCONNECTED -> false

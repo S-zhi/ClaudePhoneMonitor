@@ -3,6 +3,7 @@ export const RELAY_SCHEMA_VERSION = 1 as const;
 export const EVENT_TYPES = [
   "session_started",
   "session_title_updated",
+  "session_classification_updated",
   "task_started",
   "tool_started",
   "tool_finished",
@@ -13,6 +14,7 @@ export const EVENT_TYPES = [
   "session_ended",
 ] as const;
 
+export type SessionKind = "main" | "subagent";
 export type EventType = (typeof EVENT_TYPES)[number];
 export type Gateway = "collector" | "android";
 export type TokenRole = "collector" | "android";
@@ -30,6 +32,7 @@ export interface EventEnvelope {
   installation_id: string;
   session_id: string;
   session_title?: string;
+  session_kind?: SessionKind;
   task_id?: string;
   sequence: number;
   occurred_at: string;
@@ -90,6 +93,7 @@ export interface SnapshotActivity {
 }
 
 export interface SessionSummary {
+  session_kind?: SessionKind;
   session_id: string;
   title: string;
   claude_state: ClaudeState;
@@ -114,6 +118,9 @@ export interface SnapshotMessage {
   last_sequence: number | null;
   updated_at: string;
   sessions?: SessionSummary[];
+  main_running_count?: number;
+  main_session_count?: number;
+  total_running_count?: number;
   running_count?: number;
   session_count?: number;
   recent_completion?: RecentCompletion;
@@ -283,6 +290,9 @@ export interface InstallationState {
   activity?: SnapshotActivity;
   updated_at: string;
   sessions?: SessionSummary[];
+  main_running_count?: number;
+  main_session_count?: number;
+  total_running_count?: number;
   running_count?: number;
   session_count?: number;
   recent_completion?: RecentCompletion;

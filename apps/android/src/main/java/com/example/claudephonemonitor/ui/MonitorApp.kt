@@ -347,7 +347,7 @@ internal fun MonitorScreen(
                             status = stateChange.status,
                             animationState = resolveStateChangeAnimationState(uiState),
                             completionName = stateChange.completionName,
-                            runningCount = uiState.snapshot.runningCount,
+                            runningCount = uiState.snapshot.mainRunningCount,
                             activity = uiState.activity,
                             compact = compact || short,
                             modifier = Modifier
@@ -527,7 +527,7 @@ private fun SessionSummaryPanel(
                 verticalArrangement = Arrangement.spacedBy((4f * scale).dp),
             ) {
                 Text(
-                    text = "SESSIONS · ${formatSessionCount(snapshot.sessionCount ?: snapshot.sessions?.size)}",
+                    text = "Main Sessions · ${formatSessionCount(snapshot.mainSessionCount)}",
                     color = MutedInkColor,
                     fontSize = (8f * scale).sp,
                     letterSpacing = (1.7f * scale).sp,
@@ -535,7 +535,7 @@ private fun SessionSummaryPanel(
                     modifier = Modifier.testTag("session-count"),
                 )
                 Text(
-                    text = "RUNNING · ${formatSessionCount(snapshot.runningCount)}",
+                    text = "Main Running · ${formatSessionCount(snapshot.mainRunningCount)}",
                     color = MutedInkColor,
                     fontSize = (8f * scale).sp,
                     letterSpacing = (1.1f * scale).sp,
@@ -543,6 +543,12 @@ private fun SessionSummaryPanel(
                     modifier = Modifier.testTag("running-count"),
                 )
             }
+            Text(
+                text = "Total Running · ${formatSessionCount(snapshot.totalRunningCount)} · Includes subagents",
+                color = MutedInkColor,
+                fontSize = (8f * scale).sp,
+                modifier = Modifier.padding(start = markerSpace, bottom = (9f * scale).dp).testTag("total-running-count"),
+            )
             sessions.forEachIndexed { index, session ->
                 val state = session.displayState(completion)
                 Row(

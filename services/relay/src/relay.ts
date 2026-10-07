@@ -601,8 +601,11 @@ export class Relay {
       last_sequence: state?.last_sequence ?? null,
       updated_at: state?.updated_at ?? now,
       ...(state?.sessions ? { sessions: state.sessions } : {}),
-      ...(state?.running_count !== undefined ? { running_count: state.running_count } : {}),
-      ...(state?.session_count !== undefined ? { session_count: state.session_count } : {}),
+      main_running_count: state?.main_running_count ?? 0,
+      main_session_count: state?.main_session_count ?? 0,
+      total_running_count: state?.total_running_count ?? 0,
+      running_count: state?.running_count ?? 0,
+      session_count: state?.session_count ?? 0,
       ...(state?.recent_completion ? { recent_completion: state.recent_completion } : {}),
       ...(state?.usage ? { usage: state.usage } : {}),
     };
@@ -1311,6 +1314,10 @@ export class Relay {
     }
     if (Number.isNaN(Date.parse(occurredAt))) return undefined;
 
+    if (message.session_kind !== undefined && !["main", "subagent"].includes(String(message.session_kind))) return undefined;
+    if (eventType === "session_classification_updated" && (!message.session_kind || sessionId === "unknown" ||
+      !isRecord(message.payload) || Object.keys(message.payload).length !== 0)) return undefined;
+    const sessionKind = message.session_kind as "main" | "subagent" | undefined;
     const taskId = optionalString(message.task_id);
     const correlationId = optionalString(message.correlation_id);
     const sessionTitle =
@@ -1326,6 +1333,7 @@ export class Relay {
       installation_id: installationId,
       session_id: sessionId,
       ...(sessionTitle ? { session_title: sessionTitle } : {}),
+      ...(sessionKind ? { session_kind: sessionKind } : {}),
       ...(taskId ? { task_id: taskId } : {}),
       sequence,
       occurred_at: occurredAt,
@@ -1476,6 +1484,9 @@ export class Relay {
       claude_state: state?.claude_state,
       sessions: state?.sessions,
       running_count: state?.running_count,
+      main_running_count: state?.main_running_count,
+      main_session_count: state?.main_session_count,
+      total_running_count: state?.total_running_count,
       session_count: state?.session_count,
       recent_completion: state?.recent_completion,
     });

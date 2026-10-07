@@ -11,7 +11,7 @@ enum class SessionDisplayState(val label: String) {
 }
 
 fun MonitorSnapshot.sortedTopSessions(): List<SessionSummary> =
-    sessions.orEmpty().sortedWith(
+    sessions.orEmpty().filter { it.sessionKind != SessionKind.SUBAGENT }.sortedWith(
         compareByDescending<SessionSummary> { it.lastActivitySequence }.thenBy { it.sessionId },
     ).take(5)
 
@@ -39,12 +39,14 @@ internal fun RecentCompletion.matchesCompletion(other: RecentCompletion?): Boole
 
 internal fun MonitorSnapshot.aggregatePetState(): PetState = when {
     computerState == ComputerState.OFFLINE -> PetState.OFFLINE
-    sessions?.any { it.claudeState == ClaudeState.WORKING } == true ||
+    mainRunningCount?.let { it > 0 } == true -> PetState.WORKING
+    mainRunningCount == null && sessions?.any { it.sessionKind != SessionKind.SUBAGENT && it.claudeState == ClaudeState.WORKING } == true -> PetState.WORKING
+    mainRunningCount == null && sessions?.any { it.sessionKind == SessionKind.SUBAGENT } != true &&
         runningCount?.let { it > 0 } == true -> PetState.WORKING
-    runningCount == null && claudeState == ClaudeState.WORKING -> PetState.WORKING
+    mainRunningCount == null && sessions == null && runningCount == null && claudeState == ClaudeState.WORKING -> PetState.WORKING
     computerState == ComputerState.STALE -> PetState.WAITING
     sessions != null -> when (sortedTopSessions().firstOrNull()?.claudeState) {
-        ClaudeState.WORKING -> PetState.WORKING
+        ClaudeState.WORKING -> if (mainRunningCount == 0) PetState.IDLE else PetState.WORKING
         ClaudeState.WAITING -> PetState.WAITING
         else -> PetState.IDLE
     }

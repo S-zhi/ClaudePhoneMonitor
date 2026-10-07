@@ -11,6 +11,7 @@ import type {
   EventEnvelope,
   InstallationState,
   SessionSummary,
+  SessionKind,
   RecentCompletion,
   PairingCreateInput,
   PairingRecord,
@@ -107,6 +108,7 @@ export interface RelayRepository {
 }
 
 interface SessionState {
+  session_kind?: SessionKind;
   installation_id: string;
   session_id: string;
   title?: string;
@@ -160,12 +162,14 @@ function applySessionEvent(
     claude_state: "idle",
     last_sequence: -1,
     last_activity_sequence: -1,
-    last_activity_at: event.occurred_at,
-    updated_at: event.occurred_at,
+    last_activity_at: event.event_type === "session_classification_updated" ? "1970-01-01T00:00:00.000Z" : event.occurred_at,
+    updated_at: event.event_type === "session_classification_updated" ? "1970-01-01T00:00:00.000Z" : event.occurred_at,
     ended: false,
   };
   next.last_activity_sequence ??= next.last_sequence;
   next.last_sequence = event.sequence;
+  next.session_kind = previous?.session_kind === "subagent" ? "subagent" : event.session_kind ?? previous?.session_kind ?? "main";
+  if (event.event_type === "session_classification_updated") return next;
   if (event.event_type === "session_title_updated") {
     if (!canUpdateSessionTitle(previous, event)) return next;
     next.title = event.session_title;
@@ -257,10 +261,11 @@ function aggregatedState(
   now: string,
 ): Pick<
   InstallationState,
-  "claude_state" | "sessions" | "running_count" | "session_count" | "recent_completion"
+  "claude_state" | "sessions" | "running_count" | "session_count" | "recent_completion" | "main_running_count" | "main_session_count" | "total_running_count"
 > {
   const nowMs = Date.parse(now);
-  const active = records.filter((record) => !record.ended && nowMs - Date.parse(record.last_activity_at) < SESSION_TTL_MS);
+  const allActive = records.filter((record) => !record.ended && nowMs - Date.parse(record.last_activity_at) < SESSION_TTL_MS);
+  const active = allActive.filter((record) => record.session_kind !== "subagent");
   const ordered = active.sort((a, b) =>
     (b.last_activity_sequence ?? b.last_sequence) - (a.last_activity_sequence ?? a.last_sequence) ||
     (a.session_id < b.session_id ? -1 : a.session_id > b.session_id ? 1 : 0),
@@ -268,6 +273,7 @@ function aggregatedState(
   const working = active.some((record) => record.claude_state === "working");
   const mostRecent = ordered[0];
   const completion = records
+    .filter((record) => record.session_kind !== "subagent")
     .map((record) => record.completion)
     .filter(
       (item): item is RecentCompletion =>
@@ -278,14 +284,28 @@ function aggregatedState(
     claude_state: working ? "working" : mostRecent?.claude_state ?? "idle",
     sessions: ordered.slice(0, 5).map((record) => ({
       session_id: record.session_id,
+      session_kind: record.session_kind ?? "main",
       title: sessionDisplayName(record),
       claude_state: record.claude_state,
       last_activity_sequence: record.last_activity_sequence ?? record.last_sequence,
     })),
+    main_running_count: active.filter((record) => record.claude_state === "working").length,
+    main_session_count: active.length,
+    total_running_count: allActive.filter((record) => record.claude_state === "working").length,
     running_count: active.filter((record) => record.claude_state === "working").length,
     session_count: active.length,
     ...(completion ? { recent_completion: completion } : {}),
   };
+}
+
+function presentInstallationState(state: InstallationState, records: SessionState[], now: string): InstallationState {
+  if (!records.length) return { ...state, main_running_count: 0, main_session_count: 0, total_running_count: 0, running_count: 0, session_count: 0 };
+  const next = { ...state, ...aggregatedState(records, now) };
+  if (typeof next.activity === "object" && records.some((record) =>
+      record.session_id === next.activity?.session_id && record.session_kind === "subagent")) {
+    delete next.activity;
+  }
+  return next;
 }
 
 export function hashOpaqueToken(token: string): string {
@@ -537,9 +557,11 @@ export class InMemoryRelayRepository implements RelayRepository {
     const priorSession = this.sessions.get(sessionKey);
     const updatedSession = applySessionEvent(priorSession, event, receivedAt);
     const titleUpdated = canUpdateSessionTitle(priorSession, event);
-    const changesActivity = event.event_type !== "session_title_updated" &&
+    const changesActivity = updatedSession?.session_kind !== "subagent" &&
+      !["session_title_updated", "session_classification_updated"].includes(event.event_type) &&
       (event.session_id === "unknown" || updatedSession?.last_activity_sequence === event.sequence);
-    stored.activity_applied = (changesActivity || titleUpdated) && sequence_status !== "out_of_order" &&
+    stored.event = { ...stored.event, ...(updatedSession?.session_kind ? { session_kind: updatedSession.session_kind } : {}) };
+    stored.activity_applied = (changesActivity || (titleUpdated && updatedSession?.session_kind !== "subagent") || event.event_type === "session_classification_updated" || updatedSession?.session_kind === "subagent") && sequence_status !== "out_of_order" &&
       !(event.session_id === "unknown" && event.event_type === "task_finished");
 
     const nextState: InstallationState =
@@ -553,8 +575,8 @@ export class InMemoryRelayRepository implements RelayRepository {
               previousSequence === null
                 ? event.sequence
                 : Math.max(previousSequence, event.sequence),
-            claude_state: stateForEvent(event.event_type, current?.claude_state ?? "idle"),
-            ...(event.event_type !== "session_title_updated" ? { activity: {
+            claude_state: changesActivity ? stateForEvent(event.event_type, current?.claude_state ?? "idle") : current?.claude_state ?? "idle",
+            ...(changesActivity ? { activity: {
               event_type: event.event_type,
               session_id: event.session_id,
               ...(event.task_id ? { task_id: event.task_id } : {}),
@@ -630,7 +652,10 @@ export class InMemoryRelayRepository implements RelayRepository {
     return (this.eventsByInstallation.get(installationId) ?? [])
       .filter((stored) => stored.event.sequence > sequence)
       .sort((left, right) => left.event.sequence - right.event.sequence)
-      .map((stored) => clone(stored));
+      .map((stored) => {
+        const record = this.sessions.get(`${installationId}\u0000${stored.event.session_id}`);
+        return clone({ ...stored, event: { ...stored.event, ...(record?.session_kind ? { session_kind: record.session_kind } : {}) } });
+      });
   }
 
   listInstallationIds(): string[] {
@@ -648,7 +673,7 @@ export class InMemoryRelayRepository implements RelayRepository {
     const state = this.installations.get(installationId);
     if (!state) return undefined;
     const records = [...this.sessions.values()].filter((record) => record.installation_id === installationId);
-    return clone(records.length ? { ...state, ...aggregatedState(records, now) } : state);
+    return clone(presentInstallationState(state, records, now));
   }
 
   createPairing(now: string, ttlMs: number, input?: PairingCreateInput): PairingRecord {
@@ -1068,9 +1093,11 @@ export class SqliteRelayRepository implements RelayRepository {
     const priorSession = optionalJson<SessionState>(sessionRow?.session_json);
     const updatedSession = applySessionEvent(priorSession, event, receivedAt);
     const titleUpdated = canUpdateSessionTitle(priorSession, event);
-    const changesActivity = event.event_type !== "session_title_updated" &&
+    const changesActivity = updatedSession?.session_kind !== "subagent" &&
+      !["session_title_updated", "session_classification_updated"].includes(event.event_type) &&
       (event.session_id === "unknown" || updatedSession?.last_activity_sequence === event.sequence);
-    stored.activity_applied = (changesActivity || titleUpdated) && sequence_status !== "out_of_order" &&
+    stored.event = { ...stored.event, ...(updatedSession?.session_kind ? { session_kind: updatedSession.session_kind } : {}) };
+    stored.activity_applied = (changesActivity || (titleUpdated && updatedSession?.session_kind !== "subagent") || event.event_type === "session_classification_updated" || updatedSession?.session_kind === "subagent") && sequence_status !== "out_of_order" &&
       !(event.session_id === "unknown" && event.event_type === "task_finished");
     const nextState: InstallationState =
       current && previousSequence !== null && event.sequence < previousSequence
@@ -1083,8 +1110,8 @@ export class SqliteRelayRepository implements RelayRepository {
               previousSequence === null
                 ? event.sequence
                 : Math.max(previousSequence, event.sequence),
-            claude_state: stateForEvent(event.event_type, current?.claude_state ?? "idle"),
-            ...(event.event_type !== "session_title_updated" ? { activity: {
+            claude_state: changesActivity ? stateForEvent(event.event_type, current?.claude_state ?? "idle") : current?.claude_state ?? "idle",
+            ...(changesActivity ? { activity: {
               event_type: event.event_type,
               session_id: event.session_id,
               ...(event.task_id ? { task_id: event.task_id } : {}),
@@ -1102,7 +1129,7 @@ export class SqliteRelayRepository implements RelayRepository {
           event.event_id,
           event.installation_id,
           event.sequence,
-          JSON.stringify(event),
+          JSON.stringify(stored.event),
           receivedAt,
           stored.activity_applied ? 1 : 0,
         );
@@ -1220,7 +1247,12 @@ export class SqliteRelayRepository implements RelayRepository {
     return rows
       .map((row) => this.rowToStoredEvent(row))
       .filter((stored): stored is StoredEvent => stored !== undefined)
-      .map((stored) => clone(stored));
+      .map((stored) => {
+        const row = this.db.prepare("SELECT session_json FROM relay_sessions WHERE installation_id = ? AND session_id = ?")
+          .get(installationId, stored.event.session_id) as SqlRow | undefined;
+        const record = optionalJson<SessionState>(row?.session_json);
+        return clone({ ...stored, event: { ...stored.event, ...(record?.session_kind ? { session_kind: record.session_kind } : {}) } });
+      });
   }
 
   listInstallationIds(): string[] {
@@ -1272,7 +1304,7 @@ export class SqliteRelayRepository implements RelayRepository {
       .prepare("SELECT session_json FROM relay_sessions WHERE installation_id = ?")
       .all(installationId) as SqlRow[];
     const sessions = sessionRows.map((sessionRow) => optionalJson<SessionState>(sessionRow.session_json)).filter((item): item is SessionState => Boolean(item));
-    return sessions.length ? { ...state, ...aggregatedState(sessions, now) } : state;
+    return presentInstallationState(state, sessions, now);
   }
 
   createPairing(now: string, ttlMs: number, input?: PairingCreateInput): PairingRecord {

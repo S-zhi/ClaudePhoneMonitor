@@ -30,6 +30,7 @@ export type EventType = MonitorEventType;
 export type ComputerState = (typeof COMPUTER_STATES)[keyof typeof COMPUTER_STATES];
 export type ConnectionStatus = ComputerState;
 export type ClaudeState = (typeof CLAUDE_STATES)[keyof typeof CLAUDE_STATES];
+export type SessionKind = "main" | "subagent";
 export type WaitingReason = "permission" | "question" | "approval" | "input" | "unknown";
 export type SequenceStatus = "initial" | "in_order" | "gap" | "out_of_order";
 export type EventAckStatus = "accepted" | "duplicate" | "rejected";
@@ -49,6 +50,7 @@ export interface NormalizedEvent {
   readonly task_id?: string;
   /** Safe native session/task label; never derived from prompts or paths. */
   readonly session_title?: string;
+  readonly session_kind?: SessionKind;
   readonly occurred_at: WireTimestamp;
   readonly payload: SafeEventPayload;
   readonly correlation_id?: string;
@@ -59,6 +61,7 @@ export type EmptyPayload = Readonly<Record<string, never>>;
 /** Only sanitized metadata crosses the event boundary; never prompt/tool input/result. */
 export interface EventPayloadByType {
   readonly [EVENT_TYPES.SESSION_STARTED]: EmptyPayload;
+  readonly [EVENT_TYPES.SESSION_CLASSIFICATION_UPDATED]: EmptyPayload;
   readonly [EVENT_TYPES.SESSION_TITLE_UPDATED]: EmptyPayload;
   readonly [EVENT_TYPES.TASK_STARTED]: EmptyPayload;
   readonly [EVENT_TYPES.TOOL_STARTED]: {
@@ -102,6 +105,7 @@ export interface EventEnvelopeBase<T extends MonitorEventType = MonitorEventType
   readonly session_id: string;
   readonly task_id?: string;
   readonly session_title?: string;
+  readonly session_kind?: SessionKind;
   readonly sequence: SequenceNumber;
   readonly occurred_at: WireTimestamp;
   readonly event_type: T;
@@ -123,6 +127,7 @@ export interface SnapshotActivity {
 }
 
 export interface SessionSummary {
+  readonly session_kind?: SessionKind;
   readonly session_id: string;
   readonly title: string;
   readonly claude_state: ClaudeState;
@@ -146,6 +151,9 @@ export interface Snapshot {
   /** Short, sanitized label or event metadata; never a prompt/tool input/result. */
   readonly activity?: string | SnapshotActivity;
   readonly sessions?: readonly SessionSummary[];
+  readonly main_running_count?: number;
+  readonly main_session_count?: number;
+  readonly total_running_count?: number;
   readonly running_count?: number;
   readonly session_count?: number;
   readonly recent_completion?: RecentCompletion;

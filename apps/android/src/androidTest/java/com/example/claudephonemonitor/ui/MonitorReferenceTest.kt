@@ -48,13 +48,31 @@ class MonitorReferenceTest {
     @Test fun statusShowsAllFiveRowsAndGlobalCounts() {
         render(fixture())
         assertAllTitles()
-        compose.onNodeWithText("SESSIONS · 06").assertIsDisplayed()
-        compose.onNodeWithText("RUNNING · 03").assertIsDisplayed()
+        compose.onNodeWithText("Main Sessions · 06").assertIsDisplayed()
+        compose.onNodeWithText("Main Running · 03").assertIsDisplayed()
         compose.onNodeWithContentDescription("Session 1: Working").assertIsDisplayed()
         compose.onNodeWithContentDescription("Session 3: Waiting").assertIsDisplayed()
         compose.onNodeWithContentDescription("Session 4: Idle").assertIsDisplayed()
         compose.onNodeWithContentDescription("Session 5: Done").assertIsDisplayed()
+        compose.onNodeWithText("Total Running · 08 · Includes subagents").assertIsDisplayed()
         capture("status.png")
+    }
+
+    @Test fun legacyCountersRemainUnavailable() {
+        val state = fixture()
+        render(state.copy(snapshot = state.snapshot.copy(mainRunningCount = null, mainSessionCount = null, totalRunningCount = null)))
+        compose.onNodeWithText("Main Sessions · —").assertIsDisplayed()
+        compose.onNodeWithText("Main Running · —").assertIsDisplayed()
+        compose.onNodeWithText("Total Running · — · Includes subagents").assertIsDisplayed()
+    }
+
+    @Test fun childRowsDoNotDisplaceMainRows() {
+        val state = fixture()
+        val child = SessionSummary("child", "Hidden child", ClaudeState.WORKING, 1000,
+            com.example.claudephonemonitor.monitor.SessionKind.SUBAGENT)
+        render(state.copy(snapshot = state.snapshot.copy(sessions = listOf(child) + state.snapshot.sessions.orEmpty())))
+        assertAllTitles()
+        compose.onNodeWithText("Hidden child").assertDoesNotExist()
     }
 
     @Test fun completionRetainsWorkingAnimationAndNamesTheMatchingRow() {
@@ -135,6 +153,7 @@ class MonitorReferenceTest {
                     computerState = ComputerState.ONLINE,
                     claudeState = ClaudeState.WORKING,
                     sessions = sessions, runningCount = 3, sessionCount = 6,
+                    mainRunningCount = 3, mainSessionCount = 6, totalRunningCount = 8,
                     recentCompletion = completion,
                 ),
                 petState = PetState.WORKING, activity = ActivityVariation.TOOL,

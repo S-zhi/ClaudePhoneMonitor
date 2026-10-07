@@ -281,3 +281,15 @@ test("recognizes every wire message discriminator", () => {
     messages[0],
   );
 });
+
+test("classification metadata requires a known identity, valid kind and empty payload", () => {
+  const metadata = { ...makeEvent(EVENT_TYPES.SESSION_CLASSIFICATION_UPDATED, {}), session_kind: "subagent" };
+  assert.equal(validateEventEnvelope(metadata).success, true);
+  assert.equal(validateEventEnvelope({ ...metadata, session_kind: undefined }).success, false);
+  assert.equal(validateEventEnvelope({ ...metadata, session_kind: "worker" }).success, false);
+  assert.equal(validateEventEnvelope({ ...metadata, session_id: "unknown" }).success, false);
+  assert.equal(validateEventEnvelope({ ...metadata, payload: { reason: "input" } }).success, false);
+  assert.equal(validateEventEnvelope({ ...makeEvent(EVENT_TYPES.TASK_STARTED, {}), session_kind: "main" }).success, true);
+  assert.equal(validateSnapshot({ ...snapshot, main_running_count: 0, main_session_count: 0, total_running_count: 3 }).success, true);
+  assert.equal(validateSnapshot({ ...snapshot, total_running_count: -1 }).success, false);
+});

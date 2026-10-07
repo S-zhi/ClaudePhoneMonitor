@@ -111,6 +111,9 @@ export function reduceEvent(state: MonitorState, event: EventEnvelope): MonitorS
   const decision = acceptSequence(state.last_sequence, event.sequence);
   if (!decision.accepted) return state;
 
+  if (event.session_kind === "subagent" || event.event_type === EVENT_TYPES.SESSION_CLASSIFICATION_UPDATED) {
+    return { ...state, last_sequence: event.sequence };
+  }
   const classification = classifyEvent(event);
   const eventAt = timestampToMillis(event.occurred_at);
   const at = Math.max(state.updated_at, eventAt);

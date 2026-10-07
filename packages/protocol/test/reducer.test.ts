@@ -201,3 +201,18 @@ test("maps canonical snapshots to base activity", () => {
     snapshot: offline,
   })), MONITOR_STATUS.OFFLINE);
 });
+
+test("child lifecycle and classification metadata only advance the reducer watermark", () => {
+  let state = monitorReducer(createInitialMonitorState(), { type: "event", event: event(EVENT_TYPES.TASK_STARTED, {}, 1) });
+  const base = state;
+  for (const type of [EVENT_TYPES.TASK_FINISHED, EVENT_TYPES.TASK_FAILED, EVENT_TYPES.TOOL_FAILED, EVENT_TYPES.WAITING, EVENT_TYPES.SESSION_ENDED]) {
+    state = monitorReducer(state, { type: "event", event: { ...event(type, {}, state.last_sequence + 1), session_kind: "subagent" } });
+    assert.equal(state.base_status, base.base_status);
+    assert.equal(state.overlay, base.overlay);
+    assert.equal(state.updated_at, base.updated_at);
+  }
+  state = monitorReducer(state, { type: "event", event: { ...event(EVENT_TYPES.SESSION_CLASSIFICATION_UPDATED, {}, 7), session_kind: "main" } });
+  assert.equal(state.last_sequence, 7);
+  assert.equal(state.updated_at, base.updated_at);
+  assert.equal(state.base_status, MONITOR_STATUS.WORKING);
+});
