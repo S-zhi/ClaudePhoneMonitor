@@ -273,9 +273,22 @@ export const SNAPSHOT_SCHEMA: JsonSchema = {
           sequence: sequenceSchema,
           occurred_at: wireTimestampSchema,
           display_name: safeTitleSchema,
+          duration_ms: { ...sequenceSchema, maximum: 86_400_000 },
         },
         ["session_id", "sequence", "occurred_at", "display_name"],
       ),
+      active_tasks: {
+        type: "array",
+        items: strictObject(
+          {
+            session_id: identifiedSessionIdSchema,
+            task_id: idSchema,
+            started_at: wireTimestampSchema,
+            elapsed_ms: { ...sequenceSchema, maximum: 86_400_000 },
+          },
+          ["session_id", "started_at", "elapsed_ms"],
+        ),
+      },
       usage: USAGE_AGGREGATE_SCHEMA,
       last_sequence: { oneOf: [sequenceSchema, { type: "null" }] },
       updated_at: wireTimestampSchema,

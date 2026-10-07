@@ -17,6 +17,7 @@ export const EVENT_TYPES = [
 export type SessionKind = "main" | "subagent";
 
 export type EventType = (typeof EVENT_TYPES)[number];
+export type WaitingReason = "permission" | "question" | "approval" | "input" | "unknown";
 
 /**
  * The only data that may leave the workstation in an event payload.
@@ -27,6 +28,7 @@ export interface SafeEventPayload {
   tool_name?: string;
   duration_ms?: number;
   exit_code?: number;
+  reason?: WaitingReason;
 }
 
 /** Canonical v1 event wire envelope. */
@@ -226,9 +228,10 @@ export function isSafeEventPayload(value: unknown): value is SafeEventPayload {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   for (const key of Object.keys(record)) {
-    if (key !== "tool_name" && key !== "duration_ms" && key !== "exit_code") return false;
+    if (key !== "tool_name" && key !== "duration_ms" && key !== "exit_code" && key !== "reason") return false;
   }
   if (record.tool_name !== undefined && typeof record.tool_name !== "string") return false;
+  if (record.reason !== undefined && !isWaitingReason(record.reason)) return false;
   if (
     record.duration_ms !== undefined &&
     (typeof record.duration_ms !== "number" || !Number.isInteger(record.duration_ms) || record.duration_ms < 0)
@@ -242,6 +245,10 @@ export function isSafeEventPayload(value: unknown): value is SafeEventPayload {
     return false;
   }
   return true;
+}
+
+export function isWaitingReason(value: unknown): value is WaitingReason {
+  return typeof value === "string" && ["permission", "question", "approval", "input", "unknown"].includes(value);
 }
 
 export function isEventEnvelope(value: unknown): value is EventEnvelope {

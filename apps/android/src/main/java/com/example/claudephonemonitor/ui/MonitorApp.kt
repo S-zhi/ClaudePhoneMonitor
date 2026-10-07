@@ -7,6 +7,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,6 +26,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
@@ -69,6 +71,7 @@ import com.example.claudephonemonitor.monitor.PairingRepository
 import com.example.claudephonemonitor.monitor.PairingStore
 import com.example.claudephonemonitor.monitor.MonitorSnapshot
 import com.example.claudephonemonitor.monitor.RecentCompletion
+import com.example.claudephonemonitor.monitor.ReminderStrength
 import com.example.claudephonemonitor.monitor.SessionDisplayState
 import com.example.claudephonemonitor.monitor.displayState
 import com.example.claudephonemonitor.monitor.sortedTopSessions
@@ -379,6 +382,16 @@ internal fun MonitorScreen(
             )
         }
 
+        if (stateChange?.strength == ReminderStrength.WEAK) {
+            WeakReminder(
+                status = stateChange.status,
+                completionName = stateChange.completionName,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(end = 24.dp, top = 68.dp),
+            )
+        }
+
         AnimatedVisibility(
             visible = controlsReady && uiState.controlsVisible && page != MonitorPage.USAGE,
             enter = fadeIn(animationSpec = tween(180)),
@@ -422,6 +435,46 @@ internal fun MonitorScreen(
             titleContentColor = InkColor,
             textContentColor = MutedInkColor,
         )
+    }
+}
+
+@Composable
+private fun WeakReminder(
+    status: PetState,
+    completionName: String?,
+    modifier: Modifier = Modifier,
+) {
+    val accent = statusColor(status)
+    Row(
+        modifier = modifier
+            .widthIn(max = 360.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xF02B2521))
+            .border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(12.dp))
+            .testTag("weak-reminder")
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(7.dp).clip(CircleShape).background(accent))
+        Column {
+            Text(
+                text = status.title,
+                color = accent,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.1.sp,
+            )
+            if (status == PetState.FINISH && !completionName.isNullOrBlank()) {
+                Text(
+                    text = "任务完成：$completionName",
+                    color = InkColor,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
     }
 }
 

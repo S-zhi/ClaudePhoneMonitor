@@ -26,6 +26,7 @@ import com.example.claudephonemonitor.monitor.MonitorSnapshot
 import com.example.claudephonemonitor.monitor.MonitorUiState
 import com.example.claudephonemonitor.monitor.PetState
 import com.example.claudephonemonitor.monitor.RecentCompletion
+import com.example.claudephonemonitor.monitor.ReminderStrength
 import com.example.claudephonemonitor.monitor.SessionSummary
 import com.example.claudephonemonitor.monitor.StateChangeUi
 import java.io.File
@@ -76,12 +77,39 @@ class MonitorReferenceTest {
     }
 
     @Test fun completionRetainsWorkingAnimationAndNamesTheMatchingRow() {
-        render(fixture().copy(stateChange = StateChangeUi(PetState.FINISH, 15_000L, titles.last())))
+        render(fixture().copy(stateChange = StateChangeUi(PetState.FINISH, 15_000L, titles.last(), ReminderStrength.STRONG)))
         assertAllTitles()
         compose.onNodeWithText("任务完成：${titles.last()}").assertIsDisplayed()
         compose.onNodeWithContentDescription("Session 5: Done").assertIsDisplayed()
         compose.onNodeWithContentDescription("Clawd animation: WORKING").assertIsDisplayed()
         capture("state-change.png")
+    }
+
+    @Test fun weakCompletionStaysOnStatusPage() {
+        render(fixture().copy(stateChange = StateChangeUi(PetState.FINISH, 5_000L, titles.last())))
+        compose.onNodeWithTag("session-list").assertIsDisplayed()
+        compose.onNodeWithTag("weak-reminder").assertIsDisplayed()
+        compose.onNodeWithText("任务完成：${titles.last()}").assertIsDisplayed()
+        compose.onNodeWithTag("state-change-title").assertDoesNotExist()
+    }
+
+    @Test fun weakCompletionStaysOnUsagePage() {
+        render(fixture().copy(
+            usagePageVisible = true,
+            stateChange = StateChangeUi(PetState.FINISH, 5_000L, titles.last()),
+        ))
+        compose.onNodeWithText("Usage 用量消耗").assertIsDisplayed()
+        compose.onNodeWithTag("weak-reminder").assertIsDisplayed()
+        compose.onNodeWithTag("session-list").assertDoesNotExist()
+    }
+
+    @Test fun strongCompletionIsVisibleAboveUsagePage() {
+        render(fixture().copy(
+            usagePageVisible = true,
+            stateChange = StateChangeUi(PetState.FINISH, 15_000L, titles.last(), ReminderStrength.STRONG),
+        ))
+        compose.onNodeWithTag("state-change-title").assertIsDisplayed()
+        compose.onNodeWithText("Usage 用量消耗").assertDoesNotExist()
     }
 
     @Test fun shortLandscapeKeepsAllFiveRowsVisible() {

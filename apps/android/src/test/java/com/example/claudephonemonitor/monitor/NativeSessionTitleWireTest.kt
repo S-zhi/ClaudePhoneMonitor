@@ -56,7 +56,7 @@ class NativeSessionTitleWireTest {
         assertEquals(before.activity, updated.activity)
         assertEquals(before.snapshot.activity, updated.snapshot.activity)
         assertEquals(before.stateChange?.status, updated.stateChange?.status)
-        assertEquals(15_100L, fixture.nowMs + requireNotNull(updated.stateChange).remainingMs)
+        assertEquals(5_100L, fixture.nowMs + requireNotNull(updated.stateChange).remainingMs)
         assertEquals(before.eventCount + 1, updated.eventCount)
 
         fixture.nowMs = 1_100
@@ -145,7 +145,7 @@ class NativeSessionTitleWireTest {
         ))
         runCurrent()
         assertEquals(PetState.WORKING, fixture.viewModel.uiState.value.petState)
-        assertEquals(PetState.WORKING, fixture.viewModel.uiState.value.stateChange?.status)
+        assertEquals(PetState.FINISH, fixture.viewModel.uiState.value.stateChange?.status)
         assertNull(fixture.viewModel.uiState.value.recentSessionCompletion)
         fixture.nowMs = 300
         fixture.client.emit(event(4, "task_finished", SID_A, TASK_B))
@@ -218,8 +218,8 @@ class NativeSessionTitleWireTest {
         fixture.client.emit(event(7, "session_title_updated", SID_A, TASK_A, "旧完成的迟到标题"))
         runCurrent()
         assertNull(fixture.viewModel.uiState.value.recentSessionCompletion)
-        assertEquals(PetState.WORKING, fixture.viewModel.uiState.value.stateChange?.status)
-        assertNull(fixture.viewModel.uiState.value.stateChange?.completionName)
+        assertEquals(PetState.FINISH, fixture.viewModel.uiState.value.stateChange?.status)
+        assertEquals("原任务名称", fixture.viewModel.uiState.value.stateChange?.completionName)
     }
 
     private fun withMonitor(test: suspend TestScope.(Fixture) -> Unit) = runTest {
@@ -252,7 +252,9 @@ class NativeSessionTitleWireTest {
         put("sequence", sequence)
         put("occurred_at", "2026-10-07T01:00:00Z")
         put("event_type", type)
-        put("payload", JSONObject())
+        put("payload", JSONObject().apply {
+            if (type == "task_finished") put("duration_ms", 300_001)
+        })
         title?.let { put("session_title", it) }
     }.toString()
 

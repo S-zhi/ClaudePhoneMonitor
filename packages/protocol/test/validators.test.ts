@@ -76,6 +76,35 @@ test("validates canonical event envelopes and snapshots", () => {
   assert.equal(SNAPSHOT_SCHEMA.type, "object");
 });
 
+test("task timing remains optional and covers active tasks outside the five session rows", () => {
+  const activeTasks = Array.from({ length: 6 }, (_, index) => ({
+    session_id: `session-${index}`,
+    ...(index === 0 ? {} : { task_id: `task-${index}` }),
+    started_at: "2026-10-07T00:00:00.000Z",
+    elapsed_ms: index === 0 ? 0 : 300_001,
+  }));
+  const recentCompletion = {
+    session_id: "finished-session", task_id: "finished-task", sequence: 4,
+    occurred_at: "2026-10-07T00:05:00.001Z", display_name: "Finished task", duration_ms: 300_001,
+  };
+  const timed = { ...snapshot, active_tasks: activeTasks, recent_completion: recentCompletion };
+  assert.equal(validateSnapshot(snapshot).success, true);
+  assert.equal(validateSnapshot(timed).success, true);
+  assert.equal(validateProtocolMessage(timed).success, true);
+  for (const invalid of [
+    { elapsed_ms: -1 }, { elapsed_ms: 0.5 }, { elapsed_ms: Number.MAX_SAFE_INTEGER + 1 },
+    { elapsed_ms: 86_400_001 }, { started_at: "not-a-date" }, { session_id: "unknown" },
+    { raw_prompt: "private" },
+  ]) {
+    assert.equal(validateSnapshot({ ...timed, active_tasks: [{ ...activeTasks[0], ...invalid }] }).success, false);
+  }
+  for (const duration of [-1, 0.5, 86_400_001, "300001", null]) {
+    assert.equal(validateSnapshot({ ...timed, recent_completion: { ...recentCompletion, duration_ms: duration } }).success, false);
+  }
+  assert.equal(validateSnapshot({ ...timed, active_tasks: [{ ...activeTasks[0], elapsed_ms: 86_400_000 }],
+    recent_completion: { ...recentCompletion, duration_ms: 86_400_000 } }).success, true);
+});
+
 test("validates optional Usage snapshot and collector-only absolute message", () => {
   const extended = { ...snapshot, usage };
   assert.equal(validateSnapshot(extended).success, true);

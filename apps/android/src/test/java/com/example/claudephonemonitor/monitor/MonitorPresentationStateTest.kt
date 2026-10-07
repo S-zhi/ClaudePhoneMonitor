@@ -21,7 +21,7 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class MonitorPresentationStateTest {
     @Test
-    fun allSixStatusPromptsExpireAtExactFifteenSecondBoundary() {
+    fun allSixStatusesWithoutLongTaskEvidenceExpireAtExactFiveSecondBoundary() {
         val cases = listOf(
             Triple(PetState.IDLE, snapshot(2, PetState.IDLE), snapshot(1, PetState.WORKING)),
             Triple(PetState.WORKING, snapshot(2, PetState.WORKING), snapshot(1, PetState.IDLE)),
@@ -34,23 +34,24 @@ class MonitorPresentationStateTest {
             var state = reduce(MonitorPresentationState(), initial, 0L)
             state = reduce(state, event, 100L)
             assertEquals(expected, MonitorPresentationReducer.stateChange(state, 100L)?.status)
-            assertEquals(15_000L, MonitorPresentationReducer.stateChange(state, 100L)?.remainingMs)
-            assertEquals(1L, MonitorPresentationReducer.stateChange(state, 15_099L)?.remainingMs)
-            assertNull(MonitorPresentationReducer.stateChange(state, 15_100L))
+            assertEquals(ReminderStrength.WEAK, MonitorPresentationReducer.stateChange(state, 100L)?.strength)
+            assertEquals(5_000L, MonitorPresentationReducer.stateChange(state, 100L)?.remainingMs)
+            assertEquals(1L, MonitorPresentationReducer.stateChange(state, 5_099L)?.remainingMs)
+            assertNull(MonitorPresentationReducer.stateChange(state, 5_100L))
         }
     }
 
     @Test
-    fun stateChangesUseFifteenSecondDeadlineAndPreserveUnderlyingPetState() {
+    fun ordinaryStateChangesUseFiveSecondDeadlineAndPreserveUnderlyingPetState() {
         var state = MonitorPresentationState()
         state = reduce(state, snapshot(1, PetState.IDLE), 0L)
         assertNull(MonitorPresentationReducer.stateChange(state, 0L)) // Initial authority is not an animation.
 
         state = reduce(state, snapshot(2, PetState.WORKING), 100L)
         assertEquals(PetState.WORKING, state.baseState)
-        assertEquals(StateChangeUi(PetState.WORKING, 15_000L), MonitorPresentationReducer.stateChange(state, 100L))
-        assertEquals(1L, MonitorPresentationReducer.stateChange(state, 15_099L)?.remainingMs)
-        assertNull(MonitorPresentationReducer.stateChange(state, 15_100L))
+        assertEquals(StateChangeUi(PetState.WORKING, 5_000L), MonitorPresentationReducer.stateChange(state, 100L))
+        assertEquals(1L, MonitorPresentationReducer.stateChange(state, 5_099L)?.remainingMs)
+        assertNull(MonitorPresentationReducer.stateChange(state, 5_100L))
     }
 
     @Test
@@ -96,6 +97,7 @@ class MonitorPresentationStateTest {
             taskId = "task-1",
             sessionTitle = "release prep",
             sequence = 11,
+            durationMs = 300_001L,
         )
         state = reduce(state, finish, 100L)
         assertEquals(PetState.WORKING, state.baseState)
@@ -133,6 +135,7 @@ class MonitorPresentationStateTest {
             sessionId = "s-1",
             taskId = "task-a",
             sequence = 41,
+            durationMs = 300_001L,
         )
         state = reduce(state, finish, 100L)
         state = reduce(state, MonitorEvent(
@@ -203,6 +206,7 @@ class MonitorPresentationStateTest {
             sessionId = "codex-done",
             taskId = "turn-done",
             sequence = 11,
+            durationMs = 300_001L,
         ), 100L)
         val deadline = state.changeDeadlineMs
         assertEquals(PetState.WORKING, state.baseState)
@@ -252,7 +256,7 @@ class MonitorPresentationStateTest {
 
         assertEquals(PetState.WORKING, state.baseState)
         assertEquals(PetState.WORKING, MonitorPresentationReducer.stateChange(state, 200L)?.status)
-        assertEquals(15_000L, MonitorPresentationReducer.stateChange(state, 200L)?.remainingMs)
+        assertEquals(5_000L, MonitorPresentationReducer.stateChange(state, 200L)?.remainingMs)
     }
 
     @Test
@@ -339,7 +343,7 @@ class MonitorPresentationStateTest {
             runCurrent()
             assertNull(vm.uiState.value.stateChange)
 
-            client.emit("""{"type":"event","event_type":"task_finished","session_id":"s-7","task_id":"task-3","session_title":"release prep","sequence":2,"occurred_at":"2026-10-07T01:00:00Z"}""")
+            client.emit("""{"type":"event","event_type":"task_finished","session_id":"s-7","task_id":"task-3","session_title":"release prep","sequence":2,"occurred_at":"2026-10-07T01:00:00Z","payload":{"duration_ms":300001}}""")
             runCurrent()
             assertEquals(PetState.IDLE, vm.uiState.value.petState)
             assertEquals(PetState.FINISH, vm.uiState.value.stateChange?.status)
@@ -425,7 +429,7 @@ class MonitorPresentationStateTest {
             assertEquals(2L, vm.uiState.value.snapshot.usage?.revision)
 
             vm.showStatusPage()
-            assertEquals(MonitorPage.STATE_CHANGE, selectMonitorPage(vm.uiState.value))
+            assertEquals(MonitorPage.STATUS, selectMonitorPage(vm.uiState.value))
             assertEquals(PetState.FINISH, vm.uiState.value.stateChange?.status)
             assertEquals(finishDeadline, monotonicMs + requireNotNull(vm.uiState.value.stateChange).remainingMs)
             vm.showUsagePage()
@@ -438,10 +442,10 @@ class MonitorPresentationStateTest {
             assertEquals(MonitorPage.USAGE, selectMonitorPage(vm.uiState.value))
 
             vm.showStatusPage()
-            assertEquals(MonitorPage.STATE_CHANGE, selectMonitorPage(vm.uiState.value))
+            assertEquals(MonitorPage.STATUS, selectMonitorPage(vm.uiState.value))
             assertEquals(PetState.OFFLINE, vm.uiState.value.petState)
             assertEquals(PetState.OFFLINE, vm.uiState.value.stateChange?.status)
-            assertEquals(15_000L, vm.uiState.value.stateChange?.remainingMs)
+            assertEquals(5_000L, vm.uiState.value.stateChange?.remainingMs)
         } finally {
             store.clear()
             kotlinx.coroutines.Dispatchers.resetMain()

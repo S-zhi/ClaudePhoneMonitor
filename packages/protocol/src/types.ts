@@ -140,6 +140,15 @@ export interface RecentCompletion {
   readonly sequence: SequenceNumber;
   readonly occurred_at: WireTimestamp;
   readonly display_name: string;
+  readonly duration_ms?: number;
+}
+
+/** Task timing is independent of the five-row session presentation limit. */
+export interface ActiveTask {
+  readonly session_id: string;
+  readonly task_id?: string;
+  readonly started_at: WireTimestamp;
+  readonly elapsed_ms: number;
 }
 
 export interface Snapshot {
@@ -157,6 +166,7 @@ export interface Snapshot {
   readonly running_count?: number;
   readonly session_count?: number;
   readonly recent_completion?: RecentCompletion;
+  readonly active_tasks?: readonly ActiveTask[];
   /** Optional server-authoritative Usage aggregate; older clients may ignore it. */
   readonly usage?: UsageAggregate;
   readonly last_sequence: SequenceNumber | null;

@@ -78,7 +78,7 @@ class UsageRelayWireIntegrationTest {
             assertEquals(1L, vm.uiState.value.snapshot.usage?.revision)
 
             vm.showStatusPage()
-            assertEquals(MonitorPage.STATE_CHANGE, selectMonitorPage(vm.uiState.value))
+            assertEquals(MonitorPage.STATUS, selectMonitorPage(vm.uiState.value))
             assertEquals(PetState.FINISH, vm.uiState.value.stateChange?.status)
             assertEquals(finishDeadline, monotonicMs + requireNotNull(vm.uiState.value.stateChange).remainingMs)
         } finally {

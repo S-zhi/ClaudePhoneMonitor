@@ -1,6 +1,7 @@
 package com.example.claudephonemonitor.monitor
 
 import org.json.JSONObject
+import java.time.OffsetDateTime
 import java.util.Locale
 
 /** The six visual states exposed by the phone monitor. */
@@ -81,6 +82,15 @@ data class MonitorSnapshot(
     val recentCompletion: RecentCompletion? = null,
     /** Optional, absolute server-authoritative usage aggregate. */
     val usage: UsageAggregate? = null,
+    /** All current main tasks, independently of the five visible session rows. */
+    val activeTasks: List<ActiveTask>? = null,
+)
+
+data class ActiveTask(
+    val sessionId: String,
+    val taskId: String? = null,
+    val startedAt: String,
+    val elapsedMs: Long,
 )
 
 enum class UsageQuality(val wireValue: String) {
@@ -148,6 +158,7 @@ data class RecentCompletion(
     val sequence: Long,
     val occurredAt: String,
     val displayName: String,
+    val durationMs: Long? = null,
 ) {
     /** Stable across live event + authoritative snapshot delivery and reconnects. */
     val identity: String get() = "$sessionId|${taskId.orEmpty()}|$sequence"
@@ -167,6 +178,8 @@ data class MonitorEvent(
     val sessionTitle: String? = null,
     val occurredAt: String = "",
     val sessionKind: SessionKind? = null,
+    val durationMs: Long? = null,
+    val waitingReason: String? = null,
 ) {
     fun toWireJson(): String = JSONObject().apply {
         put("type", type.wireValue)
@@ -182,6 +195,12 @@ data class MonitorEvent(
         taskId?.let { put("task_id", it) }
         sessionTitle?.let { put("session_title", it) }
         if (occurredAt.isNotBlank()) put("occurred_at", occurredAt)
+        if (durationMs != null || waitingReason != null) {
+            put("payload", JSONObject().apply {
+                durationMs?.let { put("duration_ms", it) }
+                waitingReason?.let { put("reason", it) }
+            })
+        }
     }.toString()
 
     companion object {
@@ -229,6 +248,9 @@ data class MonitorEvent(
                 taskId = root.stringOrNull("task_id"),
                 sessionTitle = root.stringOrNull("session_title"),
                 occurredAt = root.optString("occurred_at"),
+                durationMs = root.optJSONObject("payload")?.durationOrNull("duration_ms"),
+                waitingReason = root.optJSONObject("payload")?.stringOrNull("reason")
+                    ?.takeIf { it in WAITING_REASONS },
             )
         }.getOrNull()
 
@@ -282,9 +304,22 @@ data class MonitorEvent(
                     sequence = sequence,
                     occurredAt = completion.optString("occurred_at"),
                     displayName = completion.optString("display_name").ifBlank { fallbackSessionTitle(id) },
+                    durationMs = completion.durationOrNull("duration_ms"),
                 )
             },
             usage = json.optJSONObject("usage")?.let(::usageFromJson),
+            activeTasks = json.optJSONArray("active_tasks")?.let { array ->
+                buildList {
+                    for (index in 0 until array.length()) {
+                        val item = array.optJSONObject(index) ?: continue
+                        val id = item.stringOrNull("session_id") ?: continue
+                        val startedAt = item.stringOrNull("started_at") ?: continue
+                        val elapsedMs = item.durationOrNull("elapsed_ms") ?: continue
+                        if (wireTimestampMillis(startedAt) == null) continue
+                        add(ActiveTask(id, item.stringOrNull("task_id"), startedAt, elapsedMs))
+                    }
+                }
+            },
         )
 
         private fun usageFromJson(json: JSONObject): UsageAggregate? = runCatching {
@@ -399,10 +434,23 @@ fun MonitorSnapshot.toJson(): JSONObject = JSONObject().apply {
             put("sequence", completion.sequence)
             put("occurred_at", completion.occurredAt)
             put("display_name", completion.displayName)
+            completion.durationMs?.let { put("duration_ms", it) }
         })
     }
     usage?.let { aggregate ->
         put("usage", aggregate.toJson())
+    }
+    activeTasks?.let { tasks ->
+        put("active_tasks", org.json.JSONArray().apply {
+            tasks.forEach { task ->
+                put(JSONObject().apply {
+                    put("session_id", task.sessionId)
+                    task.taskId?.let { put("task_id", it) }
+                    put("started_at", task.startedAt)
+                    put("elapsed_ms", task.elapsedMs)
+                })
+            }
+        })
     }
 }
 
@@ -463,6 +511,16 @@ private fun JSONObject.intOrNull(key: String): Int? = longOrNull(key)?.takeIf {
 }?.toInt()
 
 private const val MAX_SAFE_INTEGER = 9_007_199_254_740_991.0
+internal const val MAX_TASK_DURATION_MS = 86_400_000L
+private val WAITING_REASONS = setOf("permission", "question", "approval", "input", "unknown")
+private val WIRE_TIMESTAMP = Regex("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,3})?(?:Z|[+-]\\d{2}:\\d{2})$")
+
+internal fun wireTimestampMillis(value: String): Long? =
+    if (!WIRE_TIMESTAMP.matches(value)) null else runCatching { OffsetDateTime.parse(value).toInstant().toEpochMilli() }.getOrNull()
+
+internal fun Long?.validTaskDuration(): Long? = this?.takeIf { it in 0..MAX_TASK_DURATION_MS }
+
+private fun JSONObject.durationOrNull(key: String): Long? = safeIntegerOrNull(key).validTaskDuration()
 
 private fun JSONObject.safeIntegerOrNull(key: String): Long? {
     if (!has(key) || isNull(key)) return null

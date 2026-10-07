@@ -1,5 +1,7 @@
 # Clawd Android 展示整合设计
 
+本文记录最初的界面整合设计；后续状态提醒时长与页面路由以 [Issue #17 提醒分级](issue-17-reminder-policy.md) 为准。
+
 ## 两套实现的分工
 
 - **形象与动作来源**：`update_clawd_assets@1054ce5` 的 Clawd 24×22 采样帧与本地资源，不再调用旧 `PixelPetCanvas`。

@@ -47,7 +47,7 @@ class PairingViewModelOwnershipTest {
             clientA.emit(snapshot(2, ClaudeState.WORKING))
             runCurrent()
             assertEquals(PetState.WORKING, vmA.uiState.value.petState)
-            assertEquals(15_000L, vmA.uiState.value.stateChange?.remainingMs)
+            assertEquals(5_000L, vmA.uiState.value.stateChange?.remainingMs)
 
             val configA = PairingConfig("http://relay", "ws://relay", "install-same", "synthetic-A")
             val configB = configA.copy(androidToken = "synthetic-B")
@@ -82,7 +82,7 @@ class PairingViewModelOwnershipTest {
             advanceTimeBy(16_000L)
             runCurrent()
             assertEquals(PetState.WORKING, vmA.uiState.value.petState)
-            assertEquals(15_000L, vmA.uiState.value.stateChange?.remainingMs)
+            assertEquals(5_000L, vmA.uiState.value.stateChange?.remainingMs)
             assertEquals(PetState.IDLE, vmB.uiState.value.petState)
             assertEquals(1L, vmB.uiState.value.snapshot.lastSequence)
             assertEquals(1, clientB.connectCount)

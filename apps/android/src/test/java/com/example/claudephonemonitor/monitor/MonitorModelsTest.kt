@@ -31,6 +31,66 @@ class MonitorModelsTest {
     }
 
     @Test
+    fun reminderTimingAndWaitingReasonRoundTripWithoutChangingTheSnapshot() {
+        val snapshot = MonitorSnapshot(computerState = ComputerState.ONLINE, lastSequence = 8,
+            activeTasks = listOf(ActiveTask("running", "task-running", "2026-10-07T01:00:00Z", 300_001)),
+            recentCompletion = RecentCompletion("done", "task-done", 7, "2026-10-07T01:05:00.001Z", "Release", 300_001))
+        val decoded = requireNotNull(MonitorEvent.fromWireJson(MonitorEvent(MonitorEventType.SNAPSHOT, snapshot = snapshot).toWireJson()))
+        assertEquals(snapshot, decoded.snapshot)
+
+        val waiting = MonitorEvent(MonitorEventType.EVENT, name = MonitorEventName.WAITING,
+            sessionId = "running", taskId = "task-running", sequence = 9, waitingReason = "permission")
+        assertEquals(waiting, MonitorEvent.fromWireJson(waiting.toWireJson()))
+        val finish = waiting.copy(name = MonitorEventName.TASK_FINISHED, waitingReason = null, durationMs = 300_001)
+        assertEquals(finish, MonitorEvent.fromWireJson(finish.toWireJson()))
+    }
+
+    @Test
+    fun malformedDurationMetadataIsIgnoredWithoutDroppingItsEvent() {
+        listOf("-1", "300000.5", "86400001", "\"300001\"", "null", "{}").forEach { duration ->
+            val event = requireNotNull(MonitorEvent.fromWireJson(
+                """{"type":"event","event_type":"task_failed","sequence":2,"payload":{"duration_ms":$duration}}"""))
+            assertEquals(MonitorEventName.TASK_FAILED, event.name)
+            assertEquals(null, event.durationMs)
+        }
+        listOf(0L, 300_000L, 300_001L, 86_400_000L).forEach { duration ->
+            val event = requireNotNull(MonitorEvent.fromWireJson(
+                """{"type":"event","event_type":"task_finished","payload":{"duration_ms":$duration}}"""))
+            assertEquals(duration, event.durationMs)
+        }
+    }
+
+    @Test
+    fun activeTaskTimingRequiresValidSourceTimestampAndIntegerElapsedTime() {
+        val parsed = requireNotNull(MonitorEvent.fromWireJson(
+            """{"type":"snapshot","computer_state":"online","claude_state":"working","last_sequence":4,
+                "active_tasks":[
+                    {"session_id":"good","started_at":"2026-10-07T01:00:00Z","elapsed_ms":300001},
+                    {"session_id":"no-start","elapsed_ms":300001},
+                    {"session_id":"bad-start","started_at":"2026-02-30T01:00:00Z","elapsed_ms":300001},
+                    {"session_id":"negative","started_at":"2026-10-07T01:00:00Z","elapsed_ms":-1},
+                    {"session_id":"string","started_at":"2026-10-07T01:00:00Z","elapsed_ms":"300001"},
+                    {"session_id":"decimal","started_at":"2026-10-07T01:00:00Z","elapsed_ms":300001.2},
+                    {"session_id":"too-long","started_at":"2026-10-07T01:00:00Z","elapsed_ms":86400001}
+                ]}""".trimIndent())).snapshot
+        assertEquals(ClaudeState.WORKING, parsed?.claudeState)
+        assertEquals(listOf(ActiveTask("good", null, "2026-10-07T01:00:00Z", 300_001)), parsed?.activeTasks)
+        val empty = requireNotNull(MonitorEvent.fromWireJson(
+            """{"type":"snapshot","computer_state":"online","active_tasks":[]}"""))
+        assertEquals(emptyList<ActiveTask>(), empty.snapshot?.activeTasks)
+    }
+
+    @Test
+    fun waitingReasonsAcceptOnlyTheExplicitProtocolEnums() {
+        listOf("permission", "question", "approval", "input", "unknown", "stale", "Approval", "user_text").forEach { reason ->
+            val event = requireNotNull(MonitorEvent.fromWireJson(
+                """{"type":"event","event_type":"waiting","payload":{"reason":"$reason"}}"""))
+            assertEquals(if (reason in listOf("permission", "question", "approval", "input", "unknown")) reason else null,
+                event.waitingReason)
+        }
+    }
+
+    @Test
     fun parsesServerUsageSnapshotAndRoundTripsOptionalAggregate() {
         val parsed = requireNotNull(
             MonitorEvent.fromWireJson(
