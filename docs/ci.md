@@ -44,7 +44,7 @@ CODEX_LIVE_WIRE_PATH=/absolute/path/to/redacted-recording.json ./gradlew --no-da
 
 ## 现有 Android lint 警告
 
-Issue #16 开始时的既有 `lint-results-debug.txt` 报告为 **0 errors、15 warnings**：8 条 `GradleDependency`（Compose BOM、Activity、Core、Lifecycle 的新版本提示）；3 条 `ModifierParameter`（ClawdProceduralView 和 PixelPetCanvas 的默认 Modifier/参数顺序）；各 1 条 `DiscouragedApi`（固定横屏）、`InsecureBaseConfiguration`（debug 允许明文 LAN）、`DataExtractionRules`（Android 12+ 备份规则）、`MissingApplicationIcon`（应用图标）。这些是已有告警，CI 接入不自动升级依赖或添加 suppression。明文网络仅适合可信 LAN，备份规则与图标应作为产品发布前的独立修复。本次本地运行实际得到 **0 errors、7 warnings**：上述 3 条 ModifierParameter 与 4 条单项警告仍存在，GradleDependency 提示未出现；该提示受远端版本元数据与缓存影响，不能把少 8 条理解为依赖已升级。每次运行以实际生成的 lint 报告为准。
+Issue #16 开始时的既有 `lint-results-debug.txt` 报告为 **0 errors、15 warnings**：8 条 `GradleDependency`（Compose BOM、Activity、Core、Lifecycle 的新版本提示）；3 条 `ModifierParameter`（ClawdProceduralView 和 PixelPetCanvas 的默认 Modifier/参数顺序）；各 1 条 `DiscouragedApi`（固定横屏）、`InsecureBaseConfiguration`（debug 允许明文 LAN）、`DataExtractionRules`（Android 12+ 备份规则）、`MissingApplicationIcon`（应用图标）。这些是已有告警，CI 接入不自动升级依赖或添加 suppression。明文网络仅适合可信 LAN，备份规则与图标应作为产品发布前的独立修复。本次本地运行在显式固定 Build Tools 35.0.0 后实际得到 **0 errors、11 warnings**：4 条 GradleDependency、上述 3 条 ModifierParameter 与 4 条单项警告；此前未固定 Build Tools 的运行得到 7 条。依赖更新提示受远端版本元数据与缓存影响，不能把数量减少理解为依赖已升级。每次运行以实际生成的 lint 报告为准。
 
 ## 合并与制品
 
