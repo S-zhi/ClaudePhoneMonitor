@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -108,7 +108,6 @@ test("usage snapshot only changes ordinary snapshot data and resume falls back a
   assert.equal(phoneMessages.at(-1)?.type, "snapshot");
   const wire = phoneMessages.at(-1);
   assert.ok(wire && wire.type === "snapshot");
-  writeFileSync("/private/tmp/claudephone-issue7-relay-wire.json", `${JSON.stringify(wire, null, 2)}\n`);
   relay.stop();
 });
 

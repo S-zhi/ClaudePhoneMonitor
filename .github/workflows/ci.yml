@@ -88,13 +88,24 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Record Android setup environment
+        run: |
+          mkdir -p ci-logs
+          {
+            uname -a
+            printf 'ANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\n' "${ANDROID_HOME:-unset}" "${ANDROID_SDK_ROOT:-unset}"
+          } 2>&1 | tee ci-logs/android-setup.log
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
       - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
       - name: Install Android SDK 35
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+        run: |
+          set -o pipefail
+          sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 2>&1 | tee -a ci-logs/android-setup.log
       - uses: gradle/actions/setup-gradle@v4
       - name: Android lint, unit tests and APK
         run: |
