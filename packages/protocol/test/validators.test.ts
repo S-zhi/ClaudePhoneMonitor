@@ -66,6 +66,30 @@ const usage = {
   quota: { start_remaining: null, current_remaining: null, unit: null, reset_at: null, availability: "unavailable" as const },
 };
 
+test("native Codex approval observations use stable UUIDs and cannot claim remote decisions or execution outcomes", () => {
+  const requestId = "3fb68435-06fa-5c5e-8b01-aa17da927634";
+  const nativePayload = { request_id: requestId, source: "codex", status: "pending", can_respond: false, tool_name: "Bash" } as const;
+  const pending = { ...makeEvent(EVENT_TYPES.APPROVAL_REQUESTED, nativePayload), session_id: `codex:sess:${"a".repeat(64)}`,
+    task_id: `codex:turn:${"b".repeat(64)}` };
+  assert.equal(validateEventEnvelope(pending).success, true);
+  assert.equal(validateProtocolMessage(pending).success, true);
+  for (const status of ["resolved", "unknown"] as const) {
+    assert.equal(validateEventEnvelope({ ...pending, event_type: EVENT_TYPES.APPROVAL_RESOLVED, payload: { ...nativePayload, status } }).success, true);
+  }
+  for (const invalid of [{ can_respond: true }, { status: "approved" }, { status: "denied" }, { expires_at: "2026-10-08T01:00:00Z" }, { command: "private" }]) {
+    assert.equal(validateProtocolMessage({ ...pending, payload: { ...nativePayload, ...invalid } }).success, false);
+  }
+  const summary = { ...nativePayload, session_id: pending.session_id, task_id: pending.task_id, display_name: "Codex fixture",
+    sequence: 1, requested_at: pending.occurred_at };
+  assert.equal(validateSnapshot({ ...snapshot, approvals: [summary] }).success, true);
+  assert.equal(validateSnapshot({ ...snapshot, approvals: [{ ...summary, status: "resolved" }] }).success, true);
+  for (const invalid of [{ can_respond: true }, { status: "approved" }, { status: "denied" }]) {
+    assert.equal(validateProtocolMessage({ ...snapshot, approvals: [{ ...summary, ...invalid }] }).success, false);
+  }
+  assert.equal(validateProtocolMessage({ type: "approval_presence", schema_version: 1, installation_id: "installation-1",
+    source: "codex", request_ids: [requestId] }).success, true);
+});
+
 test("validates canonical event envelopes and snapshots", () => {
   const event = makeEvent(EVENT_TYPES.TOOL_STARTED, { tool_name: "bash" });
   const eventResult = validateEventEnvelope(event);
@@ -74,6 +98,51 @@ test("validates canonical event envelopes and snapshots", () => {
   assert.equal(eventResult.success, true);
   assert.equal(snapshotResult.success, true);
   assert.equal(SNAPSHOT_SCHEMA.type, "object");
+});
+
+test("approval lifecycle has explicit identity and metadata-only request/decision contracts", () => {
+  const requestId = "11111111-1111-4111-8111-111111111111";
+  const decisionId = "22222222-2222-4222-8222-222222222222";
+  const payload = { request_id: requestId, source: "claude_code" as const, status: "pending" as const,
+    can_respond: true, tool_name: "Bash", expires_at: "2026-10-07T01:10:00Z" };
+  assert.equal(validateEventEnvelope(makeEvent(EVENT_TYPES.APPROVAL_REQUESTED, payload)).success, true);
+  for (const status of ["approved", "denied", "unknown"] as const) {
+    assert.equal(validateEventEnvelope(makeEvent(EVENT_TYPES.APPROVAL_RESOLVED,
+      { ...payload, status, can_respond: false })).success, true);
+    assert.equal(validateEventEnvelope(makeEvent(EVENT_TYPES.APPROVAL_RESOLVED,
+      { ...payload, status, can_respond: true } as never)).success, false);
+  }
+  for (const invalid of [{ request_id: "session-a" }, { source: "codex" }, { status: "approved" },
+    { expires_at: "invalid" }, { can_respond: "true" }, { tool_input: { command: "private" } },
+    { command: "private" }]) {
+    assert.equal(validateEventPayload(EVENT_TYPES.APPROVAL_REQUESTED, { ...payload, ...invalid }).success, false);
+  }
+  for (const decision of ["allow", "deny", "computer"]) {
+    assert.equal(validateProtocolMessage({ type: MESSAGE_TYPES.APPROVAL_DECISION, schema_version: 1,
+      installation_id: "installation-a", request_id: requestId, decision_id: decisionId, decision }).success, true);
+  }
+  assert.equal(validateProtocolMessage({ type: MESSAGE_TYPES.APPROVAL_DECISION, schema_version: 1,
+    installation_id: "installation-a", request_id: requestId, decision_id: decisionId, decision: "approve" }).success, false);
+  assert.equal(validateProtocolMessage({ type: MESSAGE_TYPES.APPROVAL_DECISION_ACK, schema_version: 1,
+    request_id: requestId, decision_id: decisionId, accepted: true, reason: "forwarded" }).success, true);
+  assert.equal(validateProtocolMessage({ type: MESSAGE_TYPES.APPROVAL_PRESENCE, schema_version: 1,
+    installation_id: "installation-a", request_ids: [requestId] }).success, true);
+});
+
+test("snapshot approvals remain independent of Working and reject ambiguous or invalid actions", () => {
+  const approval = { request_id: "11111111-1111-4111-8111-111111111111", session_id: "outside-top-five",
+    display_name: "Permission task", sequence: 3, requested_at: "2026-10-07T01:00:00Z",
+    source: "claude_code", status: "pending", can_respond: true };
+  assert.equal(validateSnapshot({ ...snapshot, approvals: [approval] }).success, true);
+  assert.equal(validateSnapshot({ ...snapshot, approvals: [approval, approval] }).success, false);
+  assert.equal(validateProtocolMessage({ ...snapshot, approvals: [approval, approval] }).success, false);
+  for (const invalid of [{ request_id: "not-an-approval-uuid" }, { display_name: "/private/path" },
+    { source: "codex" }, { session_id: "unknown" }, { requested_at: "invalid" }, { raw_prompt: "private" },
+    { status: "approved", can_respond: true }]) {
+    assert.equal(validateSnapshot({ ...snapshot, approvals: [{ ...approval, ...invalid }] }).success, false);
+  }
+  assert.equal(validateSnapshot({ ...snapshot, approvals: [{ ...approval, status: "denied", can_respond: false,
+    resolved_at: "2026-10-07T01:02:00Z" }] }).success, true);
 });
 
 test("task timing remains optional and covers active tasks outside the five session rows", () => {
@@ -177,6 +246,22 @@ test("accepts the optional session contract while keeping its boundaries strict"
   assert.equal(validateSnapshot({ ...extended, sessions: [{
     session_id: "unknown", title: "title", claude_state: "idle", last_activity_sequence: 0,
   }] }).success, false);
+});
+
+test("explicit blocking reasons survive snapshots only for waiting sessions, without questions or answers", () => {
+  const row = { session_id: "s1", title: "Task", claude_state: "waiting", last_activity_sequence: 4 };
+  for (const waiting_reason of ["permission", "question", "approval", "input"] as const) {
+    assert.equal(validateSnapshot({ ...snapshot, sessions: [{ ...row, waiting_reason }] }).success, true);
+    for (const claude_state of ["working", "idle"] as const) {
+      assert.equal(validateSnapshot({ ...snapshot, sessions: [{ ...row, claude_state, waiting_reason }] }).success, false);
+    }
+  }
+  assert.equal(validateSnapshot({ ...snapshot, sessions: [{ ...row, waiting_reason: "unknown" }] }).success, false);
+  assert.equal(validateSnapshot({ ...snapshot, sessions: [{ ...row, waiting_reason: "question", question: "private" }] }).success, false);
+  const question = { ...makeEvent(EVENT_TYPES.WAITING, { reason: "question", tool_name: "AskUserQuestion" }), correlation_id: "call-1" };
+  assert.equal(validateEventEnvelope(question).success, true);
+  assert.equal(validateEventEnvelope({ ...question, payload: { ...question.payload, answers: "private" } }).success, false);
+  assert.equal(validateEventEnvelope({ ...question, payload: { ...question.payload, questions: [{ question: "private" }] } }).success, false);
 });
 
 test("native lifecycle titles and metadata-only updates keep strict payload and privacy boundaries", () => {

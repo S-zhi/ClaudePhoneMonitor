@@ -53,10 +53,54 @@ owned = [hook["command"] for groups in data["hooks"].values() for group in group
 assert len(owned) == 10, owned
 assert set(data["hooks"]) >= {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest", "Notification", "Stop", "StopFailure", "SessionEnd"}
 assert all("--event " in command and "|| true # claude-phone-monitor:v1" in command for command in owned)
+assert all("--approval-bridge" not in command for command in owned)
 assert (state / "launchd.template.plist").is_file()
 plist = (agents / "com.claude.phone-monitor.plist").read_text()
 assert "__CM_" not in plist
 assert "claude-phone-monitor:v1" in plist
+PY
+
+# Opt-in changes only PermissionRequest. Private custom socket and bridge mode
+# survive reinstall; explicit off restores short, telemetry-only handlers.
+BRIDGE_SETTINGS="$TMP/bridge-settings.json"
+BRIDGE_STATE="$TMP/bridge-state"
+BRIDGE_SOCKET="$TMP/private socket.sock"
+"$SCRIPTS/monitor-setup" install --settings "$BRIDGE_SETTINGS" --state-dir "$BRIDGE_STATE" \
+  --socket "$BRIDGE_SOCKET" --adapter "$ADAPTER" --no-launchd --approval-bridge >/dev/null || fail "bridge install"
+python3 - "$BRIDGE_SETTINGS" "$BRIDGE_STATE" "$BRIDGE_SOCKET" <<'PY' || fail "bridge hook configuration"
+import json,pathlib,shlex,sys
+settings,state,socket=sys.argv[1:]
+socket=str(pathlib.Path(socket).resolve())
+hooks=json.loads(pathlib.Path(settings).read_text())["hooks"]
+for event,groups in hooks.items():
+    owned=[h for g in groups for h in g["hooks"] if h["command"].endswith("# claude-phone-monitor:v1")]
+    assert len(owned)==1
+    command=shlex.split(owned[0]["command"])
+    assert pathlib.Path(command[command.index("--socket")+1]).resolve()==pathlib.Path(socket)
+    assert ("--approval-bridge" in command)==(event=="PermissionRequest")
+    assert owned[0]["timeout"]==(610 if event=="PermissionRequest" else 5)
+assert json.loads((pathlib.Path(state)/"install.json").read_text())["approval_bridge"] is True
+PY
+"$SCRIPTS/install" --settings "$BRIDGE_SETTINGS" --state-dir "$BRIDGE_STATE" --adapter "$ADAPTER" --no-launchd >/dev/null || fail "bridge reinstall"
+python3 - "$BRIDGE_SETTINGS" "$BRIDGE_STATE" "$BRIDGE_SOCKET" <<'PY' || fail "bridge preference preservation"
+import json,pathlib,shlex,sys
+settings,state,socket=sys.argv[1:]
+socket=str(pathlib.Path(socket).resolve())
+h=json.loads(pathlib.Path(settings).read_text())["hooks"]["PermissionRequest"][0]["hooks"][0]
+assert "--approval-bridge" in h["command"]
+command=shlex.split(h["command"])
+assert pathlib.Path(command[command.index("--socket")+1]).resolve()==pathlib.Path(socket)
+assignments={line.split("=",1)[0]:shlex.split(line.split("=",1)[1])[0] for line in (pathlib.Path(state)/"monitor.env").read_text().splitlines() if "=" in line and not line.startswith("#")}
+assert assignments["COLLECTOR_APPROVAL_BRIDGE"]=="1"
+assert pathlib.Path(assignments["COLLECTOR_SOCKET_PATH"]).resolve()==pathlib.Path(socket)
+PY
+"$SCRIPTS/install" --settings "$BRIDGE_SETTINGS" --state-dir "$BRIDGE_STATE" --adapter "$ADAPTER" --no-launchd --no-approval-bridge >/dev/null || fail "bridge disable"
+python3 - "$BRIDGE_SETTINGS" "$BRIDGE_STATE" <<'PY' || fail "bridge disabled configuration"
+import json,pathlib,sys
+settings,state=map(pathlib.Path,sys.argv[1:])
+hooks=json.loads(settings.read_text())["hooks"]
+assert all("--approval-bridge" not in h["command"] and h["timeout"]==5 for groups in hooks.values() for g in groups for h in g["hooks"])
+assert json.loads((state/"install.json").read_text())["approval_bridge"] is False
 PY
 
 # Idempotence: the second install does not duplicate owned entries or alter the

@@ -92,6 +92,33 @@ test("unknown hook names are dropped rather than forwarded", () => {
   assert.equal(normalizeHookEvent({ prompt: "only user data" }, { now }), null);
 });
 
+test("native questions and plan reviews are explicit waiting signals without question/answer content", () => {
+  for (const [tool_name, reason] of [["AskUserQuestion", "question"], ["ExitPlanMode", "approval"]] as const) {
+    for (const hook_event_name of ["PreToolUse", "PermissionRequest"] as const) {
+      const normalized = normalizeHookEvent({ hook_event_name, session_id: "s1", task_id: "task-1", tool_name,
+        tool_use_id: "tool-call-1", tool_input: { questions: [{ question: "private question" }], answers: { question: "private answer" },
+          plan: "private plan", planFilePath: "/Users/private/plan.md" }, tool_response: "private answer" }, { now });
+      assert.ok(normalized);
+      assert.equal(normalized.event_type, "waiting");
+      assert.equal(normalized.correlation_id, "tool-call-1");
+      assert.deepEqual(normalized.payload, { tool_name, reason });
+      assert.deepEqual(normalizeHookEvent(normalized, { now }), normalized, "daemon normalization must preserve exact metadata");
+      assert.equal(JSON.stringify(normalized).includes("private"), false);
+    }
+    for (const [hook_event_name, expected] of [["PostToolUse", "tool_finished"], ["PostToolUseFailure", "tool_failed"]] as const) {
+      const normalized = normalizeHookEvent({ hook_event_name, session_id: "s1", tool_name, tool_use_id: "tool-call-1",
+        tool_response: { answers: "private answer", plan: "private plan" } }, { now });
+      assert.equal(normalized?.event_type, expected);
+      assert.equal(normalized?.correlation_id, "tool-call-1");
+      assert.deepEqual(normalized?.payload, { tool_name });
+    }
+  }
+  const unrelated = normalizeHookEvent({ hook_event_name: "PreToolUse", session_id: "s1", tool_name: "Bash",
+    tool_input: { command: "echo AskUserQuestion permission needed" }, message: "question asks for answer" }, { now });
+  assert.equal(unrelated?.event_type, "tool_started", "content never infers a blocking question");
+  assert.deepEqual(unrelated?.payload, { tool_name: "Bash" });
+});
+
 test("Claude identifiers only change when they collide with the reserved Codex namespace", () => {
   const unchanged = normalizeHookEvent({
     hook_event_name: "UserPromptSubmit",

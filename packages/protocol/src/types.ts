@@ -32,6 +32,25 @@ export type ConnectionStatus = ComputerState;
 export type ClaudeState = (typeof CLAUDE_STATES)[keyof typeof CLAUDE_STATES];
 export type SessionKind = "main" | "subagent";
 export type WaitingReason = "permission" | "question" | "approval" | "input" | "unknown";
+export type ApprovalStatus = "pending" | "approved" | "denied" | "resolved" | "unknown";
+export type ApprovalSource = "claude_code" | "codex";
+export type ApprovalDecision = "allow" | "deny" | "computer";
+
+/** Metadata only: the original operation must be reviewed on the computer. */
+export interface ApprovalSummary {
+  readonly request_id: string;
+  readonly session_id: string;
+  readonly task_id?: string;
+  readonly display_name: string;
+  readonly sequence: SequenceNumber;
+  readonly requested_at: WireTimestamp;
+  readonly resolved_at?: WireTimestamp;
+  readonly expires_at?: WireTimestamp;
+  readonly source: ApprovalSource;
+  readonly status: ApprovalStatus;
+  readonly tool_name?: string;
+  readonly can_respond: boolean;
+}
 export type SequenceStatus = "initial" | "in_order" | "gap" | "out_of_order";
 export type EventAckStatus = "accepted" | "duplicate" | "rejected";
 
@@ -42,6 +61,11 @@ export interface SafeEventPayload {
   readonly exit_code?: number;
   readonly error_code?: string;
   readonly reason?: WaitingReason;
+  readonly request_id?: string;
+  readonly source?: ApprovalSource;
+  readonly status?: ApprovalStatus;
+  readonly can_respond?: boolean;
+  readonly expires_at?: WireTimestamp;
 }
 
 export interface NormalizedEvent {
@@ -80,6 +104,23 @@ export interface EventPayloadByType {
   };
   readonly [EVENT_TYPES.WAITING]: {
     readonly reason?: WaitingReason;
+    readonly tool_name?: string;
+  };
+  readonly [EVENT_TYPES.APPROVAL_REQUESTED]: {
+    readonly request_id: string;
+    readonly source: ApprovalSource;
+    readonly status: "pending";
+    readonly can_respond: boolean;
+    readonly expires_at?: WireTimestamp;
+    readonly tool_name?: string;
+  };
+  readonly [EVENT_TYPES.APPROVAL_RESOLVED]: {
+    readonly request_id: string;
+    readonly source: ApprovalSource;
+    readonly status: Exclude<ApprovalStatus, "pending">;
+    readonly can_respond: false;
+    readonly expires_at?: WireTimestamp;
+    readonly tool_name?: string;
   };
   readonly [EVENT_TYPES.TASK_FINISHED]: {
     readonly duration_ms?: number;
@@ -131,6 +172,7 @@ export interface SessionSummary {
   readonly session_id: string;
   readonly title: string;
   readonly claude_state: ClaudeState;
+  readonly waiting_reason?: Exclude<WaitingReason, "unknown">;
   readonly last_activity_sequence: SequenceNumber;
 }
 
@@ -167,6 +209,8 @@ export interface Snapshot {
   readonly session_count?: number;
   readonly recent_completion?: RecentCompletion;
   readonly active_tasks?: readonly ActiveTask[];
+  /** Explicit bridge lifecycle; missing on older or observation-only sources. */
+  readonly approvals?: readonly ApprovalSummary[];
   /** Optional server-authoritative Usage aggregate; older clients may ignore it. */
   readonly usage?: UsageAggregate;
   readonly last_sequence: SequenceNumber | null;
@@ -243,6 +287,7 @@ export interface HelloAckMessage {
   readonly schema_version: ProtocolVersion;
   readonly connection_id: string;
   readonly accepted: boolean;
+  readonly approval_bridge_available?: boolean;
   readonly server_time: WireTimestamp;
   readonly installation_id?: string;
   readonly snapshot?: Snapshot;
@@ -327,6 +372,34 @@ export interface ErrorMessage {
   readonly retryable?: boolean;
 }
 
+export interface ApprovalDecisionMessage {
+  readonly type: typeof MESSAGE_TYPES.APPROVAL_DECISION;
+  readonly schema_version: ProtocolVersion;
+  readonly installation_id: string;
+  readonly request_id: string;
+  readonly decision_id: string;
+  readonly decision: ApprovalDecision;
+}
+
+/** Transport acknowledgement only. It never proves the Hook returned a decision. */
+export interface ApprovalDecisionAckMessage {
+  readonly type: typeof MESSAGE_TYPES.APPROVAL_DECISION_ACK;
+  readonly schema_version: ProtocolVersion;
+  readonly request_id: string;
+  readonly decision_id: string;
+  readonly accepted: boolean;
+  readonly reason?: "forwarded" | "unavailable" | "already_decided" | "invalid_request" | "forbidden";
+}
+
+/** Live bridge ownership; replayed events never establish decision availability. */
+export interface ApprovalPresenceMessage {
+  readonly type: typeof MESSAGE_TYPES.APPROVAL_PRESENCE;
+  readonly schema_version: ProtocolVersion;
+  readonly installation_id: string;
+  readonly request_ids: readonly string[];
+  readonly source?: ApprovalSource;
+}
+
 export type ProtocolMessage =
   | HelloMessage
   | HelloAckMessage
@@ -340,6 +413,9 @@ export type ProtocolMessage =
   | ProbeMessage
   | ChallengeMessage
   | ChallengeAckMessage
+  | ApprovalDecisionMessage
+  | ApprovalDecisionAckMessage
+  | ApprovalPresenceMessage
   | ErrorMessage;
 
 export type ClientMessage =
@@ -350,6 +426,8 @@ export type ClientMessage =
   | ResumeMessage
   | ProbeMessage
   | ChallengeAckMessage
+  | ApprovalDecisionMessage
+  | ApprovalPresenceMessage
   | HeartbeatMessage;
 export type ServerMessage =
   | HelloAckMessage
@@ -359,6 +437,8 @@ export type ServerMessage =
   | Snapshot
   | ProbeMessage
   | ChallengeMessage
+  | ApprovalDecisionAckMessage
+  | ApprovalDecisionMessage
   | ErrorMessage;
 
 export interface TransientOverlay {

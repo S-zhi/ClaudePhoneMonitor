@@ -222,7 +222,13 @@ export class FileOutbox<T> implements Outbox<T> {
   }
 
   public async close(): Promise<void> {
-    await this.operation;
+    // An in-flight ACK can enqueue its sequence fallback as a prior write
+    // completes. Drain until the serialized tail is stable during shutdown.
+    let tail: Promise<unknown>;
+    do {
+      tail = this.operation;
+      await tail;
+    } while (tail !== this.operation);
   }
 
   /** Exposed for diagnostics/tests; callers receive a copy. */

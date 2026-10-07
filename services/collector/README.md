@@ -1,6 +1,6 @@
 # macOS Collector
 
-The collector is a small Node.js daemon that keeps Claude Code Hook delivery local and fail-open. It can also opt into a read-only Codex sessions watcher that sends only allowlisted lifecycle metadata through the same Collector and Relay.
+The collector is a small Node.js daemon that keeps Claude Code Hook delivery local and fail-open in the default telemetry mode. The explicitly enabled [optional approval bridge](../../docs/issue-23-approval-reminder.md) instead holds `PermissionRequest` for up to ten minutes while awaiting a paired-phone decision or a return to the native computer flow. It can also opt into a read-only Codex sessions watcher that sends only allowlisted lifecycle metadata through the same Collector and Relay.
 
 ## Build and test
 

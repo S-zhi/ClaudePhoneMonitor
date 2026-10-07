@@ -208,11 +208,16 @@ All helpers support `--help`, explicit fixture paths, and repeated invocation.
 
 ## Failure mode and security notes
 
-The hook command is intentionally fail-open. It sends the event to the adapter and
+The default telemetry hook command is intentionally fail-open. It sends the event to the adapter and
 then returns success even when Node, the adapter, the collector, or the network is
 unavailable. This protects Claude Code's lifecycle and tool execution. Diagnose
 lost delivery with `doctor` and `status`; do not make the hook blocking as a local
 workaround.
+
+The explicitly enabled `--approval-bridge` is an exception: it holds only
+`PermissionRequest` for up to ten minutes while awaiting a paired-phone decision
+or a return to the native computer flow. See the [optional approval bridge
+instructions](../../docs/issue-23-approval-reminder.md) for its lifecycle and scope.
 
 The real pairing flow uses a bootstrap bearer only for the Relay's pairing API and
 returns separate opaque collector/Android tokens. Tokens are stored with mode `0600`

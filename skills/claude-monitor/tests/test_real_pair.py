@@ -209,6 +209,16 @@ class RealPairTests(unittest.TestCase):
         self.assertEqual(env["RELAY_DB_PATH"], str(self.db_path.resolve()))
         self.assertEqual(len(rendered), 1)
 
+    def test_real_pair_preserves_bridge_choice_and_private_custom_socket(self):
+        env_path = self.state / "monitor.env"
+        custom_socket = str(self.state / "private custom.sock")
+        env_path.write_text(env_path.read_text() + "COLLECTOR_APPROVAL_BRIDGE=1\n" +
+                            f"COLLECTOR_SOCKET_PATH={shlex.quote(custom_socket)}\n")
+        self._run(force_new=True)
+        saved = real_pair.parse_shell_env(env_path)
+        self.assertEqual(saved["COLLECTOR_APPROVAL_BRIDGE"], "1")
+        self.assertEqual(saved["COLLECTOR_SOCKET_PATH"], custom_socket)
+
     def test_current_pending_qr_is_reused_without_minting_another(self):
         FakeRelay.pairing_status = "pending"
         FakeRelay.pairing_expiry = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=5)).isoformat().replace("+00:00", "Z")

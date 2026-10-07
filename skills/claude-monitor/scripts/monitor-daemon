@@ -30,7 +30,9 @@ while [ "$#" -gt 0 ]; do
 done
 
 STATE_DIR="$(cm_abs_path "$STATE_DIR")"
+set -a
 cm_load_env "$STATE_DIR"
+set +a
 cm_mkdir_state "$STATE_DIR"
 mkdir -p "$STATE_DIR/run" 2>/dev/null || exit 0
 PID_FILE="$STATE_DIR/run/daemon.pid"

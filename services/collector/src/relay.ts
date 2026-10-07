@@ -1,6 +1,7 @@
 import { challengeResponderFromSecret, isChallengeMessage, respondToChallenge, type ChallengeResponder } from "./challenge.js";
 import type {
   ChallengeMessage,
+  ApprovalDecisionMessage,
   EventAckMessage,
   HeartbeatMessage,
   HelloMessage,
@@ -49,6 +50,10 @@ export interface RelayClientOptions {
   timers?: RelayTimerApi;
   maxBatchSize?: number;
   logger?: Pick<Console, "warn">;
+  onApprovalDecision?: (message: ApprovalDecisionMessage) => Promise<unknown> | void;
+  onApprovalReady?: () => void;
+  onApprovalDisconnected?: () => Promise<unknown> | void;
+  onEventAck?: (message: EventAckMessage) => void;
 }
 
 export interface RelayClientState {
@@ -119,8 +124,10 @@ export class RelayClient {
   private heartbeatTimer: unknown;
   private reconnectAttempt = 0;
   private lastSequence = 0;
+  private approvalReady = false;
   private readonly pendingIds = new Set<string>();
   private readonly pendingSequences = new Map<number, string>();
+  private readonly incoming = new Set<Promise<void>>();
 
   public constructor(private readonly options: RelayClientOptions) {
     if (!options.url) throw new Error("relay_url_required");
@@ -145,6 +152,7 @@ export class RelayClient {
   }
 
   public stop(): void {
+    this.invalidateApprovals();
     this.stopped = true;
     this.clearReconnectTimer();
     this.clearHeartbeatTimer();
@@ -170,6 +178,24 @@ export class RelayClient {
     };
   }
 
+  public async drain(): Promise<void> {
+    while (this.incoming.size > 0) await Promise.all([...this.incoming]);
+  }
+
+  public approvalAvailable(): boolean {
+    return this.approvalReady && this.socket?.readyState === OPEN;
+  }
+
+  public publishApprovalPresence(requestIds: string[], source?: "claude_code" | "codex"): void {
+    if (!this.approvalAvailable()) return;
+    this.send({ type: "approval_presence", schema_version: 1, installation_id: this.options.installationId, request_ids: requestIds, ...(source ? { source } : {}) });
+  }
+
+  private invalidateApprovals(): void {
+    this.approvalReady = false;
+    void Promise.resolve(this.options.onApprovalDisconnected?.()).catch(() => undefined);
+  }
+
   /** Flush events enqueued after an already-open connection was established. */
   public async flushPending(): Promise<void> {
     await this.flush();
@@ -186,12 +212,15 @@ export class RelayClient {
       return;
     }
     this.socket = socket;
-    socket.addEventListener("open", () => this.handleOpen());
+    socket.addEventListener("open", () => { if (this.socket === socket) this.handleOpen(); });
     socket.addEventListener("message", (event) => {
-      void this.handleServerMessage(event);
+      if (this.socket !== socket) return;
+      const handled = this.handleServerMessage(event).catch(() => undefined);
+      this.incoming.add(handled);
+      void handled.finally(() => this.incoming.delete(handled));
     });
-    socket.addEventListener("close", () => this.handleClose());
-    socket.addEventListener("error", () => this.handleError());
+    socket.addEventListener("close", () => { if (this.socket === socket) this.handleClose(); });
+    socket.addEventListener("error", () => { if (this.socket === socket) this.handleError(); });
     if (socket.readyState === OPEN) this.handleOpen();
   }
 
@@ -205,6 +234,7 @@ export class RelayClient {
   }
 
   private handleClose(): void {
+    this.invalidateApprovals();
     this.clearHeartbeatTimer();
     this.pendingIds.clear();
     this.pendingSequences.clear();
@@ -214,6 +244,7 @@ export class RelayClient {
 
   private handleError(): void {
     if (this.stopped) return;
+    this.invalidateApprovals();
     // Some WebSocket implementations emit error without a subsequent close.
     // Detach the failed socket now so the backoff callback can really create a
     // new connection instead of seeing a stale OPEN state.
@@ -297,15 +328,19 @@ export class RelayClient {
 
   private async flush(): Promise<void> {
     if (this.stopped || this.socket?.readyState !== OPEN) return;
+    const socket = this.socket;
     let records: OutboxRecord<RelayOutboundMessage>[];
     try {
       records = await this.options.outbox.peek(this.maxBatchSize);
     } catch {
       return;
     }
+    if (this.stopped || this.socket !== socket || socket.readyState !== OPEN) return;
     for (const record of records) {
+      if (this.stopped || this.socket !== socket || socket.readyState !== OPEN) return;
       if (this.pendingIds.has(record.id)) continue;
       if (!this.send(record.payload)) {
+        if (this.stopped || this.socket !== socket) return;
         await this.options.outbox.retry(record.id, new Error("relay_send_failed"));
         this.handleError();
         break;
@@ -321,6 +356,11 @@ export class RelayClient {
     if (!message) return;
 
     switch (message.type) {
+      case "approval_decision":
+        if (this.approvalAvailable() && message.schema_version === 1 && message.installation_id === this.options.installationId) {
+          await this.options.onApprovalDecision?.(message);
+        }
+        return;
       case "event_ack":
         await this.handleAck(message);
         return;
@@ -353,6 +393,10 @@ export class RelayClient {
         await this.handleProbe(message);
         return;
       case "hello_ack":
+        this.approvalReady = Boolean(this.options.token && message.accepted === true && message.approval_bridge_available === true);
+        if (this.approvalReady) this.options.onApprovalReady?.();
+        await this.flush();
+        return;
       case "resume":
       case "snapshot":
       case "subscribe":
@@ -388,6 +432,7 @@ export class RelayClient {
     } else if (!rejected && finiteInteger(message.last_sequence)) {
       this.lastSequence = Math.max(this.lastSequence, message.last_sequence);
     }
+    this.options.onEventAck?.(message);
     await this.flush();
   }
 

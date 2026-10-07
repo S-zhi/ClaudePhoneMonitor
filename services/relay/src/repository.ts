@@ -21,6 +21,8 @@ import type {
   TokenValidation,
   UsageAggregate,
   UsageSnapshotMessage,
+  ApprovalSummary,
+  BlockingWaitingReason,
 } from "./types.js";
 import { isConnectionStatus } from "./types.js";
 
@@ -83,6 +85,8 @@ export interface RelayRepository {
   listEventsAfter(installationId: string, sequence: number): StoredEvent[];
   listInstallationIds(): string[];
   getInstallationState(installationId: string, now?: string): InstallationState | undefined;
+  listApprovals(installationId: string): ApprovalSummary[];
+  putApproval(installationId: string, approval: ApprovalSummary): void;
 
   createPairing(
     now: string,
@@ -100,6 +104,7 @@ export interface RelayRepository {
 
   createDeviceToken(input: CreateDeviceTokenInput): DeviceTokenRecord;
   validateToken(token: string, role: TokenRole, now: string): TokenValidation | undefined;
+  isTokenActive(tokenId: string, role: TokenRole, installationId: string, now: string): boolean;
   revokeToken(tokenId: string, revokedAt: string): boolean;
 
   /** A stable label used by health/readiness reporting. */
@@ -113,6 +118,9 @@ interface SessionState {
   session_id: string;
   title?: string;
   claude_state: ClaudeState;
+  waiting_reason?: BlockingWaitingReason;
+  waiting_correlation_id?: string;
+  waiting_tool_name?: string;
   last_sequence: number;
   /** Activity ordering is independent of the accepted event watermark. */
   last_activity_sequence?: number;
@@ -193,6 +201,9 @@ function applySessionEvent(
   now = event.occurred_at,
 ): SessionState | undefined {
   if (event.session_id === "unknown") return previous;
+  // Approval history is a separate surface and cannot reorder activity or
+  // reopen a completed task when a late decision arrives.
+  if (event.event_type === "approval_requested" || event.event_type === "approval_resolved") return previous;
   if (!previous && event.event_type === "session_title_updated") return undefined;
   if (
     previous &&
@@ -231,6 +242,35 @@ function applySessionEvent(
       (next.terminalTask ?? Boolean(next.completion))
     ))
   ) return next;
+  const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+    ? event.payload as Record<string, unknown> : {};
+  const waitingReason = ["permission", "question", "approval", "input"].includes(String(payload.reason))
+    ? payload.reason as BlockingWaitingReason : undefined;
+  const toolName = typeof payload.tool_name === "string" && /^[A-Za-z][A-Za-z0-9_:-]{0,127}$/.test(payload.tool_name)
+    ? payload.tool_name : undefined;
+  if (next.claude_state === "waiting" && next.waiting_reason) {
+    const bound = Boolean(next.waiting_correlation_id || next.waiting_tool_name);
+    const matchingTool = next.waiting_correlation_id
+      ? event.correlation_id === next.waiting_correlation_id
+      : next.waiting_tool_name ? toolName === next.waiting_tool_name : true;
+    const toolActivity = ["tool_started", "tool_finished", "tool_failed"].includes(event.event_type);
+    const sameWaiting = event.event_type === "waiting" && waitingReason === next.waiting_reason &&
+      (!event.correlation_id || event.correlation_id === next.waiting_correlation_id) &&
+      (!toolName || toolName === next.waiting_tool_name);
+    const preserveWaiting = (toolActivity && (!bound || event.event_type === "tool_started" || !matchingTool)) ||
+      (event.event_type === "waiting" && (!waitingReason || sameWaiting || (!toolName && bound))) ||
+      (event.event_type === "task_started" && Boolean(event.task_id && event.task_id === next.task_id));
+    if (preserveWaiting) {
+      // An unrelated parallel tool, a generic notification, or a repeated
+      // permission hook cannot prove that this question was answered. Keep
+      // the original activity sequence so reconnect does not create a new wait.
+      if (event.event_type === "waiting" && waitingReason) next.last_activity_at = event.occurred_at;
+      return next;
+    }
+  }
+  next.waiting_reason = undefined;
+  next.waiting_correlation_id = undefined;
+  next.waiting_tool_name = undefined;
   next.last_activity_sequence = event.sequence;
   next.updated_at = event.occurred_at;
   next.last_activity_at = event.occurred_at;
@@ -263,6 +303,11 @@ function applySessionEvent(
       break;
     case "waiting":
       next.claude_state = "waiting";
+      next.waiting_reason = waitingReason;
+      if (waitingReason) {
+        next.waiting_correlation_id = event.correlation_id;
+        next.waiting_tool_name = toolName;
+      }
       break;
     case "tool_finished":
       if (event.task_id && next.task_id && event.task_id !== next.task_id) break;
@@ -341,6 +386,8 @@ function aggregatedState(
       session_kind: record.session_kind ?? "main",
       title: sessionDisplayName(record),
       claude_state: record.claude_state,
+      ...(record.claude_state === "waiting" && ["permission", "question", "approval", "input"].includes(String(record.waiting_reason))
+        ? { waiting_reason: record.waiting_reason } : {}),
       last_activity_sequence: record.last_activity_sequence ?? record.last_sequence,
     })),
     main_running_count: active.filter((record) => record.claude_state === "working").length,
@@ -476,9 +523,20 @@ export class InMemoryRelayRepository implements RelayRepository {
   private readonly pairings = new Map<string, PairingRecord>();
   private readonly deviceTokens = new Map<string, DeviceTokenRecord>();
   private readonly maxStoredEvents: number;
+  private readonly approvals = new Map<string, Map<string, ApprovalSummary>>();
 
   constructor(options: { maxStoredEvents?: number } = {}) {
     this.maxStoredEvents = Math.max(1, options.maxStoredEvents ?? 10_000);
+  }
+
+  listApprovals(installationId: string): ApprovalSummary[] {
+    return [...(this.approvals.get(installationId)?.values() ?? [])].map(clone);
+  }
+
+  putApproval(installationId: string, approval: ApprovalSummary): void {
+    const approvals = this.approvals.get(installationId) ?? new Map<string, ApprovalSummary>();
+    approvals.set(approval.request_id, clone({ ...approval, can_respond: false }));
+    this.approvals.set(installationId, approvals);
   }
 
   registerConnection(input: {
@@ -821,6 +879,12 @@ export class InMemoryRelayRepository implements RelayRepository {
     return true;
   }
 
+  isTokenActive(tokenId: string, role: TokenRole, installationId: string, now: string): boolean {
+    const token = this.deviceTokens.get(tokenId);
+    return Boolean(token && token.role === role && token.installation_id === installationId && !token.revoked_at &&
+      (!token.expires_at || Date.parse(token.expires_at) > Date.parse(now)));
+  }
+
   private sequenceStatus(sequence: number, previous: number | null): SequenceStatus {
     if (previous === null) return "initial";
     if (sequence === previous + 1) return "in_order";
@@ -902,6 +966,12 @@ export class SqliteRelayRepository implements RelayRepository {
         connected_at TEXT NOT NULL,
         last_seen_at TEXT NOT NULL,
         disconnected_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS relay_approvals (
+        installation_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        approval_json TEXT NOT NULL,
+        PRIMARY KEY (installation_id, request_id)
       );
       CREATE TABLE IF NOT EXISTS relay_events (
         event_id TEXT PRIMARY KEY,
@@ -1010,6 +1080,17 @@ export class SqliteRelayRepository implements RelayRepository {
 
   close(): void {
     if (this.db.isOpen) this.db.close();
+  }
+
+  listApprovals(installationId: string): ApprovalSummary[] {
+    const rows = this.db.prepare("SELECT approval_json FROM relay_approvals WHERE installation_id = ?").all(installationId) as SqlRow[];
+    return rows.map((row) => optionalJson<ApprovalSummary>(row.approval_json)).filter((row): row is ApprovalSummary => Boolean(row));
+  }
+
+  putApproval(installationId: string, approval: ApprovalSummary): void {
+    this.db.prepare(`INSERT INTO relay_approvals (installation_id, request_id, approval_json) VALUES (?, ?, ?)
+      ON CONFLICT(installation_id, request_id) DO UPDATE SET approval_json = excluded.approval_json`)
+      .run(installationId, approval.request_id, JSON.stringify({ ...approval, can_respond: false }));
   }
 
   registerConnection(input: {
@@ -1513,6 +1594,12 @@ export class SqliteRelayRepository implements RelayRepository {
       .prepare("UPDATE relay_device_tokens SET revoked_at = ? WHERE token_id = ? AND revoked_at IS NULL")
       .run(revokedAt, tokenId);
     return result.changes === 1;
+  }
+
+  isTokenActive(tokenId: string, role: TokenRole, installationId: string, now: string): boolean {
+    const row = this.db.prepare("SELECT role, installation_id, revoked_at, expires_at FROM relay_device_tokens WHERE token_id = ?").get(tokenId) as SqlRow | undefined;
+    return Boolean(row && stringValue(row, "role") === role && stringValue(row, "installation_id") === installationId &&
+      !stringValue(row, "revoked_at") && (!stringValue(row, "expires_at") || Date.parse(stringValue(row, "expires_at")!) > Date.parse(now)));
   }
 
   private rowToStoredEvent(row: SqlRow | undefined): StoredEvent | undefined {

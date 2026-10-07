@@ -18,6 +18,8 @@ WATCH_CODEX=0
 CODEX_CHOICE=""
 WATCH_USAGE=0
 USAGE_CHOICE=""
+APPROVAL_CHOICE=""
+APPROVAL_BRIDGE=0
 CONFIGURE_USAGE=0
 RELAY_PID=""
 COLLECTOR_PID=""
@@ -41,6 +43,8 @@ Options:
   --configure-usage ask for a Usage preference on first interactive launch
   --watch-usage     enable Usage and save this choice for future launches
   --no-watch-usage  disable Usage and save this choice (overrides environment)
+  --approval-bridge opt in to paired-phone Claude permissions; install the bridge Hook
+  --no-approval-bridge restore telemetry-only Hook and save this choice
   --open-qr         open pairing.png in Preview after pairing
   --no-build        do not build relay/collector before starting
   -h, --help        show this help
@@ -56,6 +60,8 @@ while [[ $# -gt 0 ]]; do
     --configure-usage) CONFIGURE_USAGE=1; shift ;;
     --watch-usage) USAGE_CHOICE=1; shift ;;
     --no-watch-usage) USAGE_CHOICE=0; shift ;;
+    --approval-bridge) APPROVAL_CHOICE=1; INSTALL_HOOKS=1; shift ;;
+    --no-approval-bridge) APPROVAL_CHOICE=0; INSTALL_HOOKS=1; shift ;;
     --open-qr) OPEN_QR=1; shift ;;
     --no-build) NO_BUILD=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -281,6 +287,9 @@ PAIRING_QR="$STATE_DIR/pairing.png"
 COLLECTOR_RELAY_URL="$(read_monitor_env COLLECTOR_RELAY_URL)"
 COLLECTOR_RELAY_TOKEN="$(read_monitor_env COLLECTOR_RELAY_TOKEN)"
 COLLECTOR_INSTALLATION_ID="$(read_monitor_env COLLECTOR_INSTALLATION_ID)"
+APPROVAL_BRIDGE="$(read_monitor_env COLLECTOR_APPROVAL_BRIDGE)"
+if [[ -n "$APPROVAL_CHOICE" ]]; then APPROVAL_BRIDGE="$APPROVAL_CHOICE"; fi
+if [[ "$APPROVAL_BRIDGE" != "1" ]]; then APPROVAL_BRIDGE=0; fi
 
 COLLECTOR_RELAY_URL="${COLLECTOR_RELAY_URL:-$RELAY_WS_LAN}"
 COLLECTOR_RELAY_TOKEN="${COLLECTOR_RELAY_TOKEN:-}"
@@ -291,7 +300,9 @@ COLLECTOR_INSTALLATION_ID="${COLLECTOR_INSTALLATION_ID:-}"
 }
 
 if [[ "$INSTALL_HOOKS" -eq 1 ]]; then
-  "$ROOT/skills/claude-monitor/scripts/install" --no-launchd --no-load
+  INSTALL_ARGS=(--state-dir "$STATE_DIR" --socket "$COLLECTOR_SOCKET_PATH" --no-launchd --no-load)
+  if [[ "$APPROVAL_BRIDGE" == "1" ]]; then INSTALL_ARGS+=(--approval-bridge); else INSTALL_ARGS+=(--no-approval-bridge); fi
+  "$ROOT/skills/claude-monitor/scripts/install" "${INSTALL_ARGS[@]}"
 fi
 
 COLLECTOR_ARGS=(--collector)
@@ -313,6 +324,7 @@ COLLECTOR_RELAY_TOKEN="$COLLECTOR_RELAY_TOKEN" \
 COLLECTOR_INSTALLATION_ID="$COLLECTOR_INSTALLATION_ID" \
 COLLECTOR_WATCH_CODEX="$WATCH_CODEX" \
 COLLECTOR_WATCH_USAGE="$WATCH_USAGE" \
+COLLECTOR_APPROVAL_BRIDGE="$APPROVAL_BRIDGE" \
 COLLECTOR_DATA_DIR="${COLLECTOR_DATA_DIR:-$STATE_DIR}" \
 COLLECTOR_SOCKET_PATH="$COLLECTOR_SOCKET_PATH" \
   "$NODE_BIN" "$ROOT/services/collector/dist/cli.js" "${COLLECTOR_ARGS[@]}" \

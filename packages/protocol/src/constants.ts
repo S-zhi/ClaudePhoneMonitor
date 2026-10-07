@@ -15,6 +15,9 @@ export const MESSAGE_TYPES = {
   CHALLENGE: "challenge",
   CHALLENGE_ACK: "challenge_ack",
   USAGE_SNAPSHOT: "usage_snapshot",
+  APPROVAL_DECISION: "approval_decision",
+  APPROVAL_DECISION_ACK: "approval_decision_ack",
+  APPROVAL_PRESENCE: "approval_presence",
   ERROR: "error",
 } as const;
 
@@ -33,6 +36,8 @@ export const EVENT_TYPES = {
   TOOL_FINISHED: "tool_finished",
   TOOL_FAILED: "tool_failed",
   WAITING: "waiting",
+  APPROVAL_REQUESTED: "approval_requested",
+  APPROVAL_RESOLVED: "approval_resolved",
   TASK_FINISHED: "task_finished",
   TASK_FAILED: "task_failed",
   SESSION_ENDED: "session_ended",

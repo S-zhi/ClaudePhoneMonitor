@@ -60,6 +60,7 @@ export function classifyEventType(event_type: MonitorEventType): ActivityClassif
     case EVENT_TYPES.TOOL_FINISHED:
       return workingClassification();
     case EVENT_TYPES.WAITING:
+    case EVENT_TYPES.APPROVAL_REQUESTED:
       return {
         status: MONITOR_STATUS.WAITING,
         base_status: MONITOR_STATUS.WAITING,

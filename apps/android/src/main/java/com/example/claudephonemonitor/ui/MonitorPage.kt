@@ -9,10 +9,13 @@ enum class MonitorPage {
     STATUS,
     STATE_CHANGE,
     USAGE,
+    APPROVAL,
 }
 
 internal fun selectMonitorPage(uiState: MonitorUiState): MonitorPage =
-    if (uiState.stateChange?.let {
+    if (uiState.approvalReminder?.remainingMs?.let { it > 0L } == true) {
+        MonitorPage.APPROVAL
+    } else if (uiState.stateChange?.let {
         it.remainingMs > 0L && it.strength == ReminderStrength.STRONG
     } == true) {
         MonitorPage.STATE_CHANGE

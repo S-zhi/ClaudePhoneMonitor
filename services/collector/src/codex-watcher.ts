@@ -1,7 +1,7 @@
 import { constants, promises as fs } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { codexEvent, parseCodexLifecycleLine, type CodexLifecycleRecord } from "./codex-normalizer.js";
+import { codexEvent, nativeCodexThreadId, parseCodexLifecycleLine, type CodexLifecycleRecord } from "./codex-normalizer.js";
 import { CodexTitleReader } from "./codex-titles.js";
 import type { EventType, NormalizedHookEvent, SessionKind } from "./types.js";
 
@@ -34,6 +34,8 @@ export interface CodexWatcherOptions {
 export interface CodexWatcherHandle {
   stop(): Promise<void>;
   getDiagnostics(): Readonly<{ codes: string[]; counters: Readonly<CodexWatcherCounters> }>;
+  /** RAM-only UUIDs verified from session_meta, never written to the checkpoint. */
+  getApprovalThreadIds(): string[];
 }
 
 export class CodexWatcherStartError extends Error {
@@ -83,6 +85,7 @@ interface Checkpoint {
 }
 
 interface FileState extends PersistedFile {
+  nativeThreadId?: string;
   filePath: string;
   pending: Buffer;
   baseline: boolean;
@@ -168,7 +171,12 @@ export class CodexSessionWatcher {
   }
 
   private handle(): CodexWatcherHandle {
-    return { stop: () => this.stop(), getDiagnostics: () => this.getDiagnostics() };
+    return { stop: () => this.stop(), getDiagnostics: () => this.getDiagnostics(), getApprovalThreadIds: () => this.getApprovalThreadIds() };
+  }
+
+  public getApprovalThreadIds(): string[] {
+    return [...new Set([...this.states.values()].filter((state) => state.active && !state.identityInvalid && state.nativeThreadId)
+      .sort((a, b) => b.lastActivityAt - a.lastActivityAt).map((state) => state.nativeThreadId!))].slice(0, 128);
   }
 
   public pollOnce(): Promise<void> {
@@ -550,6 +558,7 @@ export class CodexSessionWatcher {
     if (parsed.kind === "session_meta") {
       const wasKnownSession = this.knownSessionHashes.has(parsed.sessionHash);
       state.sessionHash = parsed.sessionHash;
+      state.nativeThreadId = nativeCodexThreadId(line);
       await this.updateSessionClassification(state, parsed.sessionKind);
       this.knownSessionHashes.add(parsed.sessionHash);
       if (!historical && wasKnownSession && !state.sessionMetaSeen) {
@@ -801,8 +810,10 @@ export class CodexSessionWatcher {
       const header = bytes.subarray(0, bytesRead);
       const newline = header.indexOf(0x0a);
       if (newline < 0) return;
-      const parsed = parseCodexLifecycleLine(header.subarray(0, newline).toString("utf8"), this.now());
+      const line = header.subarray(0, newline).toString("utf8");
+      const parsed = parseCodexLifecycleLine(line, this.now());
       if (parsed?.kind === "session_meta" && parsed.sessionHash === state.sessionHash) {
+        state.nativeThreadId = nativeCodexThreadId(line);
         await this.updateSessionClassification(state, parsed.sessionKind);
       }
     } catch (error) {

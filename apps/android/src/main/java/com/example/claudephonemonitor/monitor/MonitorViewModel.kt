@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 /** Presentation state is independent of Android lifecycle and uses monotonic milliseconds. */
 internal data class MonitorPresentationState(
@@ -471,6 +472,15 @@ data class MonitorUiState(
     val recentSessionCompletion: RecentCompletion? = null,
     /** Local presentation route; it never changes the server-authoritative monitor snapshot. */
     val usagePageVisible: Boolean = false,
+    /** Independent pending page; confirmed results remain visible for fifteen seconds. */
+    val approvalReminder: ApprovalReminderUi? = null,
+    /** Retained independently of aggregate Working and the visible session rows. */
+    val approvals: List<ApprovalSummary> = emptyList(),
+    val approvalDecisionsInFlight: Set<String> = emptySet(),
+    val approvalDecisionErrors: Set<String> = emptySet(),
+    val uncertainApprovalDecisions: Set<String> = emptySet(),
+    /** Explicit question/input/native approval waits, independently of aggregate Working. */
+    val userActions: List<AwaitingUserAction> = emptyList(),
 )
 
 data class StateChangeUi(
@@ -478,9 +488,16 @@ data class StateChangeUi(
     val remainingMs: Long,
     val completionName: String? = null,
     val strength: ReminderStrength = ReminderStrength.WEAK,
+    val userAction: AwaitingUserAction? = null,
 )
 
 enum class ReminderStrength { STRONG, WEAK }
+
+private fun MonitorPresentationState.withoutOrdinaryReminder(): MonitorPresentationState = copy(
+    changeStatus = null, changeIdentity = null, changeSessionId = null, changeDeadlineMs = null,
+    changeStrength = ReminderStrength.WEAK, completionName = null,
+    recentSessionCompletion = null, sessionCompletionDeadlineMs = null,
+)
 
 class MonitorViewModel(
     private val client: MonitorClient,
@@ -489,6 +506,8 @@ class MonitorViewModel(
     private val _uiState = MutableStateFlow(MonitorUiState())
     val uiState: StateFlow<MonitorUiState> = _uiState.asStateFlow()
     private var presentationState = MonitorPresentationState()
+    private var approvalState = ApprovalPresentationState()
+    private var userActionState = UserActionPresentationState()
     private var presentationTimerJob: Job? = null
     private val sessionTitles = linkedMapOf<String, String>()
 
@@ -515,11 +534,41 @@ class MonitorViewModel(
     fun showUsagePage() { _uiState.update { it.copy(usagePageVisible = true, controlsVisible = false) } }
     fun showStatusPage() { _uiState.update { it.copy(usagePageVisible = false, controlsVisible = false) } }
 
+    fun decideApproval(requestId: String, decision: ApprovalDecision) {
+        val request = approvalState.requests[requestId] ?: return
+        if (request.source != ApprovalSource.CLAUDE_CODE || !request.isPending || !request.canRespond || !client.isConnected.value ||
+            requestId in approvalState.pendingDecisions) return
+        if (decision == ApprovalDecision.ALLOW && approvalState.requests.values.count {
+            it.isPending && it.sessionId == request.sessionId && it.toolName == request.toolName
+        } > 1) return
+        val decisionId = UUID.randomUUID().toString()
+        approvalState = approvalState.copy(pendingDecisions = approvalState.pendingDecisions + (requestId to PendingApprovalDecision(decisionId, decision)),
+            decisionErrors = approvalState.decisionErrors - requestId)
+        client.send(MonitorCommand.DecideApproval(_uiState.value.snapshot.installationId, requestId, decisionId, decision))
+        publishPresentation(monotonicClockMs())
+    }
+
+    fun retryApprovalDecision(requestId: String) {
+        val original = approvalState.pendingDecisions[requestId] ?: return
+        val request = approvalState.requests[requestId] ?: return
+        if (request.source != ApprovalSource.CLAUDE_CODE || !request.isPending || !request.canRespond || !client.isConnected.value ||
+            requestId !in approvalState.uncertainDecisions) return
+        approvalState = approvalState.copy(uncertainDecisions = approvalState.uncertainDecisions - requestId)
+        client.send(MonitorCommand.DecideApproval(_uiState.value.snapshot.installationId,
+            requestId, original.decisionId, original.decision))
+        publishPresentation(monotonicClockMs())
+    }
+
     private fun handleEvent(event: MonitorEvent) {
+        event.approvalDecisionAck?.let {
+            approvalState = ApprovalPresentationReducer.acknowledge(approvalState, it)
+            publishPresentation(monotonicClockMs())
+            return
+        }
         val previous = _uiState.value
         val resolvedTitle = if (
             event.type == MonitorEventType.EVENT &&
-            event.name == MonitorEventName.TASK_FINISHED &&
+            event.name in setOf(MonitorEventName.TASK_FINISHED, MonitorEventName.APPROVAL_REQUESTED, MonitorEventName.WAITING) &&
             event.sessionTitle.isNullOrBlank()
         ) {
             event.sessionId?.let { sessionId ->
@@ -534,12 +583,17 @@ class MonitorViewModel(
             event.copy(sessionTitle = resolvedTitle)
         } else event
         val nowMs = monotonicClockMs()
+        val knownTaskIds = presentationState.activeTasks.mapValues { it.value.taskId }
         val reduction = MonitorPresentationReducer.reduce(presentationState, presentationEvent, nowMs)
         presentationState = reduction.state
         if (!reduction.accepted) {
             publishPresentation(nowMs)
             return
         }
+        val wasPinned = approvalState.active != null
+        userActionState = UserActionPresentationReducer.reduce(userActionState, presentationEvent, knownTaskIds)
+        approvalState = ApprovalPresentationReducer.reduce(approvalState, presentationEvent, nowMs)
+        if (wasPinned || approvalState.active != null) presentationState = presentationState.withoutOrdinaryReminder()
 
         presentationEvent.snapshot?.sessions?.forEach { rememberSessionTitle(it.sessionId, it.title) }
         if (presentationEvent.type == MonitorEventType.EVENT && presentationEvent.sessionId != null &&
@@ -604,7 +658,7 @@ class MonitorViewModel(
             current.copy(
                 snapshot = presentationSnapshot,
                 petState = presentationState.baseState,
-                stateChange = MonitorPresentationReducer.stateChange(presentationState, nowMs),
+                stateChange = presentationStateChange(nowMs),
                 activity = activity,
                 message = if (isNeutral) current.message else detail,
                 isConnected = when (presentationEvent.type) {
@@ -614,6 +668,12 @@ class MonitorViewModel(
                 },
                 eventCount = if (presentationEvent.type == MonitorEventType.CONNECTED || presentationEvent.type == MonitorEventType.DISCONNECTED) current.eventCount else current.eventCount + 1,
                 recentSessionCompletion = presentationState.recentSessionCompletion,
+                approvalReminder = ApprovalPresentationReducer.reminder(approvalState, nowMs),
+                approvals = approvalState.requests.values.toList(),
+                approvalDecisionsInFlight = approvalState.pendingDecisions.keys,
+                approvalDecisionErrors = approvalState.decisionErrors,
+                uncertainApprovalDecisions = approvalState.uncertainDecisions,
+                userActions = userActionState.actions.values.sortedByDescending { it.sequence },
             )
         }
     }
@@ -621,21 +681,45 @@ class MonitorViewModel(
     private fun refreshPresentationTimer() {
         val nowMs = monotonicClockMs()
         presentationState = MonitorPresentationReducer.expire(presentationState, nowMs)
+        approvalState = ApprovalPresentationReducer.expire(approvalState, nowMs)
+        if (approvalState.active != null) presentationState = presentationState.withoutOrdinaryReminder()
         publishPresentation(nowMs)
     }
 
     private fun publishPresentation(nowMs: Long) {
-        val change = MonitorPresentationReducer.stateChange(presentationState, nowMs)
+        // Publishing can be triggered by an ACK at the exact previous deadline.
+        // Persist queue activation before the first frame so its timer cannot restart.
+        approvalState = ApprovalPresentationReducer.expire(approvalState, nowMs)
+        val change = presentationStateChange(nowMs)
+        val approval = ApprovalPresentationReducer.reminder(approvalState, nowMs)
         _uiState.update { current ->
             if (current.petState == presentationState.baseState && current.stateChange == change &&
-                current.recentSessionCompletion == presentationState.recentSessionCompletion
+                current.recentSessionCompletion == presentationState.recentSessionCompletion &&
+                current.approvalReminder == approval && current.approvals == approvalState.requests.values.toList() &&
+                current.approvalDecisionsInFlight == approvalState.pendingDecisions.keys &&
+                current.approvalDecisionErrors == approvalState.decisionErrors
+                && current.uncertainApprovalDecisions == approvalState.uncertainDecisions &&
+                current.userActions == userActionState.actions.values.sortedByDescending { it.sequence }
             ) current
             else current.copy(
                 petState = presentationState.baseState,
                 stateChange = change,
                 recentSessionCompletion = presentationState.recentSessionCompletion,
+                approvalReminder = approval,
+                approvals = approvalState.requests.values.toList(),
+                approvalDecisionsInFlight = approvalState.pendingDecisions.keys,
+                approvalDecisionErrors = approvalState.decisionErrors,
+                uncertainApprovalDecisions = approvalState.uncertainDecisions,
+                userActions = userActionState.actions.values.sortedByDescending { it.sequence },
             )
         }
+    }
+
+    private fun presentationStateChange(nowMs: Long): StateChangeUi? {
+        val change = MonitorPresentationReducer.stateChange(presentationState, nowMs) ?: return null
+        return if (change.status == PetState.WAITING) {
+            change.copy(userAction = userActionState.actions[presentationState.changeSessionId])
+        } else change
     }
 
     private fun rememberSessionTitle(sessionId: String, title: String) {

@@ -12,6 +12,7 @@ import type {
   JsonSchema,
   MonitorEventType,
   ProtocolMessage,
+  SafeEventPayload,
   Snapshot,
   UsageAggregate,
   UsageSnapshotMessage,
@@ -201,14 +202,42 @@ const resultFor = <T>(value: unknown, schema: JsonSchema, rejectForwardedContent
 };
 
 export function validateEventEnvelope(value: unknown): ValidationResult<EventEnvelope> {
-  return resultFor<EventEnvelope>(value, EVENT_ENVELOPE_SCHEMA);
+  const result = resultFor<EventEnvelope>(value, EVENT_ENVELOPE_SCHEMA);
+  if (!result.success) return result;
+  const payload = result.data.payload as SafeEventPayload;
+  if (payload.source === "codex" && (payload.can_respond !== false || !["pending", "resolved", "unknown"].includes(String(payload.status)))) {
+    return { success: false, issues: [{ path: "$.payload", message: "Codex approvals are observations and cannot accept decisions or claim approval outcomes" }] };
+  }
+  if (payload.source === "claude_code" && payload.status === "resolved") {
+    return { success: false, issues: [{ path: "$.payload.status", message: "resolved is only a native Codex pending-request removal" }] };
+  }
+  return result;
 }
 
 export function validateSnapshot(value: unknown): ValidationResult<Snapshot> {
   const result = resultFor<Snapshot>(value, SNAPSHOT_SCHEMA);
-  if (!result.success || result.data.usage === undefined) return result;
-  const usageIssues = validateUsageAggregateIssues(result.data.usage);
-  return usageIssues.length === 0 ? result : { success: false, issues: usageIssues };
+  if (!result.success) return result;
+  const issues: ValidationIssue[] = result.data.usage === undefined ? [] : validateUsageAggregateIssues(result.data.usage);
+  result.data.sessions?.forEach((session, index) => {
+    if (session.waiting_reason !== undefined && session.claude_state !== "waiting") {
+      issues.push({ path: `$.sessions[${index}].waiting_reason`, message: "only an explicitly waiting session can have a waiting reason" });
+    }
+  });
+  const ids = new Set<string>();
+  result.data.approvals?.forEach((approval, index) => {
+    if (ids.has(approval.request_id)) issues.push({ path: `$.approvals[${index}].request_id`, message: "must identify a unique request" });
+    ids.add(approval.request_id);
+    if (approval.status !== "pending" && approval.can_respond) {
+      issues.push({ path: `$.approvals[${index}].can_respond`, message: "only a pending bridge request can accept a decision" });
+    }
+    if (approval.source === "codex" && (approval.can_respond || !["pending", "resolved", "unknown"].includes(approval.status))) {
+      issues.push({ path: `$.approvals[${index}]`, message: "Codex approvals are read-only observations" });
+    }
+    if (approval.source === "claude_code" && approval.status === "resolved") {
+      issues.push({ path: `$.approvals[${index}].status`, message: "resolved is only a native Codex pending-request removal" });
+    }
+  });
+  return issues.length === 0 ? result : { success: false, issues };
 }
 
 /** Validate arithmetic/counter invariants shared by collector and Relay. */
@@ -265,6 +294,8 @@ function validateUsageAggregateIssues(usage: UsageAggregate): ValidationIssue[] 
 export function validateProtocolMessage(value: unknown): ValidationResult<ProtocolMessage> {
   const result = resultFor<ProtocolMessage>(value, PROTOCOL_MESSAGE_SCHEMA);
   if (!result.success) return result;
+  if (result.data.type === MESSAGE_TYPES.EVENT) return validateEventEnvelope(value);
+  if (result.data.type === MESSAGE_TYPES.SNAPSHOT) return validateSnapshot(value);
   if (result.data.type === MESSAGE_TYPES.USAGE_SNAPSHOT) {
     const issues = validateUsageAggregateIssues(result.data.usage);
     return issues.length === 0 ? result : { success: false, issues };
