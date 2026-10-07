@@ -66,6 +66,18 @@ title caches are also capped across polls.
 
 Usage collection is a separate opt-in from lifecycle monitoring. Enable it with
 `--watch-usage` or `COLLECTOR_WATCH_USAGE=1`; `--no-watch-usage` disables it.
+The Finder `.command` launcher asks once via `--configure-usage`. Its saved
+choice lives in `usage.preference` under `CLAUDE_PHONE_MONITOR_HOME` (default
+`~/.claude-phone-monitor`), with mode 600, separately from pairing's generated
+environment. The launcher flags `--watch-usage` / `--no-watch-usage` save a new
+choice; environment values `1` / `0` override only the current run, and CLI
+flags take precedence. Ordinary script launches reuse the saved choice.
+An unconfigured noninteractive launch stays disabled and prints the enable
+command. Direct Collector launches do not read the launcher's preference file.
+An unreadable or damaged preference disables Usage without blocking lifecycle
+monitoring. An explicit launcher choice repairs a damaged regular preference
+file; unsafe paths are never overwritten, and an unsaved choice applies only
+to that launch with a diagnostic.
 It reads `~/.claude/projects` and the Codex sessions root above (override the
 Claude root with `COLLECTOR_CLAUDE_PROJECTS_DIR`). First enable creates a
 persistent start epoch after recording existing file high-water marks; those
@@ -85,6 +97,15 @@ cache-read or Codex's cached-input counter. Missing cache fields stay unknown,
 including 0/0 assistant messages; only the explicit `<synthetic>` model marker
 is filtered. No real remaining-token quota is exposed by these sources, so the
 quota fields remain unavailable.
+
+JSONL rows have a 4 MiB hard limit. Both providers receive a read budget large
+enough for one allowed row and its newline; allocations use the actual bytes
+remaining in each file. The complete JSON row is parsed before classifying
+irrelevant records, so ordinary long prompt/tool bodies do not degrade Usage
+coverage. Oversized or malformed rows still record a conservative coverage
+gap, while later valid records continue counting. Existing permanent gaps
+remain partial after upgrades or restarts; the epoch and response ledger are
+never reset to hide missing data.
 
 The verified versions were Codex Desktop app 26.930.61225 with embedded runtime
 0.160.0, and standalone CLI binary 0.159.3. These are distinct execution forms

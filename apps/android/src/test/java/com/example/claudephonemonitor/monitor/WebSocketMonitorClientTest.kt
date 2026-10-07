@@ -13,6 +13,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -39,6 +40,7 @@ class WebSocketMonitorClientTest {
         client.send(MonitorCommand.Subscribe("install-1", "token", 10L))
         val currentEvents = events.toList()
 
+        factory.closing(0, "late closing")
         factory.closed(0, "late close")
         factory.failure(0, "late failure")
         factory.message(0, """{"type":"event","event_type":"task_started","sequence":99}""")
@@ -68,6 +70,85 @@ class WebSocketMonitorClientTest {
         assertTrue(client.isConnected.value)
 
         collector.cancelAndJoin()
+    }
+
+    @Test
+    fun relayClosingDisconnectsImmediatelyAndManualReconnectPreservesCursor() = runBlocking {
+        val factory = FakeWebSocketFactory()
+        val client = newClient(factory)
+        val events = mutableListOf<MonitorEvent>()
+        val collector = launch(start = CoroutineStart.UNDISPATCHED) {
+            client.events.collect(events::add)
+        }
+        client.connect()
+        factory.open(0)
+        factory.message(0, """{"type":"snapshot","snapshot":{"last_sequence":12}}""")
+        yield()
+
+        // A peer close frame arrives before OkHttp can deliver onClosed.
+        factory.closing(0, "relay restarting", 1001)
+        assertFalse(client.isConnected.value)
+        assertEquals(listOf(1000), factory.connections[0].socket.closeCodes)
+        assertEquals(1, factory.connections.size)
+        yield()
+        assertEquals("relay restarting", events.last().detail)
+        assertEquals(1, events.count { it.type == MonitorEventType.DISCONNECTED })
+
+        factory.closed(0, "relay restarting")
+        factory.failure(0, "late failure")
+        factory.message(0, """{"type":"event","event_type":"task_started","sequence":99}""")
+        yield()
+        assertEquals(1, events.count { it.type == MonitorEventType.DISCONNECTED })
+
+        client.connect()
+        factory.open(1)
+        factory.closing(0, "late closing")
+        factory.open(0)
+        factory.message(0, """{"type":"snapshot","snapshot":{"last_sequence":99}}""")
+        yield()
+        assertTrue(client.isConnected.value)
+        val hello = factory.connections[1].socket.sentTexts.map(::JSONObject)
+            .first { it.optString("type") == "hello" }
+        assertEquals(12L, hello.optLong("last_sequence"))
+        assertEquals(1, events.count { it.type == MonitorEventType.DISCONNECTED })
+        collector.cancelAndJoin()
+    }
+
+    @Test
+    fun emptyPeerCloseUsesLegalAcknowledgementCodeAndFallbackDetail() = runBlocking {
+        val factory = FakeWebSocketFactory()
+        val client = newClient(factory)
+        val events = mutableListOf<MonitorEvent>()
+        val collector = launch(start = CoroutineStart.UNDISPATCHED) {
+            client.events.collect(events::add)
+        }
+        client.connect()
+        factory.open(0)
+        // 1005 represents an empty received close frame; it cannot be sent back.
+        factory.closing(0, "", 1005)
+        assertFalse(client.isConnected.value)
+        assertEquals(listOf(1000), factory.connections[0].socket.closeCodes)
+        yield()
+        assertEquals("WebSocket closing", events.last().detail)
+        collector.cancelAndJoin()
+    }
+
+    @Test
+    fun synchronousPeerCloseBeforeFactoryReturnsDoesNotBlockManualReconnect() {
+        val factory = FakeWebSocketFactory { index, socket, listener ->
+            listener.onOpen(socket, response(socket.request()))
+            if (index == 0) listener.onClosing(socket, 1001, "relay restarting")
+        }
+        val client = newClient(factory)
+
+        client.connect()
+        assertFalse(client.isConnected.value)
+        assertEquals(listOf(1000), factory.connections[0].socket.closeCodes)
+        assertTrue(factory.connections[0].socket.isCancelled)
+
+        client.connect()
+        assertEquals(2, factory.connections.size)
+        assertTrue(client.isConnected.value)
     }
 
     @Test
@@ -130,6 +211,11 @@ class WebSocketMonitorClientTest {
             connection.listener.onClosed(connection.socket, 1000, reason)
         }
 
+        fun closing(index: Int, reason: String, code: Int = 1000) {
+            val connection = connections[index]
+            connection.listener.onClosing(connection.socket, code, reason)
+        }
+
         fun failure(index: Int, detail: String) {
             val connection = connections[index]
             connection.listener.onFailure(connection.socket, IllegalStateException(detail), null)
@@ -140,6 +226,7 @@ class WebSocketMonitorClientTest {
 
     private class FakeWebSocket(private val request: Request) : WebSocket {
         val sentTexts = mutableListOf<String>()
+        val closeCodes = mutableListOf<Int>()
         var closeCalls = 0
             private set
         var isCancelled = false
@@ -157,6 +244,7 @@ class WebSocketMonitorClientTest {
         override fun send(bytes: okio.ByteString): Boolean = true
 
         override fun close(code: Int, reason: String?): Boolean {
+            closeCodes += code
             closeCalls += 1
             return true
         }
