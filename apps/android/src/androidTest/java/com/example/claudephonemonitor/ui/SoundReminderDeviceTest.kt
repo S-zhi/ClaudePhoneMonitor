@@ -180,6 +180,118 @@ class SoundReminderDeviceTest {
         restoreMute = { state -> setRingerMode(state.ringerMode) },
     )
 
+    @Test fun manualAudibilityPreviewRequiresExplicitOptIn() {
+        val args = InstrumentationRegistry.getArguments()
+        assumeTrue("Pass -e issue26_manual_audio notification-preview to play the three-cue preview",
+            args.getString("issue26_manual_audio") == "notification-preview")
+        val requestedPreviewVolume = args.getString("issue26_preview_volume")?.toIntOrNull() ?: 12
+        assumeTrue("issue26_preview_volume must be an integer from 1 through 15", requestedPreviewVolume in 1..15)
+
+        withOriginalAudioState { original ->
+            prepareAudibleState(original)
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+            val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val notifications = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val notificationIndexBefore = audio.getStreamVolume(AudioManager.STREAM_NOTIFICATION)
+            val ringIndexBefore = audio.getStreamVolume(AudioManager.STREAM_RING)
+            val notificationMuteBefore = audio.isStreamMute(AudioManager.STREAM_NOTIFICATION)
+            val ringMuteBefore = audio.isStreamMute(AudioManager.STREAM_RING)
+            val alreadyKeptOn = compose.activity.window.attributes.flags and
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0
+            val observations = CopyOnWriteArrayList<NativePlayback>()
+            var player: AndroidReminderCuePlayer? = null
+            var previewFailure: Throwable? = null
+
+            compose.runOnUiThread { compose.activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+            try {
+                val notificationTarget = minOf(requestedPreviewVolume, audio.getStreamMaxVolume(AudioManager.STREAM_NOTIFICATION))
+                val notificationChanged = setStreamVolumeDirect(AudioManager.STREAM_NOTIFICATION, notificationTarget) &&
+                    waitUntilStable(2_000L) {
+                        audio.getStreamVolume(AudioManager.STREAM_NOTIFICATION) == notificationTarget
+                    }
+                if (!notificationChanged) {
+                    val ringTarget = minOf(requestedPreviewVolume, audio.getStreamMaxVolume(AudioManager.STREAM_RING))
+                    setStreamVolumeDirect(AudioManager.STREAM_RING, ringTarget)
+                    waitUntilStable(2_000L) {
+                        audio.getStreamVolume(AudioManager.STREAM_NOTIFICATION) == notificationTarget
+                    }
+                }
+                val actualNotification = audio.getStreamVolume(AudioManager.STREAM_NOTIFICATION)
+                val actualRing = audio.getStreamVolume(AudioManager.STREAM_RING)
+                val actualInternalMode = parseInternalRingerMode(shell("dumpsys audio"))
+                assumeTrue(
+                    "SKIP: could not raise/read back notification index $notificationTarget with NORMAL, DND off, and unmuted streams; " +
+                        "notification=$actualNotification, ring=$actualRing, ringer=${audio.ringerMode}, " +
+                        "internal=$actualInternalMode, filter=${notifications.currentInterruptionFilter}, " +
+                        "notificationMuted=${audio.isStreamMute(AudioManager.STREAM_NOTIFICATION)}, ringMuted=${audio.isStreamMute(AudioManager.STREAM_RING)}",
+                    actualNotification == notificationTarget && audio.ringerMode == AudioManager.RINGER_MODE_NORMAL &&
+                        actualInternalMode == AudioManager.RINGER_MODE_NORMAL &&
+                        notifications.currentInterruptionFilter == NotificationManager.INTERRUPTION_FILTER_ALL &&
+                        !audio.isStreamMute(AudioManager.STREAM_NOTIFICATION) && !audio.isStreamMute(AudioManager.STREAM_RING),
+                )
+
+                SystemClock.sleep(3_000L)
+                val activePlayer = AndroidReminderCuePlayer(context) { cue, streamId ->
+                    observations += NativePlayback(cue, streamId, SystemClock.elapsedRealtime())
+                }
+                player = activePlayer
+                repeat(3) { index ->
+                    activePlayer.play(ReminderCue.APPROVAL_PENDING)
+                    awaitNativePlaybackCount(observations, index + 1, 5_000L)
+                    if (index < 2) SystemClock.sleep(1_000L)
+                }
+                SystemClock.sleep(520L)
+                check(observations.size == 3 && observations.all { it.streamId != 0 })
+                val evidence = buildString {
+                    appendLine("scenario=manual-notification-audibility-preview")
+                    appendLine("requested_preview_volume=$requestedPreviewVolume")
+                    appendLine("original_external_ringer_mode=${original.ringerMode}")
+                    appendLine("original_internal_ringer_mode=${original.internalRingerMode}:${ringerModeName(original.internalRingerMode)}")
+                    appendLine("original_notification_volume=${original.notificationVolume}")
+                    appendLine("original_notification_muted=${original.notificationStreamMuted}")
+                    appendLine("preview_notification_index_before=$notificationIndexBefore")
+                    appendLine("preview_ring_index_before=$ringIndexBefore")
+                    appendLine("preview_notification_mute_before=$notificationMuteBefore")
+                    appendLine("preview_ring_mute_before=$ringMuteBefore")
+                    appendLine("preview_notification_index_actual=$actualNotification")
+                    appendLine("preview_ring_index_actual=$actualRing")
+                    appendLine("preview_internal_ringer_mode_actual=$actualInternalMode")
+                    appendLine("preview_external_ringer_mode_actual=${audio.ringerMode}")
+                    appendLine("preview_notification_mute_actual=${audio.isStreamMute(AudioManager.STREAM_NOTIFICATION)}")
+                    appendLine("preview_ring_mute_actual=${audio.isStreamMute(AudioManager.STREAM_RING)}")
+                    appendLine("preview_interruption_filter_actual=${notifications.currentInterruptionFilter}")
+                    appendLine("native_successful_stream_count=${observations.size}")
+                    observations.forEach { appendLine("native_cue=${it.cue},stream_id=${it.streamId},elapsed_realtime_ms=${it.atMs}") }
+                }
+                val directory = requireNotNull(context.getExternalFilesDir("issue26-evidence"))
+                directory.mkdirs()
+                File(directory, "manual-notification-audibility-preview.txt").writeText(evidence)
+                android.util.Log.i(TAG, "Issue26 manual audio preview evidence:\n$evidence")
+            } catch (failure: Throwable) {
+                previewFailure = failure
+            } finally {
+                observations.lastOrNull()?.let { last ->
+                    val tailMs = WAV_DURATION_MS + 80L - (SystemClock.elapsedRealtime() - last.atMs)
+                    if (tailMs > 0L) SystemClock.sleep(tailMs)
+                }
+                runCatching { player?.close() }.onFailure { previewFailure?.addSuppressed(it) ?: run { previewFailure = it } }
+                val restoreFailure = runCatching {
+                    restoreManualPreviewAudioState(
+                        audio, notifications, notificationIndexBefore, ringIndexBefore,
+                        notificationMuteBefore, ringMuteBefore,
+                    )
+                }.exceptionOrNull()
+                if (restoreFailure != null) {
+                    previewFailure?.addSuppressed(restoreFailure) ?: run { previewFailure = restoreFailure }
+                }
+                if (!alreadyKeptOn) compose.runOnUiThread {
+                    compose.activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+            }
+            previewFailure?.let { throw it }
+        }
+    }
+
     @Test fun vibrateRingerConsumesCueAndDoesNotReplayAfterRestore() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
@@ -697,6 +809,92 @@ class SoundReminderDeviceTest {
         } finally {
             if (adopted) instrumentation.uiAutomation.dropShellPermissionIdentity()
         }
+    }
+
+    private fun setStreamVolumeDirect(stream: Int, volume: Int): Boolean {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val audio = instrumentation.targetContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val safeVolume = volume.coerceIn(0, audio.getStreamMaxVolume(stream))
+        var adopted = false
+        return try {
+            instrumentation.uiAutomation.adoptShellPermissionIdentity(Manifest.permission.MODIFY_AUDIO_SETTINGS)
+            adopted = true
+            audio.setStreamVolume(stream, safeVolume, 0)
+            waitUntilStable(2_000L) { audio.getStreamVolume(stream) == safeVolume }
+        } catch (_: SecurityException) {
+            false
+        } finally {
+            if (adopted) instrumentation.uiAutomation.dropShellPermissionIdentity()
+        }
+    }
+
+    private fun setStreamMuteDirect(stream: Int, muted: Boolean): Boolean {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val audio = instrumentation.targetContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        var adopted = false
+        return try {
+            instrumentation.uiAutomation.adoptShellPermissionIdentity(Manifest.permission.MODIFY_AUDIO_SETTINGS)
+            adopted = true
+            audio.adjustStreamVolume(
+                stream,
+                if (muted) AudioManager.ADJUST_MUTE else AudioManager.ADJUST_UNMUTE,
+                0,
+            )
+            waitUntilStable(1_500L) { audio.isStreamMute(stream) == muted }
+        } catch (_: SecurityException) {
+            false
+        } finally {
+            if (adopted) instrumentation.uiAutomation.dropShellPermissionIdentity()
+        }
+    }
+
+    private fun restoreManualPreviewAudioState(
+        audio: AudioManager,
+        notifications: NotificationManager,
+        notificationVolume: Int,
+        ringVolume: Int,
+        notificationMuted: Boolean,
+        ringMuted: Boolean,
+    ) {
+        val failures = mutableListOf<String>()
+        fun attempt(label: String, block: () -> Unit) {
+            runCatching(block).onFailure { failures += "$label: $it" }
+        }
+        attempt("disable DND") { check(setDnd("all")) }
+        attempt("settle DND off") { check(awaitStableAudioReadings(audio, notifications)) }
+        attempt("set NORMAL") { check(setRingerMode(AudioManager.RINGER_MODE_NORMAL)) }
+        attempt("restore ring volume") { check(setStreamVolumeDirect(AudioManager.STREAM_RING, ringVolume)) }
+        attempt("restore notification volume") { check(setStreamVolumeDirect(AudioManager.STREAM_NOTIFICATION, notificationVolume)) }
+        attempt("restore notification mute") { check(setStreamMuteDirect(AudioManager.STREAM_NOTIFICATION, notificationMuted)) }
+        attempt("restore ring mute") { check(setStreamMuteDirect(AudioManager.STREAM_RING, ringMuted)) }
+        attempt("settle restored audio") { check(awaitStableAudioReadings(audio, notifications)) }
+        attempt("verify notification volume") {
+            check(audio.getStreamVolume(AudioManager.STREAM_NOTIFICATION) == notificationVolume) {
+                "${audio.getStreamVolume(AudioManager.STREAM_NOTIFICATION)} != $notificationVolume"
+            }
+        }
+        attempt("verify ring volume") {
+            check(audio.getStreamVolume(AudioManager.STREAM_RING) == ringVolume) {
+                "${audio.getStreamVolume(AudioManager.STREAM_RING)} != $ringVolume"
+            }
+        }
+        attempt("verify notification mute") {
+            check(audio.isStreamMute(AudioManager.STREAM_NOTIFICATION) == notificationMuted)
+        }
+        attempt("verify ring mute") { check(audio.isStreamMute(AudioManager.STREAM_RING) == ringMuted) }
+        attempt("verify audible DND-off baseline") {
+            check(audio.ringerMode == AudioManager.RINGER_MODE_NORMAL &&
+                parseInternalRingerMode(shell("dumpsys audio")) == AudioManager.RINGER_MODE_NORMAL &&
+                notifications.currentInterruptionFilter == NotificationManager.INTERRUPTION_FILTER_ALL)
+        }
+        check(failures.isEmpty()) { failures.joinToString("; ") }
+    }
+
+    private fun awaitNativePlaybackCount(observations: List<NativePlayback>, count: Int, timeoutMs: Long) {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < deadline && observations.size < count) SystemClock.sleep(25L)
+        check(observations.size >= count) { "Timed out waiting for native stream callback $count" }
+        check(observations.take(count).all { it.streamId != 0 }) { "SoundPool did not return nonzero native stream IDs" }
     }
 
     private fun setNotificationPolicyAccess(packageName: String, enabled: Boolean): Boolean {

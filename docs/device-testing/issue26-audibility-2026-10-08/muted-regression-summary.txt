@@ -1,0 +1,8 @@
+Final-gain muted regression on Huawei DBR-W00 / Android 12 API 31
+Result: 3 scenarios passed; 0 failed; 0 skipped; 29.55 s.
+
+ringer-silent: muted-phase native stream count 0; restored fresh cue count 1.
+dnd-none: muted-phase native stream count 0; restored fresh cue count 1.
+notification-volume-zero: volume 0 and isStreamMute=true; muted-phase native stream count 0; restored fresh cue count 1.
+
+The test observed native SoundPool stream IDs on restored fresh cues. AudioPlayback usage callbacks were 0 on this OEM and are not used as playback evidence. The device reported no vibrator hardware. Original state readback is recorded separately in final-audio-readback.txt.

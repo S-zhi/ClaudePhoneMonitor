@@ -116,7 +116,7 @@ class AndroidReminderCuePlayer internal constructor(
             val cue = queue.pollFirst() ?: return@Runnable
             if (isPlaybackAllowed()) {
                 try {
-                    val nativeStreamId = pool.play(soundId, 0.45f, 0.45f, 1, 0, 1f)
+                    val nativeStreamId = pool.play(soundId, 1f, 1f, 1, 0, 1f)
                     if (nativeStreamId != 0) runCatching { onNativePlayback(cue, nativeStreamId) }
                 } catch (_: RuntimeException) { }
             }
