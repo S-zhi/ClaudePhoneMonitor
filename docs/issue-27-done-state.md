@@ -21,3 +21,7 @@ Validated locally with Node.js 24.13.0, JDK 21, and Android SDK 35:
 Debug and instrumentation APKs were built. Physical-device acceptance is recorded in [the device report](device-testing/issue27-2026-10-08.md). All 15 isolated device cases obtained a passing result, including one targeted rerun after a lost Compose test window. Completion-title refinements stay bound to the active reminder's task identity even when a suppressed result updates the latest durable DONE record.
 
 For isolated USB device acceptance, build with `./gradlew -PdeviceTestApplicationIdSuffix=.issue27test :apps:android:assembleDebug :apps:android:assembleDebugAndroidTest`. This changes only the opted-in debug application ID to `com.example.claudephonemonitor.issue27test`; the instrumentation package is `com.example.claudephonemonitor.issue27test.test`. Run `DoneRelayDeviceTest` with `deviceRelayUrl=http://127.0.0.1:18887` and the isolated `tests/device-done-relay.mjs` fixture. The default application ID and namespace remain unchanged.
+
+## Publication baseline
+
+Before opening the PR, the two implementation commits were rebased cleanly onto `main` at `92f1928` (the merged Usage update, PR #29). The combined tree passed typecheck, ESLint, all 228 Node tests and 34 Python tests, and Android lint/build. Android reports 205 JVM tests, 204 passed and one expected live-recording skip. The physical-device screenshots and results above were recorded before this rebase; physical tests were not rerun after integrating the Usage update.
