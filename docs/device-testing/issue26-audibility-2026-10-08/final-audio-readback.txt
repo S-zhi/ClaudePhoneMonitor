@@ -1,0 +1,21 @@
+- STREAM_RING:
+   Muted: false
+   Muted Internally: false
+   Min: 0
+   Max: 15
+   streamVolume:7
+   Current: 2 (speaker): 7, 80 (bt_a2dp): 10, 20000000: 10, 40000000 (default): 10
+   Devices: speaker
+- STREAM_NOTIFICATION:
+   Muted: false
+   Muted Internally: false
+   Min: 0
+   Max: 15
+   streamVolume:7
+   Current: 2 (speaker): 7, 80 (bt_a2dp): 10, 20000000: 10, 40000000 (default): 10
+   Devices: speaker
+- mode (internal) = NORMAL
+- mode (external) = SILENT
+- zen mode:ZEN_MODE_IMPORTANT_INTERRUPTIONS
+global_zen_mode=1
+notification_policy_access_packages=null

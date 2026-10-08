@@ -1,0 +1,11 @@
+scenario=first-snapshot-approval
+original_ringer_mode=0
+original_notification_stream_volume=7
+original_interruption_filter=2
+original_zen_mode=1
+original_policy_access_granted=false
+original_stay_on_while_plugged_in=0
+original_screen_off_timeout_ms=300000
+native_cue_count=1
+audio_playback_notification_usage_callbacks=0
+native_cue=APPROVAL_PENDING,stream_id=1,elapsed_realtime_ms=313221662

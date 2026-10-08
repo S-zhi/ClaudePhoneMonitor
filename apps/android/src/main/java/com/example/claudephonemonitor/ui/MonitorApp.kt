@@ -64,6 +64,8 @@ import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.claudephonemonitor.monitor.ActivityVariation
+import com.example.claudephonemonitor.monitor.AndroidReminderCueLedger
+import com.example.claudephonemonitor.monitor.AndroidReminderCuePlayer
 import com.example.claudephonemonitor.monitor.ApprovalDecision
 import com.example.claudephonemonitor.monitor.ApprovalReminderUi
 import com.example.claudephonemonitor.monitor.ApprovalStatus
@@ -75,6 +77,7 @@ import com.example.claudephonemonitor.monitor.PairingConfig
 import com.example.claudephonemonitor.monitor.PairingPayload
 import com.example.claudephonemonitor.monitor.PairingRepository
 import com.example.claudephonemonitor.monitor.PairingStore
+import com.example.claudephonemonitor.monitor.SilentReminderCueLedger
 import com.example.claudephonemonitor.monitor.MonitorSnapshot
 import com.example.claudephonemonitor.monitor.RecentCompletion
 import com.example.claudephonemonitor.monitor.ReminderStrength
@@ -121,10 +124,17 @@ fun MonitorApp() {
                 )
             }
             val factory = remember(config) {
+                val appContext = context.applicationContext
+                val cuePlayer = runCatching { AndroidReminderCuePlayer(appContext) }
+                    .getOrDefault(com.example.claudephonemonitor.monitor.NoOpReminderCuePlayer)
+                val cueLedger = runCatching { AndroidReminderCueLedger(appContext) }
+                    .getOrDefault(SilentReminderCueLedger)
                 object : ViewModelProvider.Factory {
                     @Suppress("UNCHECKED_CAST")
                     override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
-                        MonitorViewModel(client) as T
+                        MonitorViewModel(client, cuePlayer, cueLedger, config.installationId) {
+                            System.nanoTime() / 1_000_000L
+                        } as T
                 }
             }
             val viewModelStoreOwner = remember(config) { PairingScopedViewModelStoreOwner() }
