@@ -1,0 +1,14 @@
+verified_at=2026-10-08
+device=Huawei DBR-W00
+android_api=31
+audio_service_internal_ringer_mode=2:NORMAL
+audio_manager_external_ringer_mode=0:SILENT (priority-DND proxy)
+settings_sound_ring_radio=selected
+notification_stream_volume=7/15
+notification_stream_is_muted=false
+zen_mode=1:priority
+notification_interruption_filter=2:priority
+notification_policy_access_granted=false
+stay_on_while_plugged_in=0
+screen_off_timeout_ms=300000
+app_data_and_pairing=preserved

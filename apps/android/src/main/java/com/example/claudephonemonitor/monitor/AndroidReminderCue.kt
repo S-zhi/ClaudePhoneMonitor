@@ -52,7 +52,10 @@ class AndroidReminderCueLedger(context: Context) : ReminderCueLedger {
 }
 
 /** Short notification sound with a serialized queue and a fresh silence/DND check per cue. */
-class AndroidReminderCuePlayer(context: Context) : ReminderCuePlayer {
+class AndroidReminderCuePlayer internal constructor(
+    context: Context,
+    private val onNativePlayback: (ReminderCue, Int) -> Unit = { _, _ -> },
+) : ReminderCuePlayer {
     private val appContext = context.applicationContext
     private val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val notificationManager = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -112,7 +115,10 @@ class AndroidReminderCuePlayer(context: Context) : ReminderCuePlayer {
             if (closed || expectedGeneration != generation) return@Runnable
             val cue = queue.pollFirst() ?: return@Runnable
             if (isPlaybackAllowed()) {
-                try { pool.play(soundId, 0.45f, 0.45f, 1, 0, 1f) } catch (_: RuntimeException) { }
+                try {
+                    val nativeStreamId = pool.play(soundId, 0.45f, 0.45f, 1, 0, 1f)
+                    if (nativeStreamId != 0) runCatching { onNativePlayback(cue, nativeStreamId) }
+                } catch (_: RuntimeException) { }
             }
             // Keep a cooldown even when the queue is empty so a newly arriving cue cannot
             // overlap the tail of this short WAV.
