@@ -49,6 +49,7 @@ import com.example.claudephonemonitor.monitor.UsageAggregate
 import com.example.claudephonemonitor.monitor.UsageCoverageStatus
 import com.example.claudephonemonitor.monitor.UsageMetric
 import com.example.claudephonemonitor.monitor.UsageQuality
+import java.time.Instant
 import java.util.Locale
 import kotlin.math.cos
 import kotlin.math.sin
@@ -77,7 +78,11 @@ internal fun UsageMonitorScreen(
             .coerceIn(if (useCompact) 118.dp else 176.dp, if (useCompact) 152.dp else 230.dp)
         val dialDiameter = (dialHeight - if (useCompact && largeFont) 46.dp else 42.dp)
             .coerceIn(if (useCompact && largeFont) 68.dp else if (useCompact) 78.dp else 132.dp, if (useCompact) 116.dp else 188.dp)
-        val footerHeight = if (presentation.showSetup) 42.dp else 30.dp
+        val footerHeight = when {
+            presentation.showSetup -> 42.dp
+            largeFont -> 40.dp
+            else -> 30.dp
+        }
         Column(
             modifier = Modifier.fillMaxSize().padding(horizontal = horizontalPadding, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(5.dp),
@@ -113,7 +118,7 @@ internal fun UsageMonitorScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(if (presentation.showSetup) "统计范围 · 等待首条响应" else "累计用量 · 自 ${usage?.let { formatUsageStartedAt(it.startedAt) } ?: "—"} 起",
+                Text(formatUsageRangeLabel(usage),
                     color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp, lineHeight = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f).testTag("usage-range"))
                 Text(presentation.freshnessLabel, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp,
@@ -229,12 +234,23 @@ internal fun quotaRemainingFraction(usage: UsageAggregate?): Float? {
 
 internal fun quotaStartFraction(usage: UsageAggregate?): Float? {
     val quota = usage?.quota ?: return null
-    if (quota.startResetAt.isNullOrBlank() || quota.startResetAt != quota.resetAt || quota.window == null || quota.startSampledAt == null) return null
+    if (!quotaResetTimesAlign(quota.startResetAt, quota.resetAt)) return null
+    if (quota.window.isNullOrBlank() || quota.windowMinutes == null || quota.windowMinutes <= 0) return null
+    if (quota.startSampledAt.isNullOrBlank()) return null
+    if (runCatching { Instant.parse(quota.startSampledAt) }.isFailure) return null
     if (quota.availability != "available" && quota.availability != "stale") return null
     if (quota.unit != "percent") return null
     val start = quota.startRemaining ?: return null
     if (start !in 0.0..100.0) return null
     return (start / 100.0).toFloat()
+}
+
+private fun quotaResetTimesAlign(startResetAt: String?, resetAt: String?): Boolean {
+    if (startResetAt.isNullOrBlank() || resetAt.isNullOrBlank()) return false
+    val startMillis = runCatching { Instant.parse(startResetAt).toEpochMilli() }.getOrNull() ?: return false
+    val currentMillis = runCatching { Instant.parse(resetAt).toEpochMilli() }.getOrNull() ?: return false
+    val delta = runCatching { Math.subtractExact(startMillis, currentMillis) }.getOrNull() ?: return false
+    return delta in -5_000L..5_000L
 }
 
 private fun formatQuotaWindow(usage: UsageAggregate?): String? {
@@ -324,7 +340,7 @@ private fun UsageMetricDisplay(
 internal fun formatUsageMetric(metric: UsageMetric): String {
     if (metric.quality == UsageQuality.UNAVAILABLE) return "不可用"
     val value = metric.value ?: return "不可用"
-    return (if (metric.quality == UsageQuality.PARTIAL) "≥" else "") + formatTokenCount(value)
+    return formatTokenCount(value)
 }
 
 private fun formatTokenCount(value: Long): String = String.format(Locale.US, "%,d", value)
@@ -360,9 +376,7 @@ internal fun formatCacheHitRate(usage: UsageAggregate): String {
 }
 
 internal fun formatObservedResponses(usage: UsageAggregate): String {
-    val ready = usage.claudeCoverage.status == UsageCoverageStatus.READY &&
-        usage.codexCoverage.status == UsageCoverageStatus.READY
-    return (if (ready) "" else "≥") + formatTokenCount(usage.observedResponses)
+    return formatTokenCount(usage.observedResponses)
 }
 
 private fun responseCountQuality(usage: UsageAggregate): UsageQuality =

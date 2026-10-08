@@ -41,7 +41,7 @@ test("Codex rate limits select only the codex bucket and prefer a valid primary 
   assert.equal(parseCodexRateLimits({ rateLimitsByLimitId: { codex: { primary: window(50, Number.MAX_SAFE_INTEGER) } } }, now), undefined, "unrepresentable reset dates are rejected without throwing");
 });
 
-async function fakeCodex(t: { after(fn: () => void | Promise<void>): void }, behavior: "normal" | "failure" | "oversize" | "silent" = "normal") {
+async function fakeCodex(t: { after(fn: () => void | Promise<void>): void }, behavior: "normal" | "failure" | "oversize" | "silent" | "delayed" = "normal") {
   const directory = await mkdtemp(path.join(os.tmpdir(), "fake-codex-quota-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const scriptPath = path.join(directory, "codex-fake");
@@ -50,7 +50,8 @@ async function fakeCodex(t: { after(fn: () => void | Promise<void>): void }, beh
     accountId: "fake-account",
     rateLimitsByLimitId: { codex: { primary: window(12.25) } },
   });
-  const script = `#!/usr/bin/env node\nimport { appendFileSync } from 'node:fs';\nimport readline from 'node:readline';\nconst log = ${JSON.stringify(logPath)};\nconst mode = ${JSON.stringify(behavior)};\nif (mode === 'oversize') { process.stdout.write('x'.repeat(300000) + '\\n'); process.stdin.resume(); }\nelse if (mode === 'silent') process.stdin.resume();\nelse readline.createInterface({ input: process.stdin }).on('line', (line) => {\n const request = JSON.parse(line); appendFileSync(log, request.method + '\\n');\n if (request.id === 1) process.stdout.write(JSON.stringify(mode === 'failure' ? { jsonrpc:'2.0', id:1, error:{code:-1,message:'fixed'} } : {jsonrpc:'2.0',id:1,result:{}}) + '\\n');\n if (request.id === 2) process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:2,result:${result}}) + '\\n');\n});\n`;
+  const responseDelayMs = behavior === "delayed" ? 5_200 : 0;
+  const script = `#!/usr/bin/env node\nimport { appendFileSync } from 'node:fs';\nimport readline from 'node:readline';\nconst log = ${JSON.stringify(logPath)};\nconst mode = ${JSON.stringify(behavior)};\nconst delayMs = ${responseDelayMs};\nif (delayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);\nif (mode === 'oversize') { process.stdout.write('x'.repeat(300000) + '\\n'); process.stdin.resume(); }\nelse if (mode === 'silent') process.stdin.resume();\nelse readline.createInterface({ input: process.stdin }).on('line', (line) => {\n const request = JSON.parse(line); appendFileSync(log, request.method + '\\n');\n if (request.id === 1) process.stdout.write(JSON.stringify(mode === 'failure' ? { jsonrpc:'2.0', id:1, error:{code:-1,message:'fixed'} } : {jsonrpc:'2.0',id:1,result:{}}) + '\\n');\n if (request.id === 2) process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:2,result:${result}}) + '\\n');\n});\n`;
   await writeFile(scriptPath, script, { mode: 0o700 });
   await chmod(scriptPath, 0o700);
   return { scriptPath, logPath };
@@ -65,6 +66,12 @@ test("app-server quota reader performs only the read-only handshake and rate-lim
   const requests = (await readFile(fake.logPath, "utf8")).trim().split("\n");
   assert.deepEqual(requests, ["initialize", "initialized", "account/rateLimits/read"]);
   assert.equal(requests.some((method) => method.includes("thread") || method.includes("turn") || method.includes("model")), false);
+});
+
+test("default app-server timeout allows quota reads that take longer than five seconds", async (t) => {
+  const fake = await fakeCodex(t, "delayed");
+  const sample = await readCodexQuota(fake.scriptPath, now);
+  assert.equal(sample?.used_percent, 12.25);
 });
 
 test("app-server failures, missing executables, bounded output, and timeout fail closed", async (t) => {

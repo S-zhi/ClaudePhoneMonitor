@@ -5,6 +5,7 @@ import com.example.claudephonemonitor.monitor.ComputerState
 import com.example.claudephonemonitor.monitor.UsageAggregate
 import com.example.claudephonemonitor.monitor.UsageCoverageStatus
 import com.example.claudephonemonitor.monitor.UsageProviderCoverage
+import com.example.claudephonemonitor.monitor.UsageQuality
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -76,6 +77,20 @@ internal fun formatProviderCoverage(name: String, coverage: UsageProviderCoverag
 internal fun usageCacheExplanation(usage: UsageAggregate?): String =
     "缓存命中 Tokens ${usage?.cachedInput?.let(::formatUsageMetric) ?: "不可用"} / 总输入 ${usage?.totalInput?.let(::formatUsageMetric) ?: "不可用"}"
 
+internal fun formatUsageRangeLabel(usage: UsageAggregate?): String {
+    if (usage == null) return "统计范围 · 等待首条响应"
+    val began = formatUsageStartedAt(usage.startedAt)
+    val hasPartialCoverage = usage.claudeCoverage.status != UsageCoverageStatus.READY ||
+        usage.codexCoverage.status != UsageCoverageStatus.READY ||
+        usage.actual.quality != UsageQuality.COMPLETE ||
+        usage.newInput.quality != UsageQuality.COMPLETE ||
+        usage.completeResponses < usage.observedResponses
+    return if (hasPartialCoverage) {
+        "已观测累计 · 部分来源\n自 $began 起"
+    } else {
+        "累计用量 · 自 $began 起"
+    }
+}
 
 internal fun formatCollectorRuntime(startedAt: String, nowMillis: Long = System.currentTimeMillis()): String = runCatching {
     val elapsed = ((nowMillis - Instant.parse(startedAt).toEpochMilli()).coerceAtLeast(0L)) / 1000L

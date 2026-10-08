@@ -25,6 +25,7 @@ class UsagePresentationTest {
         assertEquals("./scripts/start-lan-monitor.sh --watch-usage", USAGE_START_COMMAND)
         assertEquals("Claude · 未收到来源状态", formatProviderCoverage("Claude", null))
         assertEquals("缓存命中 Tokens 不可用 / 总输入 不可用", usageCacheExplanation(null))
+        assertEquals("统计范围 · 等待首条响应", formatUsageRangeLabel(null))
     }
 
     @Test
@@ -49,9 +50,34 @@ class UsagePresentationTest {
         val presentation = usagePresentation(MonitorUiState(isConnected = true, snapshot = original))
         assertEquals("部分来源可用 · 已保留累计数据", presentation.collectionTitle)
         assertFalse(presentation.showSetup)
-        assertEquals("≥185", formatUsageMetric(usage.actual))
+        assertEquals("185", formatUsageMetric(usage.actual))
+        assertEquals(
+            "已观测累计 · 部分来源\n自 ${formatUsageStartedAt(usage.startedAt)} 起",
+            formatUsageRangeLabel(usage),
+        )
         assertTrue(formatProviderCoverage("Claude", usage.claudeCoverage).contains("累计缺项"))
         assertTrue(formatProviderCoverage("Codex", UsageProviderCoverage(UsageCoverageStatus.UNAVAILABLE, 0, 0)).contains("来源不可用"))
+    }
+
+    @Test
+    fun completeCollectionShowsItsDateRangeWithoutPartialSourceQualifier() {
+        val usage = snapshot().usage!!
+        assertEquals(
+            "累计用量 · 自 ${formatUsageStartedAt(usage.startedAt)} 起",
+            formatUsageRangeLabel(usage),
+        )
+    }
+
+    @Test
+    fun partialMetricsOrIncompleteResponseCountQualifyTheObservedRange() {
+        val usage = snapshot().usage!!
+        assertEquals(UsageCoverageStatus.READY, usage.claudeCoverage.status)
+        assertEquals(UsageCoverageStatus.READY, usage.codexCoverage.status)
+        val expected = "已观测累计 · 部分来源\n自 ${formatUsageStartedAt(usage.startedAt)} 起"
+
+        assertEquals(expected, formatUsageRangeLabel(usage.copy(newInput = usage.newInput.copy(quality = UsageQuality.PARTIAL))))
+        assertEquals(expected, formatUsageRangeLabel(usage.copy(actual = usage.actual.copy(quality = UsageQuality.PARTIAL))))
+        assertEquals(expected, formatUsageRangeLabel(usage.copy(completeResponses = usage.observedResponses - 1)))
     }
 
     @Test

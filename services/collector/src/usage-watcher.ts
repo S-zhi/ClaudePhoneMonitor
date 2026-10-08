@@ -13,6 +13,7 @@ const MAX_LINE_BYTES = 4 * 1024 * 1024;
 const MAX_BYTES_PER_FILE = MAX_LINE_BYTES + 1;
 const POLL_MS = 5_000;
 const QUOTA_POLL_MS = 60_000;
+const RESET_JITTER_TOLERANCE_MS = 5_000;
 const PROVIDERS = ["claude", "codex"] as const;
 type Provider = (typeof PROVIDERS)[number];
 type UsageNumbers = { input: number | null; cached: number | null; cacheCreation: number | null; output: number | null };
@@ -517,8 +518,12 @@ export class UsageWatcher {
     }
     if (isInitialSample) this.quotaBaseline = sample;
     const base = this.quotaBaseline;
+    const baseResetMs = base ? Date.parse(base.reset_at) : Number.NaN;
+    const sampleResetMs = Date.parse(sample.reset_at);
     const sameWindow = Boolean(base && sample.account_key && base.account_key && sample.account_key === base.account_key &&
-      sample.reset_at === base.reset_at && sample.window_minutes === base.window_minutes && sample.window === base.window);
+      sample.window_minutes === base.window_minutes && sample.window === base.window &&
+      Math.abs(sampleResetMs - baseResetMs) <= RESET_JITTER_TOLERANCE_MS &&
+      now < Math.min(baseResetMs, sampleResetMs));
     this.quota = {
       start_remaining: sameWindow && base ? 100 - base.used_percent : null,
       current_remaining: 100 - sample.used_percent,

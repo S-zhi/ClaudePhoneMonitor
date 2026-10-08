@@ -14,7 +14,7 @@ export interface CodexQuotaSample {
 export type CodexQuotaReader = (binary: string, nowMs: number, timeoutMs?: number) => Promise<CodexQuotaSample | undefined>;
 
 const MAX_OUTPUT_BYTES = 256 * 1024;
-const TIMEOUT_MS = 5_000;
+const TIMEOUT_MS = 20_000;
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);

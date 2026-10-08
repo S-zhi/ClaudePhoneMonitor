@@ -96,6 +96,7 @@ class UsageLayoutDeviceTest {
         compose.onNodeWithTag("usage-playground").assertIsDisplayed()
         compose.onNodeWithTag("usage-range").assertIsDisplayed()
         capture(if (path == null) "usage-large-font-synthetic.png" else "usage-large-font-redacted.png")
+        assertTextFits("usage-range", formatUsageRangeLabel(usage))
         assertTextFits("usage-value-actual", usage.actual.let(::formatUsageMetric))
         assertTextFits("usage-value-cache-hit", formatCacheHitRate(usage))
         assertTextFits("usage-value-new-input", usage.newInput.let(::formatUsageMetric))

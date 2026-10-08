@@ -679,6 +679,46 @@ test("Codex quota keeps a collector-start baseline only for the same account win
   assert.equal(validateUsageAggregate(handle.getSnapshot()).success, true);
 });
 
+test("same-account reset jitter preserves startup quota only within five seconds while both resets remain future", async (t) => {
+  const f = await fixture(t);
+  const baseResetMs = epoch + 86_400_000;
+  const run = async (name: string, resetJitterMs: number, elapsedMs: number, expectedStart: number | null) => {
+    let now = epoch;
+    let resetAtMs = baseResetMs;
+    let usedPercent = 56;
+    const watcher = f.makeWatcher({
+      databaseFile: path.join(f.root, "quota-" + name + ".sqlite"),
+      now: () => now,
+      codexBinary: "test-codex",
+      quotaReader: async (_binary, nowMs) => ({
+        used_percent: usedPercent,
+        reset_at: new Date(resetAtMs).toISOString(),
+        window_minutes: 10_080,
+        window: "primary",
+        sampled_at: new Date(nowMs).toISOString(),
+        account_key: "same-account-key",
+      }),
+    });
+    const handle = await watcher.start();
+    t.after(() => handle.stop());
+    const originalStartReset = new Date(baseResetMs).toISOString();
+    assert.equal(handle.getSnapshot().quota.start_remaining, 44);
+    now += elapsedMs;
+    resetAtMs = baseResetMs + resetJitterMs;
+    usedPercent = 57;
+    await poll(watcher);
+    const quota = handle.getSnapshot().quota;
+    assert.equal(quota.start_remaining, expectedStart);
+    assert.equal(quota.start_reset_at, originalStartReset);
+    assert.equal(quota.reset_at, new Date(resetAtMs).toISOString(), "current reset metadata preserves the source timestamp");
+    assert.equal(validateUsageAggregate(handle.getSnapshot()).success, true);
+  };
+
+  await run("within-boundary", 5_000, 60_001, 44);
+  await run("outside-boundary", 5_001, 60_001, null);
+  await run("already-expired", 2_000, 86_401_000, null);
+});
+
 test("a failed startup quota read never becomes a later start baseline", async (t) => {
   const f = await fixture(t);
   let now = epoch;
