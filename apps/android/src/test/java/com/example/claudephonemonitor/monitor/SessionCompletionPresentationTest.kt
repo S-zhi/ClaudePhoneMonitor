@@ -34,7 +34,7 @@ class SessionCompletionPresentationTest {
         assertEquals(15_000L, state.sessionCompletionDeadlineMs)
         state = reduce(state, snapshot(4, completion, runningCount = 1), 15_000)
         assertNull(state.changeStatus)
-        assertNull(state.recentSessionCompletion)
+        assertEquals(completion, state.recentSessionCompletion)
     }
 
     @Test
@@ -44,9 +44,9 @@ class SessionCompletionPresentationTest {
         state = reduce(state, MonitorEvent(type = MonitorEventType.DISCONNECTED), 200)
         state = reduce(state, MonitorEvent(type = MonitorEventType.CONNECTED), 300)
         state = reduce(state, snapshot(2, RecentCompletion("a", "task", 2, "", "Release A")), 400)
-        assertEquals(PetState.IDLE, state.baseState)
+        assertEquals(PetState.FINISH, state.baseState)
         assertEquals(PetState.FINISH, state.changeStatus) // A weak reconnect does not take over the strong result.
-        assertNull(state.recentSessionCompletion)
+        assertEquals("a", state.recentSessionCompletion?.sessionId)
 
         state = reduce(state, MonitorEvent(type = MonitorEventType.DISCONNECTED), 500)
         state = reduce(state, MonitorEvent(type = MonitorEventType.CONNECTED), 600)
@@ -124,7 +124,7 @@ class SessionCompletionPresentationTest {
         assertEquals(15_200L, state.sessionCompletionDeadlineMs)
         assertEquals("b", MonitorPresentationReducer.expire(state, 15_199).recentSessionCompletion?.sessionId)
         val expired = MonitorPresentationReducer.expire(state, 15_200)
-        assertNull(expired.recentSessionCompletion)
+        assertEquals("b", expired.recentSessionCompletion?.sessionId)
         assertEquals(PetState.ERROR, expired.changeStatus) // The later error has its own deadline.
     }
 
@@ -139,7 +139,7 @@ class SessionCompletionPresentationTest {
         assertEquals(PetState.WORKING, state.baseState)
         assertEquals(SessionDisplayState.DONE, activeSessions[0].displayState(state.recentSessionCompletion))
 
-        val idleTail = activeSessions[0].copy(claudeState = ClaudeState.IDLE, lastActivitySequence = 3)
+        val idleTail = activeSessions[0].copy(claudeState = ClaudeState.IDLE, lastActivitySequence = 3, taskCompleted = true)
         state = reduce(state, snapshot(3, sessions = listOf(idleTail, activeSessions[1]), runningCount = 1), 6_000)
         assertEquals(SessionDisplayState.DONE, idleTail.displayState(state.recentSessionCompletion))
         assertEquals(15_100L, state.sessionCompletionDeadlineMs)
@@ -235,12 +235,74 @@ class SessionCompletionPresentationTest {
             nowMs = 15_100
             advanceTimeBy(100)
             runCurrent()
-            assertNull(viewModel.uiState.value.recentSessionCompletion)
+            assertEquals("target", viewModel.uiState.value.recentSessionCompletion?.sessionId)
             assertNull(viewModel.uiState.value.stateChange)
         } finally {
             store.clear()
             kotlinx.coroutines.Dispatchers.resetMain()
         }
+    }
+
+    @Test
+    fun authoritativeDoneSurvivesReminderExpiryHeartbeatReconnectAndNewTaskResetsIt() {
+        val completion = RecentCompletion("a", "task", 2, "", "Release")
+        val done = SessionSummary("a", "Release", ClaudeState.IDLE, 2, taskCompleted = true)
+        var state = reduce(MonitorPresentationState(), snapshot(2, completion, listOf(done)), 0)
+        state = reduce(state, snapshot(2, sessions = listOf(done)), 6_000)
+        assertNull(state.changeStatus)
+        assertEquals(PetState.FINISH, state.baseState)
+        assertEquals(completion, state.recentSessionCompletion)
+        state = reduce(state, MonitorEvent(type = MonitorEventType.DISCONNECTED), 6_100)
+        assertEquals(PetState.OFFLINE, state.baseState)
+        assertEquals(completion, state.recentSessionCompletion)
+        state = reduce(state, snapshot(2, sessions = listOf(done)), 12_000)
+        assertEquals(PetState.FINISH, state.baseState)
+        assertNull(state.changeStatus) // A durable result does not replay its expired reminder.
+        val nextTask = done.copy(claudeState = ClaudeState.WORKING, lastActivitySequence = 3, taskCompleted = false)
+        state = reduce(state, snapshot(3, sessions = listOf(nextTask)), 12_100)
+        assertEquals(PetState.WORKING, state.baseState)
+        assertNull(state.recentSessionCompletion)
+        state = reduce(state, snapshot(4, sessions = listOf(nextTask.copy(claudeState = ClaudeState.WAITING, lastActivitySequence = 4))), 12_200)
+        assertEquals(PetState.WAITING, state.baseState)
+        state = reduce(state, snapshot(5, sessions = listOf(done.copy(lastActivitySequence = 5))), 18_000)
+        assertEquals(PetState.FINISH, state.baseState)
+        assertNull(state.changeStatus)
+    }
+
+    @Test
+    fun legacyCompletedWorkingRowCannotKeepLaterEventOnlyTaskWorking() {
+        val staleRow = SessionSummary("a", "Release A", ClaudeState.WORKING, 1)
+        var state = reduce(MonitorPresentationState(), snapshot(1, sessions = listOf(staleRow), runningCount = 1), 0)
+        state = reduce(state, finished("a", 2, "Release A"), 100)
+        state = reduce(state, snapshot(2, sessions = listOf(staleRow), runningCount = 1), 200)
+        assertEquals(PetState.FINISH, state.baseState)
+        assertEquals(emptySet<String>(), state.workingSessionIds)
+        state = reduce(state, MonitorEvent(
+            type = MonitorEventType.EVENT, name = MonitorEventName.TASK_STARTED,
+            sessionId = "b", taskId = "task", sequence = 3,
+        ), 300)
+        assertEquals(PetState.WORKING, state.baseState)
+        assertEquals(setOf("b"), state.workingSessionIds)
+        state = reduce(state, finished("b", 4, "Release B"), 400)
+        assertEquals(PetState.FINISH, state.baseState)
+        assertEquals(emptySet<String>(), state.workingSessionIds)
+    }
+
+    @Test
+    fun newerFailedOrUnusedIdleAndUnknownSessionNeverAcquireDone() {
+        var state = reduce(MonitorPresentationState(), snapshot(1), 0)
+        state = reduce(state, finished("a", 2, "Release"), 100)
+        state = reduce(state, snapshot(3, sessions = listOf(
+            SessionSummary("a", "Release", ClaudeState.IDLE, 3, taskCompleted = false),
+        )), 6_000)
+        assertEquals(PetState.IDLE, state.baseState)
+        assertNull(state.recentSessionCompletion)
+        val priorReminder = state.changeIdentity
+        state = reduce(state, finished("unknown", 4, "Unknown"), 6_100)
+        assertEquals(PetState.IDLE, state.baseState)
+        assertNull(state.recentSessionCompletion)
+        assertEquals(priorReminder, state.changeIdentity) // Unknown completion cannot start a new reminder.
+        assertEquals(SessionDisplayState.IDLE, SessionSummary("unknown", "Unknown", ClaudeState.IDLE, 4, taskCompleted = true).displayState(null))
     }
 
     @Test

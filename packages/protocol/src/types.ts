@@ -168,6 +168,8 @@ export interface SnapshotActivity {
 }
 
 export interface SessionSummary {
+  /** Successful current task result, retained independently of reminder expiry. */
+  readonly task_completed?: boolean;
   readonly session_kind?: SessionKind;
   readonly session_id: string;
   readonly title: string;

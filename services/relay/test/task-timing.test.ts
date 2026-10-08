@@ -186,3 +186,50 @@ test("Relay sends trusted duration before its same-sequence snapshot and resumes
     relay.stop();
   }
 });
+
+
+repositoryCases("successful results stay complete after reminder expiry and reset only on new task lifecycle", (repository) => {
+  const record = (value: EventEnvelope) => repository.recordEvent(value, value.occurred_at);
+  record(event("session_started", 1, 0, { session_id: "unused", task_id: undefined }));
+  record(event("task_started", 2, 0));
+  record(event("task_finished", 3, 100));
+  record(event("task_finished", 4, 200, { session_id: "session-b", task_id: "task-b" }));
+  record(event("task_failed", 5, 300, { session_id: "failed", task_id: "failed-task" }));
+  const expired = repository.getInstallationState("install-1", at(6_000));
+  assert.equal(expired?.recent_completion, undefined);
+  assert.deepEqual(Object.fromEntries(expired?.sessions?.map((row) => [row.session_id, row.task_completed]) ?? []), {
+    failed: false, "session-b": true, "session-a": true, unused: false,
+  });
+  record(event("session_title_updated", 6, 6_001, { session_title: "Renamed release" }));
+  record(event("tool_finished", 7, 6_002));
+  assert.equal(repository.getInstallationState("install-1", at(6_003))?.sessions?.find((row) => row.session_id === "session-a")?.task_completed, true);
+  record(event("task_started", 8, 6_010, { task_id: "next-task" }));
+  const restarted = repository.getInstallationState("install-1", at(6_010))?.sessions?.find((row) => row.session_id === "session-a");
+  assert.equal(restarted?.task_completed, false);
+  assert.equal(restarted?.claude_state, "working");
+  record(event("waiting", 9, 6_020, { task_id: "next-task", payload: { reason: "question" } }));
+  assert.equal(repository.getInstallationState("install-1", at(6_020))?.sessions?.find((row) => row.session_id === "session-a")?.task_completed, false);
+  record(event("task_failed", 10, 6_030, { task_id: "next-task" }));
+  assert.equal(repository.getInstallationState("install-1", at(6_030))?.sessions?.find((row) => row.session_id === "session-a")?.task_completed, false);
+  record(event("task_started", 11, 6_040, { task_id: "final-task" }));
+  record(event("task_finished", 12, 6_050, { task_id: "final-task" }));
+  assert.equal(repository.getInstallationState("install-1", at(12_000))?.sessions?.find((row) => row.session_id === "session-a")?.task_completed, true);
+});
+
+test("SQLite reopening keeps completed rows after the transient result expires", () => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-durable-done-"));
+  const path = join(directory, "relay.sqlite");
+  let repository = new SqliteRelayRepository(path);
+  try {
+    repository.recordEvent(event("task_finished", 1, 100), at(100));
+    repository.recordEvent(event("task_finished", 2, 200, { session_id: "session-b", task_id: "task-b" }), at(200));
+    repository.close();
+    repository = new SqliteRelayRepository(path);
+    const restored = repository.getInstallationState("install-1", at(10_000));
+    assert.equal(restored?.recent_completion, undefined);
+    assert.deepEqual(restored?.sessions?.map((row) => [row.session_id, row.task_completed]), [["session-b", true], ["session-a", true]]);
+  } finally {
+    repository.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

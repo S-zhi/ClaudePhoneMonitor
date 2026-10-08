@@ -23,7 +23,7 @@ class ReminderPresentationTest {
                 assertNull(MonitorPresentationReducer.stateChange(state, 100 + visibleMs))
                 if (name == MonitorEventName.TASK_FINISHED) {
                     assertNotNull(MonitorPresentationReducer.expire(state, 100 + visibleMs - 1).recentSessionCompletion)
-                    assertNull(MonitorPresentationReducer.expire(state, 100 + visibleMs).recentSessionCompletion)
+                    assertNotNull(MonitorPresentationReducer.expire(state, 100 + visibleMs).recentSessionCompletion)
                 }
             }
         }
@@ -192,12 +192,41 @@ class ReminderPresentationTest {
         state = reduce(state, event(MonitorEventName.TASK_FINISHED, 4, durationMs = 1).copy(sessionId = "short"), 300)
         assertEquals(originalDeadline, state.changeDeadlineMs)
         assertEquals(originalIdentity, state.changeIdentity)
-        assertEquals("target", state.recentSessionCompletion?.sessionId)
+        assertEquals("short", state.recentSessionCompletion?.sessionId)
         state = reduce(state, snapshot(5, claudeState = ClaudeState.WORKING), 400)
         state = reduce(state, snapshot(5, claudeState = ClaudeState.WORKING,
             completion = RecentCompletion("short", "task-target", 4, at(1), "Short", 1)), 15_100)
         assertNull(state.changeStatus)
-        assertNull(state.recentSessionCompletion)
+        assertEquals("short", state.recentSessionCompletion?.sessionId)
+    }
+
+    @Test
+    fun suppressedWeakCompletionSnapshotCannotRenameTheActiveStrongReminder() {
+        val alpha = event(MonitorEventName.TASK_FINISHED, 2, durationMs = 300_001)
+            .copy(sessionId = "alpha", taskId = "alpha-task", sessionTitle = "Completed Alpha")
+        val beta = event(MonitorEventName.TASK_FINISHED, 3, durationMs = 1)
+            .copy(sessionId = "beta", taskId = "beta-task", sessionTitle = "Completed Beta")
+        var state = reduce(initial(), alpha, 100)
+        val deadline = state.changeDeadlineMs
+        val identity = state.changeIdentity
+        state = reduce(state, beta, 200)
+        val betaCompletion = RecentCompletion("beta", "beta-task", 3, beta.occurredAt, "Completed Beta", 1)
+        state = reduce(state, snapshot(3, completion = betaCompletion), 300)
+        assertEquals(betaCompletion, state.recentSessionCompletion)
+        assertEquals(PetState.FINISH, state.changeStatus)
+        assertEquals(ReminderStrength.STRONG, state.changeStrength)
+        assertEquals("Completed Alpha", state.completionName)
+        assertEquals(identity, state.changeIdentity)
+        assertEquals(deadline, state.changeDeadlineMs)
+
+        // A late refinement of Alpha still belongs to the active reminder, even when Beta
+        // is the newest durable task result. Neither result can restart the reminder timer.
+        val namedAlpha = RecentCompletion("alpha", "alpha-task", 2, alpha.occurredAt, "Renamed Alpha", 300_001)
+        state = reduce(state, snapshot(4, completion = namedAlpha), 400)
+        assertEquals(betaCompletion, state.recentSessionCompletion)
+        assertEquals("Renamed Alpha", state.completionName)
+        assertEquals(identity, state.changeIdentity)
+        assertEquals(deadline, state.changeDeadlineMs)
     }
 
     @Test
@@ -298,7 +327,7 @@ class ReminderPresentationTest {
             event(MonitorEventName.TASK_FINISHED, 2, durationMs = 600_000), 15_100)
         assertTrue(late.accepted)
         assertNull(late.state.changeStatus)
-        assertNull(late.state.recentSessionCompletion)
+        assertEquals(completion, late.state.recentSessionCompletion)
     }
 
     private fun initial(tasks: List<ActiveTask>? = null) =

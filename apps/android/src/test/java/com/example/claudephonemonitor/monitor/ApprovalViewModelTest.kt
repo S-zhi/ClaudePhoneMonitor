@@ -26,6 +26,33 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ApprovalViewModelTest {
+    @Test fun pinnedApprovalPreservesCompletedTaskAfterReminderAndPageChanges() = runTest {
+        kotlinx.coroutines.Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        val store = ViewModelStore()
+        try {
+            val client = FixtureClient()
+            val vm = MonitorViewModel(client) { testScheduler.currentTime }.also { store.put("approval", it) }
+            runCurrent()
+            client.emit(snapshot(1, "idle"))
+            client.emit(request())
+            client.emit("""{"type":"event","event_type":"task_finished","session_id":"done","task_id":"done-task","sequence":3,"session_title":"Finished task"}""")
+            runCurrent()
+            assertEquals(MonitorPage.APPROVAL, selectMonitorPage(vm.uiState.value))
+            assertNull(vm.uiState.value.stateChange)
+            assertEquals("done", vm.uiState.value.recentSessionCompletion?.sessionId)
+            vm.showUsagePage()
+            vm.showStatusPage()
+            advanceTimeBy(300_000L)
+            runCurrent()
+            assertNull(vm.uiState.value.approvalReminder)
+            assertEquals("done", vm.uiState.value.recentSessionCompletion?.sessionId)
+            assertEquals(PetState.FINISH, vm.uiState.value.petState)
+        } finally {
+            store.clear()
+            kotlinx.coroutines.Dispatchers.resetMain()
+        }
+    }
+
     @Test fun pinnedWireRequestKeepsLatestStateAndAtFiveMinutesRestoresUsageWithPendingApproval() = runTest {
         kotlinx.coroutines.Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         val store = ViewModelStore()

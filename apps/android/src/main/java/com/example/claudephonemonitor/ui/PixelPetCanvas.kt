@@ -182,7 +182,7 @@ private fun pixelColor(pixel: Char, state: PetState): Color? {
         PetState.OFFLINE -> Color(0xFF475366)
         PetState.WORKING -> Color(0xFF4A9C78)
         PetState.WAITING -> Color(0xFFB6853F)
-        PetState.FINISH -> Color(0xFF4B9AAD)
+        PetState.FINISH -> Color(0xFF93BE81)
         PetState.ERROR -> Color(0xFFB54C5D)
     }
     return when (pixel) {

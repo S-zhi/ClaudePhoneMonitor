@@ -124,7 +124,7 @@ class NativeSessionTitleWireTest {
         fixture.nowMs = 15_100
         advanceTimeBy(100)
         runCurrent()
-        assertNull(fixture.viewModel.uiState.value.recentSessionCompletion)
+        assertEquals(SID_A, fixture.viewModel.uiState.value.recentSessionCompletion?.sessionId)
         assertNull(fixture.viewModel.uiState.value.stateChange)
     }
 
@@ -183,11 +183,11 @@ class NativeSessionTitleWireTest {
         fixture.nowMs = 15_100
         advanceTimeBy(100)
         runCurrent()
-        assertNull(fixture.viewModel.uiState.value.recentSessionCompletion)
+        assertEquals(SID_A, fixture.viewModel.uiState.value.recentSessionCompletion?.sessionId)
         assertNull(fixture.viewModel.uiState.value.stateChange)
         fixture.client.emit(event(5, "session_title_updated", title = "截止后的更新不恢复完成"))
         runCurrent()
-        assertNull(fixture.viewModel.uiState.value.recentSessionCompletion)
+        assertEquals(SID_A, fixture.viewModel.uiState.value.recentSessionCompletion?.sessionId)
         assertNull(fixture.viewModel.uiState.value.stateChange)
     }
 

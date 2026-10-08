@@ -97,6 +97,7 @@ export interface SnapshotActivity {
 }
 
 export interface SessionSummary {
+  task_completed?: boolean;
   session_kind?: SessionKind;
   session_id: string;
   title: string;

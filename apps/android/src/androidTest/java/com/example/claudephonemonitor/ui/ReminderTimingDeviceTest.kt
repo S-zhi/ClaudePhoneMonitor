@@ -44,7 +44,7 @@ class ReminderTimingDeviceTest {
         assertEquals(PetState.FINISH, vm.uiState.value.stateChange?.status)
         compose.waitUntil(3_000L) { vm.uiState.value.stateChange == null }
         assertRealDuration(startedAt, 5_000L)
-        assertNull(vm.uiState.value.recentSessionCompletion)
+        assertEquals("timed-main", vm.uiState.value.recentSessionCompletion?.sessionId)
         refreshScreen()
         compose.onNodeWithTag("weak-reminder").assertDoesNotExist()
         compose.onNodeWithTag("session-list").assertIsDisplayed()
@@ -75,7 +75,7 @@ class ReminderTimingDeviceTest {
         assertEquals(PetState.FINISH, vm.uiState.value.stateChange?.status)
         compose.waitUntil(3_000L) { vm.uiState.value.stateChange == null }
         assertRealDuration(startedAt, 15_000L)
-        assertNull(vm.uiState.value.recentSessionCompletion)
+        assertEquals("timed-main", vm.uiState.value.recentSessionCompletion?.sessionId)
         assertEquals(MonitorPage.USAGE, selectMonitorPage(vm.uiState.value))
         refreshScreen()
         compose.onNodeWithTag("state-change-title").assertDoesNotExist()
