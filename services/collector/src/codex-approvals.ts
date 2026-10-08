@@ -475,6 +475,7 @@ export class CodexApprovalObserver {
     this.socket = undefined; this.client = undefined; this.buffer = Buffer.alloc(0); ++this.generation;
     for (const rpc of this.rpcs.values()) { clearTimeout(rpc.timer); rpc.reject(); }
     this.rpcs.clear();
+    for (const thread of this.threads.values()) { thread.checkedAt = 0; thread.snapshotAt = 0; }
     void this.enqueue(async () => { for (const id of this.threads.keys()) await this.invalidate(id); }).catch(() => undefined);
   }
   async stop(): Promise<void> {

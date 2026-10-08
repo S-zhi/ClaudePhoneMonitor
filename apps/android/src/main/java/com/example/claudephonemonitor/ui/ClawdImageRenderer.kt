@@ -8,11 +8,9 @@ import androidx.compose.animation.core.withInfiniteAnimationFrameNanos
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
@@ -107,9 +105,9 @@ internal fun rememberClawdSprite(action: ClawdAction): State<ClawdSpriteImages?>
  * pauses it in the background; leaving the page disposes it, and a new action starts at zero.
  */
 @Composable
-internal fun rememberClawdAnimationTime(action: ClawdAction, isSilent: Boolean = false): Long {
+internal fun rememberClawdAnimationTimeState(action: ClawdAction, isSilent: Boolean = false): State<Long> {
     val owner = LocalLifecycleOwner.current
-    var elapsed by remember(action, isSilent) { mutableLongStateOf(0L) }
+    val elapsed = remember(action, isSilent) { mutableLongStateOf(0L) }
     LaunchedEffect(action, isSilent, owner) {
         if (isSilent || action.frameIntervalMs == 0L) return@LaunchedEffect
         owner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -119,7 +117,7 @@ internal fun rememberClawdAnimationTime(action: ClawdAction, isSilent: Boolean =
                 val now = withInfiniteAnimationFrameNanos { it }
                 val deltaMs = (now - previous) / 1_000_000L
                 if (deltaMs >= action.frameIntervalMs) {
-                    elapsed = (elapsed + deltaMs) % action.cycleMs
+                    elapsed.longValue = (elapsed.longValue + deltaMs) % action.cycleMs
                     previous = now
                 }
             }
@@ -127,6 +125,11 @@ internal fun rememberClawdAnimationTime(action: ClawdAction, isSilent: Boolean =
     }
     return elapsed
 }
+
+/** Convenience for composables that intentionally observe the clock during composition. */
+@Composable
+internal fun rememberClawdAnimationTime(action: ClawdAction, isSilent: Boolean = false): Long =
+    rememberClawdAnimationTimeState(action, isSilent).value
 
 internal fun DrawScope.drawClawdLayers(images: ClawdSpriteImages, placements: List<ClawdLayerPlacement>) {
     placements.forEach { placement ->

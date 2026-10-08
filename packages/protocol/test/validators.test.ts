@@ -177,6 +177,20 @@ test("task timing remains optional and covers active tasks outside the five sess
 test("validates optional Usage snapshot and collector-only absolute message", () => {
   const extended = { ...snapshot, usage };
   assert.equal(validateSnapshot(extended).success, true);
+  const recoveredQuota = {
+    start_remaining: null,
+    current_remaining: 60,
+    unit: "percent" as const,
+    reset_at: "2026-10-08T00:00:00.000Z",
+    availability: "available" as const,
+    limit_id: "codex" as const,
+    source: "codex_app_server" as const,
+    window_minutes: 10_080,
+    sampled_at: "2026-10-07T00:00:00.000Z",
+    window: "primary" as const,
+  };
+  assert.equal(validateUsageAggregate({ ...usage, quota: recoveredQuota }).success, true, "recovery after a failed startup read has no fabricated start metadata");
+  assert.equal(validateUsageAggregate({ ...usage, quota: { ...recoveredQuota, start_remaining: 80 } }).success, false, "a start value requires startup sample metadata");
   assert.equal(validateSnapshot({ ...extended, usage: { ...usage, observed_responses: Number.MAX_SAFE_INTEGER + 1 } }).success, false);
   assert.equal(validateSnapshot({ ...extended, usage: { ...usage, quota: { ...usage.quota, current_remaining: 10 } } }).success, false);
   assert.equal(validateSnapshot({ ...extended, usage: { ...usage, raw_prompt: "private" } }).success, false);

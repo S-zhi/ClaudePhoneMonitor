@@ -81,6 +81,7 @@ export interface CollectorRuntimeOptions {
   watchUsage?: boolean;
   claudeProjectsRoot?: string;
   usageDatabaseFile?: string;
+  codexBinary?: string;
   approvalBridge?: boolean;
   approvalHoldMs?: number;
 }
@@ -188,6 +189,7 @@ export async function createCollectorRuntime(
         claudeProjectsRoot: options.claudeProjectsRoot ?? env.COLLECTOR_CLAUDE_PROJECTS_DIR ?? join(homedir(), ".claude", "projects"),
         codexSessionsRoot: options.sessionsRoot ?? env.COLLECTOR_CODEX_SESSIONS_DIR ?? (env.CODEX_HOME ? join(env.CODEX_HOME, "sessions") : join(homedir(), ".codex", "sessions")),
         databaseFile: options.usageDatabaseFile ?? join(dataDir, "usage.sqlite"),
+        codexBinary: options.codexBinary ?? env.COLLECTOR_CODEX_BIN ?? "codex",
         installationId,
         sequence,
         outbox,

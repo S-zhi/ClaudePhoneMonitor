@@ -363,6 +363,7 @@ for (const storageKind of ["memory", "sqlite"]) {
       await waitFor(() => deliveredEvents.some((event) => event.event_type === "task_finished" && event.session_id === wireId(childIds[0])));
       const childFinish = deliveredEvents.find((event) => event.event_type === "task_finished" && event.session_id === wireId(childIds[0]));
       assert.equal(childFinish.session_kind, "subagent");
+      await waitFor(() => deliveredSnapshots.some((snapshot) => snapshot.main_running_count === 0 && snapshot.total_running_count === 8));
       assert.ok(deliveredSnapshots.some((snapshot) => snapshot.main_running_count === 0 && snapshot.total_running_count === 8));
       const beforeRestart = relay.repository.listEventsAfter(installationId, -1);
       assert.deepEqual(beforeRestart.map((row) => row.event.sequence), beforeRestart.map((_, index) => index + 1));

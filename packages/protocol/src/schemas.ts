@@ -68,6 +68,9 @@ const nonNegativeIntegerSchema: JsonSchema = {
 const nullableCountSchema: JsonSchema = {
   oneOf: [nonNegativeIntegerSchema, { type: "null" }],
 };
+const nullablePercentSchema: JsonSchema = {
+  oneOf: [{ type: "number", minimum: 0, maximum: 100 }, { type: "null" }],
+};
 const usageMetricSchema: JsonSchema = strictObject(
   {
     value: nullableCountSchema,
@@ -87,6 +90,7 @@ export const USAGE_AGGREGATE_SCHEMA: JsonSchema = strictObject(
   {
     epoch_id: idSchema,
     started_at: utcTimestampSchema,
+    collector_started_at: utcTimestampSchema,
     revision: sequenceSchema,
     observed_responses: nonNegativeIntegerSchema,
     complete_responses: nonNegativeIntegerSchema,
@@ -104,16 +108,25 @@ export const USAGE_AGGREGATE_SCHEMA: JsonSchema = strictObject(
         numerator: nullableCountSchema,
         denominator: nullableCountSchema,
         quality: { enum: ["complete", "partial", "unavailable"] },
+        providers: { type: "array", items: { enum: ["claude", "codex"] }, minItems: 1, maxItems: 2, uniqueItems: true },
+        sample_responses: nonNegativeIntegerSchema,
       },
       ["numerator", "denominator", "quality"],
     ),
     quota: strictObject(
       {
-        start_remaining: { type: "null" },
-        current_remaining: { type: "null" },
-        unit: { type: "null" },
-        reset_at: { type: "null" },
-        availability: { const: "unavailable" },
+        start_remaining: nullablePercentSchema,
+        current_remaining: nullablePercentSchema,
+        unit: { enum: ["percent", null] },
+        reset_at: { oneOf: [utcTimestampSchema, { type: "null" }] },
+        availability: { enum: ["available", "stale", "unavailable"] },
+        limit_id: { const: "codex" },
+        source: { const: "codex_app_server" },
+        window_minutes: { type: "integer", minimum: 1, maximum: 525600 },
+        sampled_at: utcTimestampSchema,
+        start_sampled_at: utcTimestampSchema,
+        start_reset_at: utcTimestampSchema,
+        window: { enum: ["primary", "secondary"] },
       },
       ["start_remaining", "current_remaining", "unit", "reset_at", "availability"],
     ),

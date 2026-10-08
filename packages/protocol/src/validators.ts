@@ -279,14 +279,44 @@ function validateUsageAggregateIssues(usage: UsageAggregate): ValidationIssue[] 
   if (allComplete && usage.actual.value !== usage.new_input.value! + usage.output.value!) add("$.actual.value", "must equal new input plus output when all metrics are complete");
   if (allComplete && usage.total_input.value !== usage.new_input.value! + usage.cached_input.value!) add("$.total_input.value", "must equal new input plus cached input when all metrics are complete");
   const hit = usage.cache_hit;
+  const hitProviders = hit.providers;
+  if (hitProviders !== undefined && (hitProviders.length === 0 || new Set(hitProviders).size !== hitProviders.length)) add("$.cache_hit.providers", "must be a unique non-empty provider scope");
+  if (hit.sample_responses !== undefined && (!Number.isSafeInteger(hit.sample_responses) || hit.sample_responses <= 0 || hitProviders === undefined)) add("$.cache_hit.sample_responses", "requires a positive count and an explicit provider scope");
   if (hit.numerator !== null && hit.denominator !== null && hit.numerator > hit.denominator) add("$.cache_hit.numerator", "must not exceed denominator");
   if (hit.quality === "unavailable" && (hit.numerator !== null || hit.denominator !== null)) add("$.cache_hit", "unavailable cache hit must not expose a ratio");
   if (hit.quality === "partial" && hit.numerator === null && hit.denominator === null) add("$.cache_hit", "partial cache hit requires a known component");
   if (hit.quality === "complete") {
+    if (hitProviders !== undefined) add("$.cache_hit.providers", "complete cache hit is global");
     if (!allComplete) add("$.cache_hit", "complete cache hit requires all observed metrics to be complete");
     if (hit.numerator === null || hit.denominator === null || hit.denominator <= 0) add("$.cache_hit", "complete cache hit requires a positive denominator");
     if (claude.status !== "ready" || codex.status !== "ready" || claude.complete_responses !== claude.observed_responses || codex.complete_responses !== codex.observed_responses) add("$.cache_hit", "complete cache hit requires complete provider coverage");
     if (usage.cached_input.quality !== "complete" || usage.total_input.quality !== "complete" || hit.numerator !== usage.cached_input.value || hit.denominator !== usage.total_input.value) add("$.cache_hit", "must match complete cache metrics");
+  }
+  if (hit.quality === "partial" && hitProviders) {
+    for (const provider of hitProviders) {
+      const coverage = usage.provider_coverage[provider];
+      if (coverage.observed_responses === 0 || coverage.complete_responses === 0) add("$.cache_hit.providers", "scoped cache ratio requires complete observed responses for every provider");
+    }
+    const selectedComplete = hitProviders.reduce((sum, provider) => sum + usage.provider_coverage[provider].complete_responses, 0);
+    if (hit.sample_responses === undefined || hit.sample_responses > selectedComplete) add("$.cache_hit.sample_responses", "cannot exceed complete responses in the selected provider scope");
+  }
+  const quota = usage.quota;
+  if (quota.availability === "available" || quota.availability === "stale") {
+    if (quota.unit !== "percent" || quota.limit_id !== "codex" || quota.source !== "codex_app_server" ||
+      quota.reset_at === null || quota.window_minutes === undefined || quota.window_minutes < 1 || quota.sampled_at === undefined ||
+      quota.window === undefined ||
+      quota.availability === "available" && quota.current_remaining === null) {
+      add("$.quota", "sampled quota requires a complete Codex app-server window");
+    }
+    const hasStartSample = quota.start_sampled_at !== undefined;
+    const hasStartReset = quota.start_reset_at !== undefined;
+    if (hasStartSample !== hasStartReset || quota.start_remaining !== null && (!hasStartSample || !hasStartReset)) {
+      add("$.quota", "a non-null start value requires its startup sample and reset metadata");
+    }
+    if (quota.start_remaining !== null && (quota.start_remaining < 0 || quota.start_remaining > 100)) add("$.quota.start_remaining", "must be a percentage");
+    if (quota.current_remaining !== null && (quota.current_remaining < 0 || quota.current_remaining > 100)) add("$.quota.current_remaining", "must be a percentage");
+  } else if (quota.availability === "unavailable" && (quota.start_remaining !== null || quota.current_remaining !== null || quota.unit !== null || quota.reset_at !== null)) {
+    add("$.quota", "unavailable quota cannot expose remaining values");
   }
   return issues;
 }

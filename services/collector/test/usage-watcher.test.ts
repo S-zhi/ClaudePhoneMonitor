@@ -30,6 +30,7 @@ async function fixture(t: { after(fn: () => void | Promise<void>): void }) {
     outbox: { enqueue: async () => { throw new Error("emit callback expected"); } } as never,
     emit: async (message) => { messages.push(message); },
     now: () => epoch,
+    codexBinary: "",
     pollIntervalMs: 60_000,
     ...overrides,
   });
@@ -556,12 +557,59 @@ test("derived integer overflow degrades cache quality without blocking later sou
   const usage = await poll(watcher);
   assert.equal(usage.observed_responses, 2);
   assert.deepEqual(usage.total_input, { value: 1, quality: "partial" }, "only the safe subtotal is retained");
-  assert.deepEqual(usage.cache_hit, { numerator: null, denominator: null, quality: "unavailable" }, "overflowed input denominator is never exposed as a misleading ratio");
+  assert.deepEqual(usage.cache_hit, { numerator: 0, denominator: 1, quality: "partial", providers: ["claude"], sample_responses: 1 }, "the safe cache subset survives an excluded overflow row");
   assert.ok(usage.provider_coverage.claude.status === "partial");
   assert.equal(validateUsageAggregate(usage).success, true);
   assert.equal(emitted.length, 2, "the overflow aggregate is still delivered after the initial snapshot");
   assert.ok(handle.getDiagnostics().numeric_overflows > 0);
   assert.ok(handle.getDiagnostics().codes.includes("usage_numeric_overflow"));
+});
+
+test("cache ratio keeps valid cross-provider samples around unsafe rows", async (t) => {
+  const f = await fixture(t);
+  const claudeFile = path.join(f.claude, "session.jsonl");
+  const codexFile = path.join(f.codex, "rollout-cache.jsonl");
+  await writeFile(claudeFile, "");
+  await writeFile(codexFile, "");
+  const watcher = f.makeWatcher();
+  const handle = await watcher.start();
+  t.after(() => handle.stop());
+  const unsafeClaude = claudeRow({ id: "bad-before", input: Number.MAX_SAFE_INTEGER, cached: 1, creation: 0, output: 0 });
+  await appendFile(claudeFile, unsafeClaude);
+  await appendFile(codexFile, JSON.stringify({ type: "token_usage_record", timestamp: stamp, payload: {
+    thread_id: "thread-cache", response_id: "good-cache", usage: { input_tokens: 10, cached_input_tokens: 4, output_tokens: 1 },
+  } }) + "\n");
+  await appendFile(claudeFile, claudeRow({ id: "bad-after", input: Number.MAX_SAFE_INTEGER, cached: 1, creation: 0, output: 0 }));
+
+  const usage = await poll(watcher);
+  assert.deepEqual(usage.cache_hit, { numerator: 4, denominator: 10, quality: "partial", providers: ["codex"], sample_responses: 1 });
+  assert.equal(validateUsageAggregate(usage).success, true);
+});
+
+test("cache accumulator overflow excludes only that row and later safe rows remain scoped", async (t) => {
+  const f = await fixture(t);
+  const file = path.join(f.codex, "rollout-overflow.jsonl");
+  await writeFile(file, "");
+  const watcher = f.makeWatcher();
+  const handle = await watcher.start();
+  t.after(() => handle.stop());
+  const appendCodex = async (id: string, input: number, cached: number) => appendFile(file, JSON.stringify({
+    type: "token_usage_record", timestamp: stamp,
+    payload: { thread_id: "thread-overflow", response_id: id, usage: { input_tokens: input, cached_input_tokens: cached, output_tokens: 1 } },
+  }) + "\n");
+  await appendCodex("safe-before", 8_000_000_000_000_000, 4_000_000_000_000_000);
+  await appendCodex("over-aggregate", 2_000_000_000_000_000, 1_000_000_000_000_000);
+  await appendCodex("safe-after", 1_000_000_000_000_000, 500_000_000_000_000);
+
+  const usage = await poll(watcher);
+  assert.deepEqual(usage.cache_hit, {
+    numerator: 4_500_000_000_000_000,
+    denominator: 9_000_000_000_000_000,
+    quality: "partial",
+    providers: ["codex"],
+    sample_responses: 2,
+  });
+  assert.equal(validateUsageAggregate(usage).success, true);
 });
 
 test("oversized rows are bounded and diagnostic output is fixed-code only", async (t) => {
@@ -586,4 +634,147 @@ test("oversized rows are bounded and diagnostic output is fixed-code only", asyn
   assert.equal(diagnostics.oversized_rows, 1);
   assert.deepEqual(diagnostics.codes, ["usage_claude_oversized_row"]);
   assert.equal((await readFile(f.databaseFile)).includes("session-a"), false, "ledger does not contain raw source identities");
+});
+
+test("Codex quota keeps a collector-start baseline only for the same account window", async (t) => {
+  const f = await fixture(t);
+  let now = epoch;
+  let usagePercent = 20;
+  let reset = 1_900_000_000;
+  let account = "account-a";
+  let fail = false;
+  const watcher = f.makeWatcher({
+    now: () => now,
+    codexBinary: "test-codex",
+    quotaReader: async (_binary, nowMs) => fail ? undefined : ({
+      used_percent: usagePercent, reset_at: new Date(reset * 1000).toISOString(), window_minutes: 10_080,
+      window: "primary", sampled_at: new Date(nowMs).toISOString(), account_key: account,
+    }),
+  });
+  const handle = await watcher.start();
+  t.after(() => handle.stop());
+  assert.equal(handle.getSnapshot().quota.start_remaining, 80);
+  assert.equal(handle.getSnapshot().quota.current_remaining, 80);
+  usagePercent = 35;
+  now += 60_001;
+  await poll(watcher);
+  assert.equal(handle.getSnapshot().quota.start_remaining, 80);
+  assert.equal(handle.getSnapshot().quota.current_remaining, 65);
+
+  account = "account-b";
+  reset += 10_000;
+  now += 60_001;
+  await poll(watcher);
+  const changed = handle.getSnapshot().quota;
+  assert.equal(changed.start_remaining, null, "account/window changes never establish a replacement start baseline");
+  assert.equal(changed.start_sampled_at, new Date(epoch).toISOString());
+  assert.equal(changed.availability, "available");
+
+  fail = true;
+  now = reset * 1000 + 1;
+  await poll(watcher);
+  const stale = handle.getSnapshot().quota;
+  assert.equal(stale.availability, "stale");
+  assert.equal(stale.current_remaining, null, "an expired prior quota is never presented as current");
+  assert.equal(validateUsageAggregate(handle.getSnapshot()).success, true);
+});
+
+test("same-account reset jitter preserves startup quota only within five seconds while both resets remain future", async (t) => {
+  const f = await fixture(t);
+  const baseResetMs = epoch + 86_400_000;
+  const run = async (name: string, resetJitterMs: number, elapsedMs: number, expectedStart: number | null) => {
+    let now = epoch;
+    let resetAtMs = baseResetMs;
+    let usedPercent = 56;
+    const watcher = f.makeWatcher({
+      databaseFile: path.join(f.root, "quota-" + name + ".sqlite"),
+      now: () => now,
+      codexBinary: "test-codex",
+      quotaReader: async (_binary, nowMs) => ({
+        used_percent: usedPercent,
+        reset_at: new Date(resetAtMs).toISOString(),
+        window_minutes: 10_080,
+        window: "primary",
+        sampled_at: new Date(nowMs).toISOString(),
+        account_key: "same-account-key",
+      }),
+    });
+    const handle = await watcher.start();
+    t.after(() => handle.stop());
+    const originalStartReset = new Date(baseResetMs).toISOString();
+    assert.equal(handle.getSnapshot().quota.start_remaining, 44);
+    now += elapsedMs;
+    resetAtMs = baseResetMs + resetJitterMs;
+    usedPercent = 57;
+    await poll(watcher);
+    const quota = handle.getSnapshot().quota;
+    assert.equal(quota.start_remaining, expectedStart);
+    assert.equal(quota.start_reset_at, originalStartReset);
+    assert.equal(quota.reset_at, new Date(resetAtMs).toISOString(), "current reset metadata preserves the source timestamp");
+    assert.equal(validateUsageAggregate(handle.getSnapshot()).success, true);
+  };
+
+  await run("within-boundary", 5_000, 60_001, 44);
+  await run("outside-boundary", 5_001, 60_001, null);
+  await run("already-expired", 2_000, 86_401_000, null);
+});
+
+test("a failed startup quota read never becomes a later start baseline", async (t) => {
+  const f = await fixture(t);
+  let now = epoch;
+  let failed = true;
+  const watcher = f.makeWatcher({
+    now: () => now,
+    codexBinary: "test-codex",
+    quotaReader: async (_binary, nowMs) => failed ? undefined : ({
+      used_percent: 40,
+      reset_at: new Date(nowMs + 86_400_000).toISOString(),
+      window_minutes: 10_080,
+      window: "primary",
+      sampled_at: new Date(nowMs).toISOString(),
+      account_key: "hashed-account-key",
+    }),
+  });
+  const handle = await watcher.start();
+  t.after(() => handle.stop());
+  const unavailable = handle.getSnapshot().quota;
+  assert.equal(unavailable.availability, "unavailable");
+  assert.equal(validateUsageAggregate(handle.getSnapshot()).success, true);
+
+  failed = false;
+  now += 60_001;
+  await poll(watcher);
+  const recovered = handle.getSnapshot().quota;
+  assert.equal(recovered.availability, "available");
+  assert.equal(recovered.start_remaining, null);
+  assert.equal(recovered.current_remaining, 60);
+  assert.equal(recovered.start_sampled_at, undefined);
+  assert.equal(recovered.start_reset_at, undefined);
+  assert.equal(validateUsageAggregate(handle.getSnapshot()).success, true);
+
+  failed = true;
+  now += 60_001;
+  await poll(watcher);
+  const stale = handle.getSnapshot().quota;
+  assert.equal(stale.availability, "stale");
+  assert.equal(stale.start_remaining, null);
+  assert.equal(stale.current_remaining, 60);
+  assert.equal(stale.start_sampled_at, undefined);
+  assert.equal(validateUsageAggregate(handle.getSnapshot()).success, true);
+});
+
+test("Codex cache ratio exposes a scope when another provider has incomplete coverage", async (t) => {
+  const f = await fixture(t);
+  const file = path.join(f.codex, "rollout-partial.jsonl");
+  await writeFile(file, "");
+  const watcher = f.makeWatcher();
+  const handle = await watcher.start();
+  t.after(() => handle.stop());
+  await appendFile(file, JSON.stringify({ type: "token_usage_record", timestamp: stamp, payload: {
+    thread_id: "thread-safe", response_id: "response-safe", usage: { input_tokens: 10, cached_input_tokens: 4, output_tokens: 2 },
+  } }) + "\n");
+  await appendFile(path.join(f.claude, "incomplete.jsonl"), claudeRow({ id: "missing-cache", omitCached: true }));
+  const usage = await poll(watcher);
+  assert.deepEqual(usage.cache_hit, { numerator: 4, denominator: 10, quality: "partial", providers: ["codex"], sample_responses: 1 });
+  assert.equal(validateUsageAggregate(usage).success, true);
 });

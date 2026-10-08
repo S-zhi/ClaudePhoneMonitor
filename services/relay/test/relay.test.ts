@@ -111,6 +111,35 @@ test("usage snapshot only changes ordinary snapshot data and resume falls back a
   relay.stop();
 });
 
+test("relay accepts a current quota sample without claiming a startup baseline", () => {
+  const relay = new Relay({ autoStart: false });
+  const collectorMessages = messages();
+  const collector = relay.connect({ gateway: "collector", installation_id: "install-1", transport: { send: (message) => collectorMessages.push(message) } });
+  const quota = {
+    start_remaining: null,
+    current_remaining: 60,
+    unit: "percent" as const,
+    reset_at: "2026-10-08T00:00:00.000Z",
+    availability: "available" as const,
+    limit_id: "codex" as const,
+    source: "codex_app_server" as const,
+    window_minutes: 10_080,
+    sampled_at: "2026-10-07T00:00:00.000Z",
+    window: "primary" as const,
+  };
+  relay.receive(collector.connection_id, JSON.stringify(usageSnapshot({ usage: { ...usageSnapshot().usage, quota } })));
+  assert.equal(relay.snapshot("install-1").usage?.quota.current_remaining, 60);
+
+  relay.receive(collector.connection_id, JSON.stringify(usageSnapshot({
+    sequence: 3,
+    event_id: "usage-fabricated-start",
+    usage: { ...usageSnapshot().usage, quota: { ...quota, start_remaining: 80 } },
+  })));
+  assert.ok(collectorMessages.some((message) => message.type === "error" && message.code === "invalid_usage_snapshot"));
+  assert.equal(relay.snapshot("install-1").usage?.quota.start_remaining, null);
+  relay.stop();
+});
+
 test("invalid complete usage algebra and unauthorized gateway are rejected before mutation", () => {
   const logs: string[] = [];
   const relay = new Relay({ autoStart: false, logger: new JsonLogger({ sink: (line) => logs.push(line) }) });

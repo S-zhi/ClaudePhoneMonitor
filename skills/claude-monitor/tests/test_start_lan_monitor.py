@@ -31,6 +31,7 @@ def free_port():
 
 class HealthHandler(http.server.BaseHTTPRequestHandler):
     compatible = False
+    legacy_usage_caps = False
     pair_requests = 0
     pairing = None
 
@@ -49,6 +50,8 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
         if self.path == "/healthz":
             body = {"status": "ok", "service": "relay", "storage": "sqlite", "auth": {"mode": "paired"}}
             if type(self).compatible:
+                body["capabilities"] = ["usage_snapshot_v1", "usage_scoped_cache_v1", "codex_quota_v1", "pairing_collector_reuse_v1"]
+            elif type(self).legacy_usage_caps:
                 body["capabilities"] = ["usage_snapshot_v1", "pairing_collector_reuse_v1"]
             return self._send(200, body)
         if self.path == "/v1/pairing/fixture-pair" and type(self).pairing:
@@ -95,6 +98,7 @@ class StartLanMonitorTests(unittest.TestCase):
         self.pid_dir = self.root / "pids"
         self.pid_dir.mkdir()
         HealthHandler.compatible = False
+        HealthHandler.legacy_usage_caps = False
         HealthHandler.pair_requests = 0
         HealthHandler.pairing = None
 
@@ -130,7 +134,7 @@ class H(BaseHTTPRequestHandler):
  def send(self,status,obj):
   data=json.dumps(obj).encode(); self.send_response(status); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(data))); self.end_headers(); self.wfile.write(data)
  def do_GET(self):
-  if self.path=="/healthz": return self.send(200,{"status":"ok","service":"relay","storage":"sqlite","auth":{"mode":"paired"},"capabilities":["usage_snapshot_v1","pairing_collector_reuse_v1"]})
+  if self.path=="/healthz": return self.send(200,{"status":"ok","service":"relay","storage":"sqlite","auth":{"mode":"paired"},"capabilities":["usage_snapshot_v1","usage_scoped_cache_v1","codex_quota_v1","pairing_collector_reuse_v1"]})
   return self.send(404,{})
  def do_POST(self):
   n=int(self.headers.get("Content-Length","0")); b=json.loads(self.rfile.read(n))
@@ -452,6 +456,7 @@ pathlib.Path(sys.argv[3]).write_bytes(b"\\x89PNG\\r\\n\\x1a\\nfixture")
             thread.join(timeout=2)
 
     def test_legacy_healthy_relay_is_rejected_without_being_killed_or_repaired(self):
+        HealthHandler.legacy_usage_caps = True
         server = ThreadedServer(("127.0.0.1", 0), HealthHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -462,6 +467,7 @@ pathlib.Path(sys.argv[3]).write_bytes(b"\\x89PNG\\r\\n\\x1a\\nfixture")
             result = subprocess.run([str(SCRIPT), "--no-build"], env=env, text=True, capture_output=True, timeout=8)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("older or incompatible instance", result.stderr)
+            self.assertIn("Relay and Collector", result.stderr)
             self.assertEqual(HealthHandler.pair_requests, 0)
             self.assertFalse((self.pid_dir / "relay.pid").exists())
             self.assertTrue(thread.is_alive(), "the unknown existing Relay is left running")

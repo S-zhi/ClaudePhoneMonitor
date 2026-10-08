@@ -52,6 +52,40 @@ class ClawdPlayContinuityTest {
         }
     }
 
+    @Test fun kickingLegReturnsToAGroundedNeutralPoseBetweenKicksInBothDirections() {
+        val timing = ClawdPlayChoreography
+        val width = 960
+        val height = 320
+        listOf(0L, timing.HALF_CYCLE_MS).forEach { start ->
+            fun legAt(offset: Long): Pair<ClawdPlayMotion, ClawdLayerPlacement> {
+                val motion = sampleClawdPlayMotion(start + offset)
+                val leg = clawdPlayPlacements(width, height, sprite.geometry, motion)
+                    .single { it.part == ClawdPart.KICK_LEG }
+                return motion to leg
+            }
+
+            val neutralStart = legAt(0L)
+            val neutralBeforeKick = legAt(timing.APPROACH_END_MS)
+            val windup = legAt(timing.WINDUP_END_MS)
+            val contact = legAt(timing.CONTACT_MS)
+            val recovery = legAt(timing.FOOT_RECOVERY_END_MS)
+            val chase = legAt(2_000L)
+            val beforeTurn = legAt(timing.TURN_START_MS)
+
+            listOf(neutralStart, neutralBeforeKick, recovery, chase, beforeTurn).forEach { (motion, _) ->
+                val pose = motion.parts.getValue(ClawdPart.KICK_LEG)
+                assertEquals(timing.KICK_LEG_NEUTRAL_RETRACTION, pose.x, 0.001f)
+                assertTrue("Neutral kicking leg must extend down instead of staying raised", pose.y > 50f)
+            }
+            assertEquals("Neutral foot touches the ground", (height * 0.9f).toInt().toFloat(), neutralStart.second.bottom.toFloat(), 1f)
+            assertEquals("The leg is lifted during windup", -18f, windup.first.parts.getValue(ClawdPart.KICK_LEG).y, 0.001f)
+            assertEquals("The kick still reaches the ball", timing.CONTACT_EXTENSION,
+                contact.first.parts.getValue(ClawdPart.KICK_LEG).x, 0f)
+            assertEquals("The foot returns to ground after recovery", (height * 0.9f).toInt().toFloat(), recovery.second.bottom.toFloat(), 1f)
+            assertEquals("The neutral pose is restored before the turn", (height * 0.9f).toInt().toFloat(), beforeTurn.second.bottom.toFloat(), 1f)
+        }
+    }
+
     @Test fun everyPhaseAndTheLoopJoinKeepPositionAndGaitContinuous() {
         val timing = ClawdPlayChoreography
         assertEquals(sampleClawdPlayMotion(0L), sampleClawdPlayMotion(timing.CYCLE_MS))

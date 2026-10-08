@@ -43,6 +43,7 @@ async function fixture() {
   await writeFile(join(directory, "session_index.jsonl"), `${JSON.stringify({ id: THREAD, thread_name: "Codex approval fixture" })}\n`);
   const clients = new Map<Socket, string>();
   const nativeMethods: string[] = [];
+  const followingChanges: boolean[] = [];
   let owner = "fixture-desktop-owner";
   let revision = 0;
   let requests: unknown[] = [];
@@ -79,6 +80,7 @@ async function fixture() {
           assert.deepEqual(message.params, { hostId: "local", conversationId: THREAD });
           writeFrame(socket, { type: "response", requestId: message.requestId, resultType: "success", handledByClientId: owner, result: { supportsUntrustedAppInput: true } });
         } else if (message.method === "thread-stream-following-changed") {
+          followingChanges.push(message.params.following);
           assert.deepEqual(message.targetClientIds, [owner]);
           if (message.params.following) snapshot(false);
         } else if (message.type === "client-discovery-response") {
@@ -113,7 +115,7 @@ async function fixture() {
     sessionsRoot, codexMetadataRoot: directory, codexIpcSocket: socketPath, watchUsage: false, approvalBridge: false });
   await until(() => nativeMethods.includes("thread-stream-following-changed"));
   await until(() => runtime.relay?.approvalAvailable());
-  return { directory, runtime, server, repository, messages, logs, phone, installationId, nativeMethods,
+  return { directory, runtime, server, repository, messages, logs, phone, installationId, nativeMethods, followingChanges,
     snapshot: () => server.relay.snapshot(installationId),
     setRequests(value: unknown[]) { requests = value; snapshot(); },
     refresh: snapshot,
@@ -240,12 +242,18 @@ test("native approval IPC disconnect and unsupported stream versions become unkn
     await until(() => f.snapshot().approvals?.[0]?.status === "unknown");
     f.restore();
     await until(() => f.snapshot().approvals?.[0]?.status === "pending");
+    const discoveriesBeforeReconnect = f.nativeMethods.filter((method) => method === "thread-owner-discovery").length;
+    const followsBeforeReconnect = f.followingChanges.filter(Boolean).length;
     f.disconnect();
     await until(() => f.snapshot().approvals?.[0]?.status === "unknown");
     assert.equal(f.snapshot().approvals![0]!.request_id, id);
     assert.equal(f.snapshot().approvals![0]!.can_respond, false);
     f.restore();
     await until(() => f.snapshot().approvals?.[0]?.status === "pending");
+    assert.ok(f.nativeMethods.filter((method) => method === "thread-owner-discovery").length > discoveriesBeforeReconnect,
+      "reconnect must repeat owner discovery over IPC");
+    assert.ok(f.followingChanges.filter(Boolean).length > followsBeforeReconnect,
+      "pending state returns only after a fresh authoritative snapshot is requested over IPC");
     assert.equal(f.snapshot().approvals![0]!.request_id, id);
     assert.equal(f.snapshot().approvals![0]!.sequence, first.sequence);
     assert.equal(f.snapshot().approvals![0]!.requested_at, first.requested_at,

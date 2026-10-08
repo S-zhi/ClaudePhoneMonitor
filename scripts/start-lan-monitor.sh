@@ -265,13 +265,13 @@ try:
     okay=(value.get("service")=="relay" and value.get("storage")=="sqlite"
           and value.get("auth",{}).get("mode")=="paired"
           and isinstance(caps,list)
-          and {"usage_snapshot_v1","pairing_collector_reuse_v1"}.issubset(caps))
+          and {"usage_snapshot_v1","usage_scoped_cache_v1","codex_quota_v1","pairing_collector_reuse_v1"}.issubset(caps))
 except (ValueError,AttributeError,TypeError):
     okay=False
 raise SystemExit(0 if okay else 1)
 PY
 then
-  printf 'Relay on port %s is an older or incompatible instance. Stop that instance explicitly, then rerun this command. It was left running.\n' "$PORT" >&2
+  printf 'Relay on port %s is an older or incompatible instance. Stop or upgrade the Relay and Collector explicitly, then rerun this command. The existing process was left running.\n' "$PORT" >&2
   exit 1
 fi
 

@@ -137,6 +137,8 @@ internal object ClawdPlayChoreography {
     const val BALL_END_X = 480f
     const val MAX_HOP = 280f
     const val CONTACT_EXTENSION = 16f
+    const val KICK_LEG_NEUTRAL_RETRACTION = -50f
+    const val KICK_LEG_NEUTRAL_DROP = 66f
     const val MAX_BODY_X = BALL_END_X + CONTACT_SEPARATION + APPROACH_DISTANCE
 }
 
@@ -204,6 +206,20 @@ internal fun sampleClawdPlayMotion(elapsedMs: Long): ClawdPlayMotion {
             timing.WINDUP_END_MS, timing.CONTACT_MS)))
         else -> 0f
     }
+    val kickPoseBlend = when {
+        section < timing.APPROACH_END_MS -> 0f
+        section < timing.WINDUP_END_MS -> smooth(progress(section, timing.APPROACH_END_MS, timing.WINDUP_END_MS))
+        section < timing.CONTACT_MS -> 1f
+        section < timing.FOOT_RECOVERY_END_MS -> 1f - smooth(progress(section, timing.CONTACT_MS, timing.FOOT_RECOVERY_END_MS))
+        else -> 0f
+    }
+    val kickLegStrideLift = max(0f, -stride) * 14f
+    val kickLegX = lerp(timing.KICK_LEG_NEUTRAL_RETRACTION, kickExtension, kickPoseBlend)
+    val kickLegY = lerp(
+        timing.KICK_LEG_NEUTRAL_DROP - kickLegStrideLift,
+        -kickLegStrideLift - kickLift,
+        kickPoseBlend,
+    )
     val turnArc = sin(turnProgress * PI).toFloat()
     val turnArcSquared = turnArc * turnArc
     // A broad jump arc clears the whole ball before the full-width body crosses it. Both the
@@ -221,7 +237,7 @@ internal fun sampleClawdPlayMotion(elapsedMs: Long): ClawdPlayMotion {
             ClawdPart.LEFT_LEG to ClawdPartMotion(y = -max(0f, stride) * 18f),
             ClawdPart.INNER_LEFT_LEG to ClawdPartMotion(y = -max(0f, -stride) * 18f),
             ClawdPart.INNER_RIGHT_LEG to ClawdPartMotion(y = -max(0f, stride) * 18f),
-            ClawdPart.KICK_LEG to ClawdPartMotion(x = kickExtension, y = -max(0f, -stride) * 14f - kickLift),
+            ClawdPart.KICK_LEG to ClawdPartMotion(x = kickLegX, y = kickLegY),
         ),
         bodyX = bodyX,
         ballX = ballX,
