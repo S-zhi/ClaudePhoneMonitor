@@ -63,6 +63,32 @@ class MonitorReferenceTest {
         capture("status.png")
     }
 
+    @Test fun sessionRowsExposeSourceIconSemanticsWithoutSourceTextInLayout() {
+        val codexTitle = "Codex task"
+        val claudeTitle = "Claude task"
+        val state = fixture().copy(
+            snapshot = fixture().snapshot.copy(
+                sessions = listOf(
+                    SessionSummary("codex:sess:${"a".repeat(64)}", codexTitle, ClaudeState.WORKING, 100),
+                    SessionSummary("claude-session", claudeTitle, ClaudeState.IDLE, 90),
+                ),
+                mainSessionCount = 2,
+            ),
+        )
+        render(state)
+
+        compose.onNodeWithText(codexTitle).assertIsDisplayed()
+        compose.onNodeWithText(claudeTitle).assertIsDisplayed()
+        compose.onNodeWithContentDescription("Codex source", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithContentDescription("Claude source", useUnmergedTree = true).assertIsDisplayed()
+        val codexIcon = compose.onNodeWithTag("session-source-codex:sess:${"a".repeat(64)}", useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot
+        val codexText = compose.onNodeWithText(codexTitle).fetchSemanticsNode().boundsInRoot
+        assertTrue("Codex logo should sit immediately before its title", codexText.left - codexIcon.right in 0f..24f)
+        compose.onNodeWithText("CODEX").assertDoesNotExist()
+        compose.onNodeWithText("CLAUDE").assertDoesNotExist()
+    }
+
     @Test fun legacyCountersRemainUnavailable() {
         val state = fixture()
         render(state.copy(snapshot = state.snapshot.copy(mainRunningCount = null, mainSessionCount = null, totalRunningCount = null)))
