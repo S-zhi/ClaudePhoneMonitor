@@ -26,6 +26,9 @@ fun SessionSummary.displayState(completion: RecentCompletion?): SessionDisplaySt
 
 private val codexSessionId = Regex("^codex:sess:([0-9a-f]{64})$")
 
+/** Codex sessions use a stable, source-specific id; malformed prefixes remain Claude rows. */
+internal fun isCodexSessionId(sessionId: String): Boolean = codexSessionId.matches(sessionId)
+
 internal fun fallbackSessionTitle(sessionId: String): String {
     codexSessionId.matchEntire(sessionId)?.groupValues?.get(1)?.let { return "Codex ${it.takeLast(6)}" }
     val suffix = MessageDigest.getInstance("SHA-256").digest(sessionId.toByteArray(Charsets.UTF_8))
