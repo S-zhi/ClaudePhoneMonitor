@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="@color/launcher_icon_foreground"
+        android:fillType="evenOdd"
+        android:pathData="M34,34 H74 V44 H84 V54 H74 V64 V74 H69 V64 H64 V74 H59 V64 H49 V74 H44 V64 H39 V74 H34 V54 H24 V44 H34 Z M39,39 H44 V44 H39 Z M64,39 H69 V44 H64 Z" />
+</vector>

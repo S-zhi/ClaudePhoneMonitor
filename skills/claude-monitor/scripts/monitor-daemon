@@ -13,6 +13,7 @@ INTERVAL=30
 ONCE=0
 ADAPTER="$CM_ADAPTER_DEFAULT"
 NODE="$CM_NODE_DEFAULT"
+WATCH_CODEX=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -35,6 +36,35 @@ cm_load_env "$STATE_DIR"
 set +a
 cm_mkdir_state "$STATE_DIR"
 mkdir -p "$STATE_DIR/run" 2>/dev/null || exit 0
+
+# Codex lifecycle watching is opt-in. A launchd restart must honor the same
+# private preference as the foreground launcher, while an explicit environment
+# value remains a one-run override. Invalid or unsafe preferences fail closed.
+if [ "${COLLECTOR_WATCH_CODEX+x}" = x ]; then
+  case "$COLLECTOR_WATCH_CODEX" in
+    0|1) WATCH_CODEX="$COLLECTOR_WATCH_CODEX" ;;
+    *)
+      printf 'codex_preference_unavailable\n' >&2
+      WATCH_CODEX=0
+      ;;
+  esac
+else
+  WATCH_CODEX=""
+  if ! WATCH_CODEX="$(cm_python "$CM_REPO_ROOT/scripts/usage-preference.py" \
+    --state-dir "$STATE_DIR" --feature codex 2>/dev/null)"; then
+    printf 'codex_preference_unavailable\n' >&2
+    WATCH_CODEX=0
+  fi
+  case "$WATCH_CODEX" in
+    0|1) ;;
+    "") WATCH_CODEX=0 ;;
+    *)
+      printf 'codex_preference_unavailable\n' >&2
+      WATCH_CODEX=0
+      ;;
+  esac
+fi
+
 PID_FILE="$STATE_DIR/run/daemon.pid"
 HEARTBEAT="$STATE_DIR/run/daemon.json"
 
@@ -77,7 +107,11 @@ fi
 # The launch agent is the real Collector process in production. Keep the
 # heartbeat-only behavior available for fixture tests and incomplete installs.
 if [ -f "$ADAPTER" ]; then
-  exec "$NODE" "$ADAPTER" --collector
+  if [ "$WATCH_CODEX" = "1" ]; then
+    exec "$NODE" "$ADAPTER" --collector --watch-codex
+  else
+    exec "$NODE" "$ADAPTER" --collector --no-watch-codex
+  fi
 fi
 
 # Keep the process quiet and inexpensive when the adapter is not built yet.

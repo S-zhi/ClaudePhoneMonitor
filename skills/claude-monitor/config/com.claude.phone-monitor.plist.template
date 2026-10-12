@@ -7,7 +7,7 @@
   <string>com.claude.phone-monitor</string>
   <key>ProgramArguments</key>
   <array>
-    <string>__CM_INSTALL_ROOT__/scripts/monitor-daemon</string>
+    <string>__CM_DAEMON__</string>
     <string>--state-dir</string>
     <string>__CM_STATE_DIR__</string>
     <string>--adapter</string>

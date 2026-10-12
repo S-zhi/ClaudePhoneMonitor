@@ -37,6 +37,16 @@ that environment setting. The watcher reads `$CODEX_HOME/sessions`, or
 checkpoint is stored as `codex-checkpoint.json` under `COLLECTOR_DATA_DIR` with
 hashed identities and offsets, not transcript content.
 
+The foreground launcher stores the Codex choice in its private state directory.
+The Skill's launchd wrapper reads that same `codex.preference` file on the next
+Collector start, unless an explicit `COLLECTOR_WATCH_CODEX=0|1` environment
+value overrides the current run. Missing, malformed, or unsafe preferences fail
+closed and leave Claude Hook monitoring available. At startup the watcher takes
+historical high-water marks and rehydrates only rollout files with fresh active
+lifecycle evidence; completed or stale history is not reclassified as WORKING.
+This lets a pre-existing active Codex turn be adopted before the phone connects,
+while later completion is emitted once.
+
 Native Codex names come from the configured sessions root's parent by default.
 `COLLECTOR_CODEX_METADATA_DIR`, `--codex-metadata-root PATH`, or the runtime's
 `codexMetadataRoot` option selects another metadata root explicitly. The reader
@@ -142,6 +152,17 @@ then restart the collector. A zero event count is not evidence that Codex is
 idle.
 
 The exact launchd template is in `launchd/com.claude.phone-monitor.collector.plist.template`; the Skill under `skills/claude-monitor/` renders and installs it without modifying unrelated launch agents.
+
+## Claude Hook recovery boundary
+
+Claude Hook delivery is event driven and fail-open. The adapter normalizes one Hook
+payload and sends it to the local Unix socket; it does not enumerate Claude
+sessions. Once a lifecycle event reaches the Collector and Relay, the Relay's
+memory/SQLite snapshot can restore it when Android connects later or reconnects.
+If the Collector was stopped when the Hook ran, the Hook remains non-blocking and
+there is currently no reliable Claude Session bootstrap or liveness source to
+recover that missing event. Old timestamps, file modification times, and the
+separate Usage watcher are not treated as proof that a task is still WORKING.
 
 ## Privacy boundary
 

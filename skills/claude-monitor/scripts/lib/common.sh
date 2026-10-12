@@ -95,19 +95,21 @@ cm_render_plist() {
   local state_dir="$3"
   local adapter="$4"
   local node="$5"
-  cm_python - "$CM_TEMPLATE" "$output" "$install_root" "$state_dir" "$adapter" "$node" <<'PY'
+  local daemon="$install_root/skills/claude-monitor/scripts/monitor-daemon"
+  cm_python - "$CM_TEMPLATE" "$output" "$install_root" "$state_dir" "$adapter" "$node" "$daemon" <<'PY'
 import html
 import os
 import pathlib
 import sys
 
-template_path, output_path, install_root, state_dir, adapter, node = sys.argv[1:]
+template_path, output_path, install_root, state_dir, adapter, node, daemon = sys.argv[1:]
 text = pathlib.Path(template_path).read_text(encoding="utf-8")
 replacements = {
     "__CM_INSTALL_ROOT__": install_root,
     "__CM_STATE_DIR__": state_dir,
     "__CM_ADAPTER__": adapter,
     "__CM_NODE__": node,
+    "__CM_DAEMON__": daemon,
 }
 for key, value in replacements.items():
     text = text.replace(key, html.escape(value, quote=False))

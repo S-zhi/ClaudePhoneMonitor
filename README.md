@@ -192,8 +192,10 @@ scripts/start-lan-monitor.sh --watch-codex
 `CODEX_HOME` 时读取 `~/.codex/sessions`；可用
 `COLLECTOR_CODEX_SESSIONS_DIR` 指定其他目录。监听只读取 sessions JSONL 的安全
 生命周期字段，不安装 Hook、不修改 Codex 配置。首次默认关闭；
-`--watch-codex` 会保存启用选择，后续普通重启仍会监听；需要关闭时显式使用
-`--no-watch-codex`。环境变量只覆盖当前启动，不改保存的选择。
+`--watch-codex` 会把选择保存到私有 state 目录，后续普通启动和 launchd 重启都会读取它；需要关闭时显式使用
+`--no-watch-codex`。环境变量只覆盖当前启动，不改保存的选择。保存选择在下一次 Collector 启动时生效。
+启动时 watcher 会建立历史高水位，并只接管仍有新鲜活动依据的 rollout；已完成或过期的历史任务不会被重新标记为 WORKING。
+因此，已经开始工作的 Codex Session 在监听器稍后启动时仍可进入一次 WORKING 快照，后续完成只产生一次完成事件。
 若手机显示 `RELAY CONNECTED`，但结束的任务仍留在 Working 列表，先检查启动日志是否显示
 `Codex session monitoring: enabled`，以及 Collector 进程是否带有 `--watch-codex`。
 `RELAY CONNECTED` 只表示手机连上 Relay，不能证明 Codex 生命周期正在采集；
@@ -260,6 +262,7 @@ Tokens。只有缓存分子、分母和两个来源覆盖都完整时才给完�
 
 - LAN MVP 的 `ws://` 未加密，只能运行在可信局域网；生产公网需要 WSS/TLS。
 - FCM 后台推送尚未接入，前台 WebSocket 已可用。
+- Claude Hook 只在 Hook 发生时向本地 Collector 投递；已经进入 Relay 的生命周期事件可以在手机晚连接或 Relay 重启后从快照恢复。Collector 未运行期间发生的 Hook 会继续 fail-open，当前没有可靠的 Claude Session 枚举或 liveness bootstrap，因此不能把旧时间戳、文件 mtime 或 Usage 记录当作 WORKING 依据。
 - 真实 Claude Hook payload 仍需针对目标 Claude Code 版本做脱敏 fixture 验证；未知字段会被忽略。
 - Codex 监听需要显式启用。已核实桌面应用版本为 26.930.61225（内嵌 runtime 0.160.0），
   独立 CLI 二进制为 0.159.3；两种执行形态不可混称。当前 Codex 会话 JSONL 格式不稳定。

@@ -58,6 +58,7 @@ assert (state / "launchd.template.plist").is_file()
 plist = (agents / "com.claude.phone-monitor.plist").read_text()
 assert "__CM_" not in plist
 assert "claude-phone-monitor:v1" in plist
+assert str((pathlib.Path.cwd() / "skills/claude-monitor/scripts/monitor-daemon").resolve()) in plist
 PY
 
 # Opt-in changes only PermissionRequest. Private custom socket and bridge mode
@@ -120,6 +121,49 @@ owned = [hook for groups in data["hooks"].values() for group in groups for hook 
 assert len(owned) == 10, len(owned)
 assert any(hook.get("command") == "echo marker text claude-phone-monitor:v1" for group in data["hooks"]["SessionStart"] for hook in group["hooks"])
 PY
+
+# The launchd wrapper must apply the saved Codex preference to the real
+# Collector command. Use a fake executable and adapter so this never starts a
+# service or touches a user's launchd installation.
+FAKE_COLLECTOR="$TMP/fake-collector.js"
+FAKE_NODE="$TMP/fake-node"
+FAKE_ARGS="$TMP/fake-node-args"
+printf '%s\n' 'fixture' > "$FAKE_COLLECTOR"
+printf '%s\n' '#!/bin/bash' "printf '%s\\n' \"\$@\" > \"\$FAKE_ARGS\"" > "$FAKE_NODE"
+chmod 700 "$FAKE_NODE"
+export FAKE_ARGS
+run_monitor_daemon() {
+  CLAUDE_PHONE_MONITOR_NODE="$FAKE_NODE" \
+    "$SCRIPTS/monitor-daemon" --state-dir "$STATE" --adapter "$FAKE_COLLECTOR"
+}
+
+printf '1\n' > "$STATE/codex.preference"
+run_monitor_daemon || fail "launchd wrapper with Codex enabled"
+assert grep -Fx -- '--watch-codex' "$FAKE_ARGS"
+if grep -Fx -- '--no-watch-codex' "$FAKE_ARGS" >/dev/null; then
+  fail "launchd wrapper passed both Codex flags"
+fi
+
+printf '0\n' > "$STATE/codex.preference"
+run_monitor_daemon || fail "launchd wrapper with Codex disabled"
+assert grep -Fx -- '--no-watch-codex' "$FAKE_ARGS"
+if grep -Fx -- '--watch-codex' "$FAKE_ARGS" >/dev/null; then
+  fail "launchd wrapper ignored saved Codex disable"
+fi
+
+printf '1\n' > "$STATE/codex.preference"
+COLLECTOR_WATCH_CODEX=0 run_monitor_daemon || fail "launchd wrapper environment override"
+assert grep -Fx -- '--no-watch-codex' "$FAKE_ARGS"
+assert grep -Fx '1' "$STATE/codex.preference"
+
+printf 'invalid\n' > "$STATE/codex.preference"
+if run_monitor_daemon 2>"$TMP/monitor-daemon.error"; then
+  :
+else
+  fail "launchd wrapper rejected malformed preference"
+fi
+assert grep -Fx 'codex_preference_unavailable' "$TMP/monitor-daemon.error"
+assert grep -Fx -- '--no-watch-codex' "$FAKE_ARGS"
 
 # Execute one generated hook command with a failing adapter and JSON stdin.
 COMMAND="$(python3 - "$SETTINGS" <<'PY'

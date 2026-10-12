@@ -387,3 +387,109 @@ for (const storageKind of ["memory", "sqlite"]) {
     }
   });
 }
+
+for (const storageKind of ["memory", "sqlite"]) {
+  test(`pre-existing active Codex rollout is adopted before phone connect through ${storageKind} Relay`, async () => {
+    const root = await mkdtemp(join(tmpdir(), `codex-startup-adoption-${storageKind}-`));
+    const sessionsRoot = join(root, "sessions");
+    const dataDir = join(root, "collector-data");
+    const socketPath = join(root, "collector.sock");
+    const installationId = `codex-startup-${randomUUID()}`;
+    const sessionId = randomUUID();
+    const turnId = randomUUID();
+    const rollout = join(sessionsRoot, "rollout-preexisting.jsonl");
+    await mkdir(sessionsRoot, { recursive: true, mode: 0o700 });
+    await writeFile(rollout, [
+      rolloutRow("session_meta", { id: sessionId }, 0),
+      rolloutRow("event_msg", { type: "task_started", turn_id: turnId }, 1),
+    ].join("\n") + "\n", { mode: 0o600 });
+
+    const config = loadConfig({}, {
+      host: "127.0.0.1",
+      port: 0,
+      authMode: "development",
+      ...(storageKind === "sqlite" ? { databasePath: join(root, "relay.sqlite") } : {}),
+      staleAfterMs: 60_000,
+      offlineAfterMs: 120_000,
+      bookkeepingIntervalMs: 60_000,
+      heartbeatIntervalMs: 60_000,
+    });
+    const logger = new JsonLogger({ sink: () => undefined });
+    const relay = new Relay({ config, logger });
+    const server = createRelayServer({ relay, logger });
+    let runtime;
+    let phone;
+    try {
+      await server.app.listen({ host: config.host, port: config.port });
+      const port = server.app.server.address().port;
+      runtime = await createCollectorRuntime({
+        dataDir,
+        socketPath,
+        relayUrl: `ws://127.0.0.1:${port}/ws/collector`,
+        installationId,
+        watchCodex: true,
+        sessionsRoot,
+        checkpointFile: join(dataDir, "codex-checkpoint.json"),
+      });
+
+      const wireSessionId = `codex:sess:${sha(sessionId)}`;
+      const wireTaskId = `codex:turn:${sha(turnId)}`;
+      await waitFor(() => {
+        const lifecycle = relay.repository.listEventsAfter(installationId, -1).map((row) => row.event);
+        return lifecycle.some((event) => event.event_type === "session_started" && event.session_id === wireSessionId) &&
+          lifecycle.some((event) => event.event_type === "task_started" && event.session_id === wireSessionId && event.task_id === wireTaskId)
+          ? lifecycle
+          : undefined;
+      });
+      let lifecycle = relay.repository.listEventsAfter(installationId, -1).map((row) => row.event);
+      assert.equal(lifecycle.filter((event) => event.event_type === "session_started" && event.session_id === wireSessionId).length, 1);
+      assert.equal(lifecycle.filter((event) => event.event_type === "task_started" && event.session_id === wireSessionId).length, 1);
+      assert.equal(relay.snapshot(installationId).sessions.find((session) => session.session_id === wireSessionId)?.claude_state, "working");
+
+      const snapshots = [];
+      phone = new WebSocket(`ws://127.0.0.1:${port}/ws/android?installation_id=${encodeURIComponent(installationId)}&client_id=startup-adoption-phone`);
+      phone.addEventListener("message", (message) => {
+        const value = JSON.parse(String(message.data));
+        const snapshot = value.type === "hello_ack" ? value.snapshot : value;
+        if (snapshot?.type === "snapshot") snapshots.push(snapshot);
+      });
+      await waitFor(() => phone.readyState === WebSocket.OPEN);
+      await waitFor(() => snapshots.some((snapshot) => snapshot.claude_state === "working" &&
+        snapshot.sessions?.some((session) => session.session_id === wireSessionId && session.claude_state === "working")));
+
+      await appendFile(rollout, `${rolloutRow("event_msg", { type: "task_complete", turn_id: turnId, error: null }, 2)}\n`);
+      await waitFor(() => relay.repository.listEventsAfter(installationId, -1).some((row) =>
+        row.event.event_type === "task_finished" && row.event.session_id === wireSessionId && row.event.task_id === wireTaskId));
+      lifecycle = relay.repository.listEventsAfter(installationId, -1).map((row) => row.event);
+      assert.equal(lifecycle.filter((event) => event.event_type === "task_finished" && event.session_id === wireSessionId).length, 1);
+      assert.equal(relay.snapshot(installationId).sessions.find((session) => session.session_id === wireSessionId)?.claude_state, "idle");
+
+      const closed = new Promise((resolve) => phone.addEventListener("close", resolve, { once: true }));
+      phone.close();
+      await closed;
+      const reconnectedSnapshots = [];
+      phone = new WebSocket(`ws://127.0.0.1:${port}/ws/android?installation_id=${encodeURIComponent(installationId)}&client_id=startup-adoption-phone-reconnect`);
+      phone.addEventListener("message", (message) => {
+        const value = JSON.parse(String(message.data));
+        const snapshot = value.type === "hello_ack" ? value.snapshot : value;
+        if (snapshot?.type === "snapshot") reconnectedSnapshots.push(snapshot);
+      });
+      await waitFor(() => phone.readyState === WebSocket.OPEN);
+      await waitFor(() => reconnectedSnapshots.some((snapshot) => snapshot.claude_state === "idle" &&
+        snapshot.recent_completion?.session_id === wireSessionId &&
+        snapshot.recent_completion?.task_id === wireTaskId));
+      lifecycle = relay.repository.listEventsAfter(installationId, -1).map((row) => row.event);
+      assert.equal(lifecycle.filter((event) => event.event_type === "task_finished" && event.session_id === wireSessionId).length, 1);
+    } finally {
+      await runtime?.stop();
+      if (phone && phone.readyState < WebSocket.CLOSING) {
+        const closed = new Promise((resolve) => phone.addEventListener("close", resolve, { once: true }));
+        phone.close();
+        await closed;
+      }
+      await waitFor(() => relay.stats().active_connections === 0);
+      await server.app.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}

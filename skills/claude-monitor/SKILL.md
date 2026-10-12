@@ -105,6 +105,15 @@ The equivalent collector controls are `--watch-codex` or
 `COLLECTOR_CODEX_SESSIONS_DIR` to point at another local sessions root. It is
 read-only and does not install Codex Hooks or edit Codex settings.
 
+Codex monitoring is disabled on first install. The foreground launcher stores
+its choice in the private state directory, and the launchd wrapper reads that
+same choice on the next Collector start. An explicit `COLLECTOR_WATCH_CODEX=0|1`
+environment value overrides one launch without rewriting the saved choice;
+missing, malformed, or unsafe preference files fail closed. At startup the
+watcher adopts only fresh active rollout evidence after a historical high-water
+baseline, so an already-working Codex turn can appear once before the phone
+connects while completed or stale history is not revived as WORKING.
+
 The observed desktop app version is 26.930.61225 with embedded runtime 0.160.0;
 the standalone CLI binary is 0.159.3. These are distinct execution forms and
 version values. The local JSONL
@@ -124,6 +133,17 @@ that the Codex session is idle. A source session without file growth or mtime
 change for 30 minutes ends neutrally; that stale threshold never means
 completion, error, or WAITING, and is shorter than Relay's two-hour working
 session TTL.
+
+## Claude Hook recovery boundary
+
+Claude monitoring is driven by the Hook events listed below. The adapter keeps
+Hook delivery fail-open and does not enumerate Claude sessions. If an event has
+reached the Collector and Relay, a later Android connection can recover the
+authoritative state from the Relay snapshot. If Claude emitted the Hook while
+the Collector was stopped, this Skill currently has no supported Session
+bootstrap or liveness source to reconstruct it; timestamps, file mtimes, and
+Usage records are not used to claim WORKING. Do not treat a phone connection
+alone as proof that a Claude task is being observed.
 
 ## Supported lifecycle events
 
