@@ -17,6 +17,7 @@ export const EVENT_TYPES = [
 ] as const;
 
 export type SessionKind = "main" | "subagent";
+export type AgentId = string;
 export type EventType = (typeof EVENT_TYPES)[number];
 export type Gateway = "collector" | "android";
 export type TokenRole = "collector" | "android";
@@ -33,6 +34,7 @@ export interface EventEnvelope {
   schema_version: typeof RELAY_SCHEMA_VERSION;
   event_id: string;
   installation_id: string;
+  agent_id?: AgentId;
   session_id: string;
   session_title?: string;
   session_kind?: SessionKind;
@@ -97,6 +99,7 @@ export interface SnapshotActivity {
 }
 
 export interface SessionSummary {
+  agent_id?: AgentId;
   task_completed?: boolean;
   session_kind?: SessionKind;
   session_id: string;
@@ -167,6 +170,7 @@ export interface SnapshotMessage {
   type: "snapshot";
   schema_version: typeof RELAY_SCHEMA_VERSION;
   installation_id: string;
+  agent_id?: AgentId;
   computer_state: ComputerState;
   claude_state: ClaudeState;
   activity?: string | SnapshotActivity;

@@ -433,3 +433,13 @@ test("durable task completion is an optional boolean session field", () => {
     assert.equal(validateSnapshot({ ...snapshot, sessions: [{ ...row, task_completed }] }).success, false);
   }
 });
+
+test("agent metadata is optional, constrained, and cannot carry paths or prompts", () => {
+  const event = { ...makeEvent(EVENT_TYPES.TASK_STARTED, {}), agent_id: "magpie.open_code-1" };
+  assert.equal(validateEventEnvelope(event).success, true);
+  assert.equal(validateSnapshot({ ...snapshot, agent_id: "codex" }).success, true);
+  assert.equal(validateSnapshot({ ...snapshot, sessions: [{ session_id: "s", title: "Safe", claude_state: "idle", last_activity_sequence: 1, agent_id: "pi" }] }).success, true);
+  for (const agent_id of ["../tmp", "/path", "Magpie", "prompt:secret", "a".repeat(65)]) {
+    assert.equal(validateEventEnvelope({ ...event, agent_id }).success, false, agent_id);
+  }
+});

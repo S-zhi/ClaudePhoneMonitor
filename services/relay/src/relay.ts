@@ -209,6 +209,11 @@ function optionalString(value: unknown, maxLength = MAX_ID_LENGTH): string | und
   return nonEmptyString(value, maxLength);
 }
 
+function safeAgentId(value: unknown): string | undefined {
+  if (typeof value !== "string" || !/^[a-z0-9._-]{1,64}$/.test(value)) return undefined;
+  return value;
+}
+
 function safeSequence(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
     ? value
@@ -1383,6 +1388,8 @@ export class Relay {
   private parseEvent(message: Record<string, unknown>): EventEnvelope | undefined {
     if (message.schema_version !== RELAY_SCHEMA_VERSION) return undefined;
     const eventId = nonEmptyString(message.event_id);
+    const agentId = safeAgentId(message.agent_id);
+    if (message.agent_id !== undefined && !agentId) return undefined;
     const installationId = nonEmptyString(message.installation_id);
     const sessionId = nonEmptyString(message.session_id);
     const sequence = safeSequence(message.sequence);
@@ -1425,6 +1432,7 @@ export class Relay {
       type: "event",
       schema_version: RELAY_SCHEMA_VERSION,
       event_id: eventId,
+      ...(agentId ? { agent_id: agentId } : {}),
       installation_id: installationId,
       session_id: sessionId,
       ...(sessionTitle ? { session_title: sessionTitle } : {}),

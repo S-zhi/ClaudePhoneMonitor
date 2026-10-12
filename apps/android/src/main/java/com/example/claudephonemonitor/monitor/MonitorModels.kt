@@ -89,6 +89,7 @@ data class MonitorSnapshot(
     val activeTasks: List<ActiveTask>? = null,
     /** Explicit, identity-bound approval bridge state; absent on older sources. */
     val approvals: List<ApprovalSummary>? = null,
+    val agentId: String? = null,
 )
 
 enum class ApprovalStatus(val wireValue: String) {
@@ -210,6 +211,7 @@ data class SessionSummary(
     val waitingReason: String? = null,
     /** Null identifies older Relay versions without a durable task result. */
     val taskCompleted: Boolean? = null,
+    val agentId: String? = null,
 )
 
 data class RecentCompletion(
@@ -244,6 +246,7 @@ data class MonitorEvent(
     val approvalDecisionAck: ApprovalDecisionAck? = null,
     val toolName: String? = null,
     val correlationId: String? = null,
+    val agentId: String? = null,
 ) {
     fun toWireJson(): String = JSONObject().apply {
         put("type", type.wireValue)
@@ -255,6 +258,7 @@ data class MonitorEvent(
         if (updatedAt.isNotBlank()) put("updated_at", updatedAt)
         probeLatencyMs?.let { put("latency_ms", it) }
         sessionId?.let { put("session_id", it) }
+        agentId?.let { put("agent_id", it) }
         sessionKind?.let { put("session_kind", it.wireValue) }
         taskId?.let { put("task_id", it) }
         correlationId?.let { put("correlation_id", it) }
@@ -331,6 +335,7 @@ data class MonitorEvent(
                 updatedAt = root.optString("updated_at", snapshot?.updatedAt.orEmpty()),
                 probeLatencyMs = root.longOrNull("latency_ms"),
                 sessionId = root.stringOrNull("session_id"),
+                agentId = root.agentIdOrNull(),
                 taskId = root.stringOrNull("task_id"),
                 sessionTitle = root.stringOrNull("session_title"),
                 occurredAt = root.optString("occurred_at"),
@@ -351,6 +356,7 @@ data class MonitorEvent(
 
         private fun snapshotFromJson(json: JSONObject): MonitorSnapshot = MonitorSnapshot(
             installationId = json.optString("installation_id", "demo-installation"),
+            agentId = json.agentIdOrNull(),
             computerState = ComputerState.entries.firstOrNull {
                 it.wireValue == json.optString("computer_state").lowercase(Locale.US)
             } ?: ComputerState.ONLINE,
@@ -371,6 +377,7 @@ data class MonitorEvent(
                         add(
                             SessionSummary(
                                 sessionId = id,
+                                agentId = item.agentIdOrNull(),
                                 taskCompleted = (item.opt("task_completed") as? Boolean),
                                 sessionKind = item.sessionKindOrNull(),
                                 title = item.optString("title").ifBlank { fallbackSessionTitle(id) },
@@ -572,6 +579,7 @@ data class MonitorEvent(
 
 fun MonitorSnapshot.toJson(): JSONObject = JSONObject().apply {
     put("installation_id", installationId)
+    agentId?.let { put("agent_id", it) }
     put("computer_state", computerState.wireValue)
     put("claude_state", claudeState.wireValue)
     activity?.let { put("activity", it) }
@@ -582,6 +590,7 @@ fun MonitorSnapshot.toJson(): JSONObject = JSONObject().apply {
             rows.forEach { session ->
                 put(JSONObject().apply {
                     put("session_id", session.sessionId)
+                    session.agentId?.let { put("agent_id", it) }
                     session.sessionKind?.let { put("session_kind", it.wireValue) }
                     put("title", session.title)
                     put("claude_state", session.claudeState.wireValue)
@@ -700,6 +709,9 @@ private fun JSONObject.activityOrNull(): String? {
         else -> null
     }
 }
+
+private fun JSONObject.agentIdOrNull(): String? = stringOrNull("agent_id")
+    ?.takeIf { it.matches(Regex("^[a-z0-9._-]{1,64}$")) }
 
 private fun JSONObject.longOrNull(key: String): Long? =
     if (!has(key) || isNull(key)) null else runCatching { getLong(key) }.getOrNull()

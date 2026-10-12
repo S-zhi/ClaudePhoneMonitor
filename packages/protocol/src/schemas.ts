@@ -28,6 +28,12 @@ const safeTitleSchema: JsonSchema = {
   pattern: safeTitlePattern,
 };
 const identifiedSessionIdSchema: JsonSchema = { ...idSchema, pattern: "^(?!unknown$).+" };
+const agentIdSchema: JsonSchema = {
+  type: "string",
+  minLength: 1,
+  maxLength: 64,
+  pattern: "^[a-z0-9._-]+$",
+};
 
 const wireTimestampSchema: JsonSchema = {
   type: "string",
@@ -207,6 +213,7 @@ const eventProperties = (
   type: { const: MESSAGE_TYPES.EVENT },
   schema_version: { const: PROTOCOL_VERSION },
   event_id: idSchema,
+  agent_id: agentIdSchema,
   installation_id: idSchema,
   session_id: [EVENT_TYPES.SESSION_CLASSIFICATION_UPDATED, EVENT_TYPES.APPROVAL_REQUESTED, EVENT_TYPES.APPROVAL_RESOLVED].some((type) => type === eventType) ? identifiedSessionIdSchema : idSchema,
   session_kind: { enum: ["main", "subagent"] },
@@ -262,6 +269,7 @@ export const SNAPSHOT_SCHEMA: JsonSchema = {
       type: { const: MESSAGE_TYPES.SNAPSHOT },
       schema_version: { const: PROTOCOL_VERSION },
       installation_id: idSchema,
+      agent_id: agentIdSchema,
       computer_state: { enum: Object.values(COMPUTER_STATES) },
       claude_state: { enum: Object.values(CLAUDE_STATES) },
       activity: {
@@ -284,6 +292,7 @@ export const SNAPSHOT_SCHEMA: JsonSchema = {
         items: strictObject(
           {
             session_id: identifiedSessionIdSchema,
+            agent_id: agentIdSchema,
             title: safeTitleSchema,
             session_kind: { enum: ["main", "subagent"] },
             claude_state: { enum: ["idle", "working", "waiting"] },

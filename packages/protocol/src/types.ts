@@ -31,6 +31,8 @@ export type ComputerState = (typeof COMPUTER_STATES)[keyof typeof COMPUTER_STATE
 export type ConnectionStatus = ComputerState;
 export type ClaudeState = (typeof CLAUDE_STATES)[keyof typeof CLAUDE_STATES];
 export type SessionKind = "main" | "subagent";
+/** Stable, non-sensitive source identifier (for example `codex` or `magpie`). */
+export type AgentId = string;
 export type WaitingReason = "permission" | "question" | "approval" | "input" | "unknown";
 export type ApprovalStatus = "pending" | "approved" | "denied" | "resolved" | "unknown";
 export type ApprovalSource = "claude_code" | "codex";
@@ -70,6 +72,7 @@ export interface SafeEventPayload {
 
 export interface NormalizedEvent {
   readonly event_type: MonitorEventType;
+  readonly agent_id?: AgentId;
   readonly session_id: string;
   readonly task_id?: string;
   /** Safe native session/task label; never derived from prompts or paths. */
@@ -142,6 +145,7 @@ export interface EventEnvelopeBase<T extends MonitorEventType = MonitorEventType
   readonly type: typeof MESSAGE_TYPES.EVENT;
   readonly schema_version: ProtocolVersion;
   readonly event_id: string;
+  readonly agent_id?: AgentId;
   readonly installation_id: string;
   readonly session_id: string;
   readonly task_id?: string;
@@ -168,6 +172,7 @@ export interface SnapshotActivity {
 }
 
 export interface SessionSummary {
+  readonly agent_id?: AgentId;
   /** Successful current task result, retained independently of reminder expiry. */
   readonly task_completed?: boolean;
   readonly session_kind?: SessionKind;
@@ -199,6 +204,7 @@ export interface Snapshot {
   readonly type: typeof MESSAGE_TYPES.SNAPSHOT;
   readonly schema_version: ProtocolVersion;
   readonly installation_id: string;
+  readonly agent_id?: AgentId;
   readonly computer_state: ComputerState;
   readonly claude_state: ClaudeState;
   /** Short, sanitized label or event metadata; never a prompt/tool input/result. */

@@ -111,6 +111,16 @@ test("usage snapshot only changes ordinary snapshot data and resume falls back a
   relay.stop();
 });
 
+test("preserves safe agent metadata while rejecting unsafe identifiers", () => {
+  const relay = new Relay({ autoStart: false, now: () => new Date("2026-10-02T00:00:02.000Z") });
+  const collector = relay.connect({ gateway: "collector", installation_id: "install-1", transport: { send: () => undefined } });
+  relay.receive(collector.connection_id, JSON.stringify(event({ agent_id: "magpie.open-code" })));
+  const snapshot = relay.snapshot("install-1");
+  assert.equal(snapshot.sessions?.[0]?.agent_id, "magpie.open-code");
+  const invalid = relay.receive(collector.connection_id, JSON.stringify(event({ event_id: "event-2", sequence: 2, agent_id: "../prompt" })));
+  assert.equal(invalid, undefined);
+});
+
 test("relay accepts a current quota sample without claiming a startup baseline", () => {
   const relay = new Relay({ autoStart: false });
   const collectorMessages = messages();

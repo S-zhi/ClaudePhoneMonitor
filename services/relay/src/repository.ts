@@ -113,6 +113,7 @@ export interface RelayRepository {
 }
 
 interface SessionState {
+  agent_id?: string;
   session_kind?: SessionKind;
   installation_id: string;
   session_id: string;
@@ -221,6 +222,7 @@ function applySessionEvent(
     updated_at: event.event_type === "session_classification_updated" ? "1970-01-01T00:00:00.000Z" : event.occurred_at,
     ended: false,
   };
+  if (event.agent_id) next.agent_id = event.agent_id;
   next.last_activity_sequence ??= next.last_sequence;
   next.last_sequence = event.sequence;
   next.session_kind = previous?.session_kind === "subagent" ? "subagent" : event.session_kind ?? previous?.session_kind ?? "main";
@@ -382,6 +384,7 @@ function aggregatedState(
   return {
     claude_state: working ? "working" : mostRecent?.claude_state ?? "idle",
     sessions: ordered.slice(0, 5).map((record) => ({
+      ...(record.agent_id ? { agent_id: record.agent_id } : {}),
       session_id: record.session_id,
       session_kind: record.session_kind ?? "main",
       title: sessionDisplayName(record),
@@ -683,7 +686,7 @@ export class InMemoryRelayRepository implements RelayRepository {
     const changesActivity = updatedSession?.session_kind !== "subagent" &&
       !["session_title_updated", "session_classification_updated"].includes(event.event_type) &&
       (event.session_id === "unknown" || updatedSession?.last_activity_sequence === event.sequence);
-    stored.event = { ...eventWithTaskDuration(priorSession, stored.event), ...(updatedSession?.session_kind ? { session_kind: updatedSession.session_kind } : {}) };
+    stored.event = { ...eventWithTaskDuration(priorSession, stored.event), ...(updatedSession?.agent_id ? { agent_id: updatedSession.agent_id } : {}), ...(updatedSession?.session_kind ? { session_kind: updatedSession.session_kind } : {}) };
     stored.activity_applied = (changesActivity || (titleUpdated && updatedSession?.session_kind !== "subagent") || event.event_type === "session_classification_updated" || updatedSession?.session_kind === "subagent") && sequence_status !== "out_of_order" &&
       !(event.session_id === "unknown" && event.event_type === "task_finished");
 
@@ -777,7 +780,7 @@ export class InMemoryRelayRepository implements RelayRepository {
       .sort((left, right) => left.event.sequence - right.event.sequence)
       .map((stored) => {
         const record = this.sessions.get(`${installationId}\u0000${stored.event.session_id}`);
-        return clone({ ...stored, event: { ...stored.event, ...(record?.session_kind ? { session_kind: record.session_kind } : {}) } });
+        return clone({ ...stored, event: { ...stored.event, ...(record?.agent_id ? { agent_id: record.agent_id } : {}), ...(record?.session_kind ? { session_kind: record.session_kind } : {}) } });
       });
   }
 
@@ -1242,7 +1245,7 @@ export class SqliteRelayRepository implements RelayRepository {
     const changesActivity = updatedSession?.session_kind !== "subagent" &&
       !["session_title_updated", "session_classification_updated"].includes(event.event_type) &&
       (event.session_id === "unknown" || updatedSession?.last_activity_sequence === event.sequence);
-    stored.event = { ...eventWithTaskDuration(priorSession, stored.event), ...(updatedSession?.session_kind ? { session_kind: updatedSession.session_kind } : {}) };
+    stored.event = { ...eventWithTaskDuration(priorSession, stored.event), ...(updatedSession?.agent_id ? { agent_id: updatedSession.agent_id } : {}), ...(updatedSession?.session_kind ? { session_kind: updatedSession.session_kind } : {}) };
     stored.activity_applied = (changesActivity || (titleUpdated && updatedSession?.session_kind !== "subagent") || event.event_type === "session_classification_updated" || updatedSession?.session_kind === "subagent") && sequence_status !== "out_of_order" &&
       !(event.session_id === "unknown" && event.event_type === "task_finished");
     const nextState: InstallationState =
@@ -1397,7 +1400,7 @@ export class SqliteRelayRepository implements RelayRepository {
         const row = this.db.prepare("SELECT session_json FROM relay_sessions WHERE installation_id = ? AND session_id = ?")
           .get(installationId, stored.event.session_id) as SqlRow | undefined;
         const record = optionalJson<SessionState>(row?.session_json);
-        return clone({ ...stored, event: { ...stored.event, ...(record?.session_kind ? { session_kind: record.session_kind } : {}) } });
+        return clone({ ...stored, event: { ...stored.event, ...(record?.agent_id ? { agent_id: record.agent_id } : {}), ...(record?.session_kind ? { session_kind: record.session_kind } : {}) } });
       });
   }
 
