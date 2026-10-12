@@ -1,6 +1,8 @@
 # CI 与本地复现
 
-`.github/workflows/ci.yml` 在每个 PR 和 `main` push 上运行。`Node checks` 与 `Android checks` 是稳定的合并检查；`Publish validated artifacts` 仅在 main push 的两个检查都成功后发布制品。CI 不需要 Claude、Codex 账户、API key、用户 Hook 或现有 Relay。
+`.github/workflows/ci.yml` 在每个 PR 以及 `main`、`dev/magpie` push 上运行。`Node checks` 与 `Android checks` 是稳定的合并检查；`Publish validated artifacts` 仅在 main push 的两个检查都成功后发布制品。CI 不需要 Claude、Codex 账户、API key、用户 Hook 或现有 Relay。
+
+Magpie 开发规则见 [Magpie 开发约定](magpie-development.md)：相关提交直接进入 `dev/magpie`，Magpie 功能禁止合并回 `main`。`branch-policy.yml` 提供只读取 PR 元数据的 `Prevent dev/magpie to main` 检查，要求 `dev/magpie`、`dev/magpie-*`、`codex/magpie-*` 的 PR 目标必须为 `dev/magpie`。该工作流尚未部署到远端基线分支并设为 required status check 前，远端门禁不生效；YAML 不会自行创建 GitHub 保护规则。
 
 ## 前置环境
 
@@ -50,7 +52,7 @@ Issue #16 开始时的既有报告为 **0 errors、15 warnings**：8 条 `Gradle
 
 ## 合并与制品
 
-仓库管理员需在 GitHub **Settings → Branches → main branch protection**（或 Rulesets）启用 required status checks，并选择首次 CI 运行生成的 **Node checks** 和 **Android checks**；YAML 本身不会打开分支保护。保留这两个 job 显示名称以避免 required check 名称漂移；发布 job 不作为 PR 必需检查，因为它只在 main 上运行。
+仓库管理员需在 GitHub **Settings → Branches → main branch protection**（或 Rulesets）启用 required status checks，并选择首次 CI 运行生成的 **Node checks**、**Android checks** 和 **Prevent dev/magpie to main**；YAML 本身不会打开分支保护。保留这些 job 显示名称以避免 required check 名称漂移；发布 job 不作为 PR 必需检查，因为它只在 main 上运行。
 
 每次运行的 Node 日志、`reports/relay-smoke` 结果和 Android 日志、lint/测试报告保存为 `node-diagnostics-<github.sha>`、`android-diagnostics-<github.sha>`，保留 14 天。main 上验证的 backend/APK 先临时保存 1 天，全部检查成功后才发布 `backend-<github.sha>` 和 `apk-<github.sha>`，保留 14 天；名称中的 SHA 是该运行的 GitHub source SHA，可从 Actions run 核对，PR 运行可能使用合并测试 SHA。下载前确认两个检查与发布 job 均成功。APK 位于 `apps/android/build/outputs/apk/debug/android-debug.apk`，是 debug 构建，不是签名发布版。
 

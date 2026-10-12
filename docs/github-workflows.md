@@ -2,7 +2,11 @@
 
 本仓库的 `.github/` 复制自 [S-zhi/Juejin](https://github.com/S-zhi/Juejin)，源 commit：`b86acaa63e325e0bce565b8b8d21021e69c27b70`。
 
-项目 CI 的检查、前置条件、制品和合并保护配置见 [CI 指南](ci.md)。以下三个工作流分别负责 issue 状态流转（`state-control.yaml`）、issue 动作控制（`action-control.yaml`）和标签同步（`sync-labels.yml`）。
+项目 CI 的检查、前置条件、制品和合并保护配置见 [CI 指南](ci.md)。`ci.yml` 在 PR、`main` push 和 `dev/magpie` push 上运行；发布制品仍只从 `main` 产生。`branch-policy.yml` 提供名为 `Prevent dev/magpie to main` 的检查，要求 Magpie 分支 PR 只以 `dev/magpie` 为目标；部署并配置 required check 后才具有远端强制作用。以下三个工作流分别负责 issue 状态流转（`state-control.yaml`）、issue 动作控制（`action-control.yaml`）和标签同步（`sync-labels.yml`）。
+
+## Magpie 分支规则
+
+完整约定、清理基线和入口合同见 [Magpie 开发约定](magpie-development.md)。`dev/magpie` 用于持续开发 Magpie 入口和会话监听能力，Magpie 功能禁止合并回 `main`。`dev/magpie`、`dev/magpie-*`、`codex/magpie-*` 的 PR 只能以 `dev/magpie` 为目标。工作流使用 `pull_request_target`，不 checkout 或执行 PR 代码，仅通过环境变量读取分支名称。它必须单独部署到受保护目标基线并配置 required check 后才生效；改分支名、cherry-pick 或直接 push 不属于这个检查的识别范围。
 
 ## 启用
 

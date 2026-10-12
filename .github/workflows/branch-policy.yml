@@ -1,0 +1,29 @@
+name: Branch policy
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  prevent-magpie-main-merge:
+    name: Prevent dev/magpie to main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check protected development branch direction
+        env:
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -eu
+          case "$HEAD_BRANCH" in
+            dev/magpie|dev/magpie-*|codex/magpie-*)
+              if [ "$BASE_BRANCH" != "dev/magpie" ]; then
+                echo 'Magpie development pull requests must target dev/magpie.' >&2
+                exit 1
+              fi
+              ;;
+          esac
+          printf 'Allowed pull request direction: %s -> %s\n' "$HEAD_BRANCH" "$BASE_BRANCH"
