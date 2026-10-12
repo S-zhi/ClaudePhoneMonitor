@@ -19,6 +19,8 @@ import {
 } from "./codex-watcher.js";
 import type { EventEnvelope, RelayOutboundMessage } from "./types.js";
 import { startUsageWatcher, UsageWatcherStartError, type UsageWatcherHandle } from "./usage-watcher.js";
+import { startAgentSessionWatcher, type AgentSessionWatcherHandle } from "./agent-session-watcher.js";
+import { startMagpieSessionsWatcher, type MagpieSessionsWatcherHandle } from "./magpie-sessions.js";
 
 const DEFAULT_DATA_DIR = join(homedir(), ".claude-phone-monitor");
 const DEFAULT_SOCKET_PATH = join(DEFAULT_DATA_DIR, "collector.sock");
@@ -28,6 +30,14 @@ interface ParsedArgs {
   socketPath?: string;
   watchCodex?: boolean;
   watchUsage?: boolean;
+  watchAgentSessions?: boolean;
+  watchMagpieSessions?: boolean;
+  magpieBin?: string;
+  magpieSessionLimit?: number;
+  magpiePollIntervalMs?: number;
+  agentSessionsRoot?: string;
+  agentId?: string;
+  agentCheckpointFile?: string;
   codexMetadataRoot?: string;
   codexIpcSocket?: string;
   help?: boolean;
@@ -47,6 +57,15 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === "--no-watch-codex") parsed.watchCodex = false;
     else if (arg === "--watch-usage") parsed.watchUsage = true;
     else if (arg === "--no-watch-usage") parsed.watchUsage = false;
+    else if (arg === "--watch-agent-sessions") parsed.watchAgentSessions = true;
+    else if (arg === "--no-watch-agent-sessions") parsed.watchAgentSessions = false;
+    else if (arg === "--watch-magpie-sessions") parsed.watchMagpieSessions = true;
+    else if (arg === "--no-watch-magpie-sessions") parsed.watchMagpieSessions = false;
+    else if (arg === "--magpie-bin") parsed.magpieBin = argv[++index];
+    else if (arg === "--magpie-session-limit") parsed.magpieSessionLimit = Number(argv[++index]);
+    else if (arg === "--agent-sessions-root") parsed.agentSessionsRoot = argv[++index];
+    else if (arg === "--agent-id") parsed.agentId = argv[++index];
+    else if (arg === "--agent-checkpoint-file") parsed.agentCheckpointFile = argv[++index];
     else if (arg === "--approval-bridge") parsed.approvalBridge = true;
     else if (arg === "--no-approval-bridge") parsed.approvalBridge = false;
     else if (arg === "--help" || arg === "-h") parsed.help = true;
@@ -62,6 +81,8 @@ export interface CollectorRuntime {
   codexWatcher?: CodexWatcherHandle;
   codexApprovals?: CodexApprovalObserver;
   usageWatcher?: UsageWatcherHandle;
+  agentSessionWatcher?: AgentSessionWatcherHandle;
+  magpieWatcher?: MagpieSessionsWatcherHandle;
   approvalBridge: ApprovalBridge;
   stop(): Promise<void>;
 }
@@ -79,6 +100,14 @@ export interface CollectorRuntimeOptions {
   codexIpcSocket?: string;
   checkpointFile?: string;
   watchUsage?: boolean;
+  watchAgentSessions?: boolean;
+  watchMagpieSessions?: boolean;
+  magpieBin?: string;
+  magpieSessionLimit?: number;
+  magpiePollIntervalMs?: number;
+  agentSessionsRoot?: string;
+  agentId?: string;
+  agentCheckpointFile?: string;
   claudeProjectsRoot?: string;
   usageDatabaseFile?: string;
   codexBinary?: string;
@@ -205,6 +234,39 @@ export async function createCollectorRuntime(
     }
   }
 
+  let agentSessionWatcher: AgentSessionWatcherHandle | undefined;
+  const watchAgentSessions = options.watchAgentSessions ?? env.COLLECTOR_WATCH_AGENT_SESSIONS === "1";
+  if (watchAgentSessions) {
+    const agentSessionsRoot = options.agentSessionsRoot ?? env.COLLECTOR_AGENT_SESSIONS_DIR;
+    const agentId = options.agentId ?? env.COLLECTOR_AGENT_ID ?? "agent";
+    if (agentSessionsRoot) {
+      try {
+        agentSessionWatcher = await startAgentSessionWatcher({
+          sessionsRoot: agentSessionsRoot,
+          agentId,
+          checkpointFile: options.agentCheckpointFile ?? env.COLLECTOR_AGENT_CHECKPOINT_FILE ?? join(dataDir, "agent-session-checkpoint.json"),
+          emit: async (event) => { await collector.ingestNormalized(event); try { await relay?.flushPending(); } catch { /* Outbox retries on reconnect. */ } },
+        });
+      } catch { stderr.write("agent_session_watch_start_failed\n"); }
+    } else stderr.write("agent_session_watch_root_missing\n");
+  }
+
+  let magpieWatcher: MagpieSessionsWatcherHandle | undefined;
+  const watchMagpieSessions = options.watchMagpieSessions ?? env.COLLECTOR_WATCH_MAGPIE_SESSIONS === "1";
+  if (watchMagpieSessions) {
+    try {
+      const sessionLimit = options.magpieSessionLimit ?? Number(env.COLLECTOR_MAGPIE_SESSION_LIMIT ?? "100");
+      const pollIntervalMs = options.magpiePollIntervalMs ?? Number(env.COLLECTOR_MAGPIE_POLL_INTERVAL_MS ?? "2000");
+      magpieWatcher = await startMagpieSessionsWatcher({
+        commandName: options.magpieBin ?? env.COLLECTOR_MAGPIE_BIN ?? "magpie",
+        defaultLimit: Number.isFinite(sessionLimit) && sessionLimit > 0 ? sessionLimit : 100,
+        sessionLimit: Number.isFinite(sessionLimit) && sessionLimit > 0 ? sessionLimit : 100,
+        pollIntervalMs: Number.isFinite(pollIntervalMs) && pollIntervalMs > 0 ? pollIntervalMs : 2_000,
+        emit: async (event) => { await collector.ingestNormalized(event); try { await relay?.flushPending(); } catch { /* Durable outbox retries on reconnect. */ } },
+      });
+    } catch { stderr.write("magpie_sessions_watch_start_failed\n"); }
+  }
+
   return {
     collector,
     outbox,
@@ -213,11 +275,15 @@ export async function createCollectorRuntime(
     codexWatcher,
     codexApprovals,
     usageWatcher,
+    agentSessionWatcher,
+    magpieWatcher,
     approvalBridge: bridge,
     async stop() {
       await codexApprovals?.stop();
       await codexWatcher?.stop();
       await usageWatcher?.stop();
+      await agentSessionWatcher?.stop();
+      await magpieWatcher?.stop();
       await bridge.stop();
       relay?.stop();
       await socket.stop();
@@ -230,21 +296,25 @@ export async function createCollectorRuntime(
 export async function runCollector(options: CollectorRuntimeOptions = {}): Promise<void> {
   const runtime = await createCollectorRuntime(options);
   let diagnosticSignature = "";
-  const diagnosticsTimer = runtime.codexWatcher || runtime.usageWatcher
+  const diagnosticsTimer = runtime.codexWatcher || runtime.usageWatcher || runtime.agentSessionWatcher || runtime.magpieWatcher
     ? setInterval(() => {
         const codexDiagnostics = runtime.codexWatcher?.getDiagnostics();
         const usageDiagnostics = runtime.usageWatcher?.getDiagnostics();
+        const agentDiagnostics = runtime.agentSessionWatcher?.getDiagnostics();
+        const magpieDiagnostics = runtime.magpieWatcher?.getDiagnostics();
         const summary = {
           codes: [
             ...(codexDiagnostics?.codes.filter((code) => /^codex_[a-z_]+$/.test(code)) ?? []),
             ...(usageDiagnostics?.codes ?? []),
+            ...(agentDiagnostics?.codes ?? []),
+            ...(magpieDiagnostics?.codes ?? []),
             ...(runtime.codexApprovals?.getDiagnostics().codes ?? []),
           ],
         };
         const signature = JSON.stringify(summary);
         if (signature === diagnosticSignature || summary.codes.length === 0) return;
         diagnosticSignature = signature;
-        stderr.write(`codex_watch_diagnostics ${signature}\n`);
+        stderr.write(`collector_watch_diagnostics ${signature}\n`);
       }, 30_000)
     : undefined;
   diagnosticsTimer?.unref();
@@ -278,6 +348,13 @@ export function helpText(): string {
     "  --no-watch-usage Disable Usage watching even when COLLECTOR_WATCH_USAGE=1.",
     "  --socket PATH Override COLLECTOR_SOCKET_PATH for hook and collector modes.",
     "  --approval-bridge Opt in to paired-phone PermissionRequest decisions (10 minute local hold).",
+    "  --watch-agent-sessions Watch an explicitly configured generic Agent JSONL session root (read-only; opt-in).",
+    "  --agent-sessions-root PATH Override COLLECTOR_AGENT_SESSIONS_DIR.",
+    "  --agent-id ID Namespace hashed session identifiers (COLLECTOR_AGENT_ID).",
+    "  --agent-checkpoint-file PATH Override the agent session checkpoint file.",
+    "  --watch-magpie-sessions Poll `magpie sessions --json` for new/renamed sessions (read-only; opt-in).",
+    "  --magpie-bin PATH Override the Magpie executable (COLLECTOR_MAGPIE_BIN).",
+    "  --magpie-session-limit N Limit sessions returned per poll (COLLECTOR_MAGPIE_SESSION_LIMIT).",
   ].join("\n");
 }
 
@@ -297,7 +374,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return 0;
   }
   if (args.mode === "collector") {
-    await runCollector({ socketPath: args.socketPath, watchCodex: args.watchCodex, watchUsage: args.watchUsage, codexMetadataRoot: args.codexMetadataRoot, codexIpcSocket: args.codexIpcSocket, approvalBridge: args.approvalBridge });
+    await runCollector({ socketPath: args.socketPath, watchCodex: args.watchCodex, watchUsage: args.watchUsage, watchAgentSessions: args.watchAgentSessions, watchMagpieSessions: args.watchMagpieSessions, magpieBin: args.magpieBin, magpieSessionLimit: args.magpieSessionLimit, agentSessionsRoot: args.agentSessionsRoot, agentId: args.agentId, agentCheckpointFile: args.agentCheckpointFile, codexMetadataRoot: args.codexMetadataRoot, codexIpcSocket: args.codexIpcSocket, approvalBridge: args.approvalBridge });
     return 0;
   }
   process.stdout.write(`${helpText()}\n`);

@@ -2,6 +2,36 @@
 
 The collector is a small Node.js daemon that keeps Claude Code Hook delivery local and fail-open in the default telemetry mode. The explicitly enabled [optional approval bridge](../../docs/issue-23-approval-reminder.md) instead holds `PermissionRequest` for up to ten minutes while awaiting a paired-phone decision or a return to the native computer flow. It can also opt into a read-only Codex sessions watcher that sends only allowlisted lifecycle metadata through the same Collector and Relay.
 
+## Agent bridge JSONL watcher
+
+The generic Agent watcher is an opt-in bridge contract for an external
+source-specific translator. Enable it with `--watch-agent-sessions` (or
+`COLLECTOR_WATCH_AGENT_SESSIONS=1`) and set `--agent-sessions-root PATH` or
+`COLLECTOR_AGENT_SESSIONS_DIR`. Rows must contain an explicit lifecycle
+`event_type`, `session_id`, and optional `task_id`, `session_title`, and
+`occurred_at`; `type` and `payload` aliases are accepted. The watcher hashes
+session/task identities, reads incrementally, establishes a startup high-water
+mark, and emits existing normalized lifecycle events. It never parses arbitrary
+prompt/tool bodies and does not claim to understand a native Agent or Magpie
+store. A source-specific translator must produce this bridge JSONL first.
+Use `COLLECTOR_AGENT_ID` to namespace hashes and
+`COLLECTOR_AGENT_CHECKPOINT_FILE` to override the mode-600 cursor file.
+
+## Magpie session reader
+
+Magpie itself is also an opt-in read-only source. Enable
+`--watch-magpie-sessions` or `COLLECTOR_WATCH_MAGPIE_SESSIONS=1` after checking
+that the local `magpie` command is available. The reader polls
+`magpie sessions --json --limit N`, keeps the first snapshot as a baseline, and
+emits only later session additions and safe title changes. Override the binary
+with `--magpie-bin` or `COLLECTOR_MAGPIE_BIN`; use
+`--magpie-session-limit` or `COLLECTOR_MAGPIE_SESSION_LIMIT` to bound each
+poll. Polling defaults to two seconds; set
+`COLLECTOR_MAGPIE_POLL_INTERVAL_MS` to change it. It never forwards prompts, transcript bodies, resume commands, or local
+paths; the public session and task IDs are stable hashes. The reader reports
+session/title metadata only, so task/tool activity still requires a
+source-specific Agent adapter.
+
 ## Build and test
 
 Use Node.js 24.13.0 (pinned in `.node-version`); see [CI and local reproduction](../../docs/ci.md) for the full environment. From the repository root:

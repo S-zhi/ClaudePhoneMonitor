@@ -1,0 +1,18 @@
+[
+  {
+    "agent": "codex",
+    "id": "private-session-123",
+    "cwd": "/Users/private/project",
+    "title": "Magpie session",
+    "start": "2026-10-12T16:46:43.422Z",
+    "last": "2026-10-12T16:47:40.404Z",
+    "models": [{"model": "gpt-6-luna", "input": 19064, "output": 1467, "cost": 0.0044}],
+    "input": 19064,
+    "output": 1467,
+    "cost": 0.0044,
+    "resume": "cd '/Users/private/project' && codex resume private-session-123",
+    "path": "~/.codex/sessions/private.jsonl",
+    "transcript": true,
+    "gateway": true
+  }
+]

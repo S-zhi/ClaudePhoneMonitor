@@ -1,0 +1,3 @@
+{"event_type":"session_started","session_id":"fixture-session","session_title":"Fixture session","occurred_at":"2026-10-12T10:00:00.000Z"}
+{"event_type":"task_started","session_id":"fixture-session","task_id":"fixture-task","occurred_at":"2026-10-12T10:00:01.000Z"}
+{"event_type":"task_finished","session_id":"fixture-session","task_id":"fixture-task","occurred_at":"2026-10-12T10:00:02.000Z"}
