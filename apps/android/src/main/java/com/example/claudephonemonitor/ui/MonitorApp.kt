@@ -8,6 +8,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -48,10 +49,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -83,6 +86,7 @@ import com.example.claudephonemonitor.monitor.RecentCompletion
 import com.example.claudephonemonitor.monitor.ReminderStrength
 import com.example.claudephonemonitor.monitor.SessionDisplayState
 import com.example.claudephonemonitor.monitor.displayState
+import com.example.claudephonemonitor.monitor.isCodexSessionId
 import com.example.claudephonemonitor.monitor.sortedTopSessions
 import com.example.claudephonemonitor.monitor.PetState
 import com.example.claudephonemonitor.monitor.WebSocketMonitorClient
@@ -95,6 +99,15 @@ private val InkColor = Color(0xFFF1E8DE)
 private val MutedInkColor = Color(0xFF9B8F84)
 private val TerracottaColor = Color(0xFFD97757)
 private val AlertColor = Color(0xFFE18D7C)
+private val SourceIconTint = Color(0xFFD97757)
+
+internal enum class SessionSource(val accessibilityLabel: String) {
+    CODEX("Codex source"),
+    CLAUDE("Claude source"),
+}
+
+internal fun sessionSource(sessionId: String): SessionSource =
+    if (isCodexSessionId(sessionId)) SessionSource.CODEX else SessionSource.CLAUDE
 
 internal class PairingScopedViewModelStoreOwner : ViewModelStoreOwner {
     override val viewModelStore = ViewModelStore()
@@ -851,6 +864,25 @@ private fun statusColor(state: SessionDisplayState): Color = when (state) {
     SessionDisplayState.IDLE -> Color(0xFFB6B1AB)
 }
 
+@Composable
+internal fun SessionSourceIcon(
+    source: SessionSource,
+    exposeSemantics: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
+    Image(
+        painter = painterResource(
+            id = when (source) {
+                SessionSource.CODEX -> com.example.claudephonemonitor.R.drawable.ic_source_codex
+                SessionSource.CLAUDE -> com.example.claudephonemonitor.R.drawable.ic_source_claude
+            },
+        ),
+        contentDescription = source.accessibilityLabel.takeIf { exposeSemantics },
+        colorFilter = ColorFilter.tint(SourceIconTint),
+        modifier = modifier,
+    )
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SessionSummaryPanel(
@@ -896,6 +928,30 @@ private fun SessionSummaryPanel(
                     modifier = Modifier.testTag("running-count"),
                 )
             }
+            Row(
+                modifier = Modifier
+                    .padding(start = markerSpace, bottom = (5f * scale).dp)
+                    .semantics { contentDescription = "Session source legend: Codex and Claude" },
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy((8f * scale).dp),
+            ) {
+                SessionSourceIcon(
+                    source = SessionSource.CODEX,
+                    exposeSemantics = false,
+                    modifier = Modifier.size((14f * scale).dp),
+                )
+                Box(
+                    modifier = Modifier
+                        .width((1f * scale).dp)
+                        .height((12f * scale).dp)
+                        .background(MutedInkColor.copy(alpha = 0.55f)),
+                )
+                SessionSourceIcon(
+                    source = SessionSource.CLAUDE,
+                    exposeSemantics = false,
+                    modifier = Modifier.size((14f * scale).dp),
+                )
+            }
             Text(
                 text = "Total Running · ${formatSessionCount(snapshot.totalRunningCount)} · Includes subagents",
                 color = MutedInkColor,
@@ -928,6 +984,13 @@ private fun SessionSummaryPanel(
                         textHeight = statusSize,
                         modifier = Modifier.width(statusWidth),
                     )
+                    SessionSourceIcon(
+                        source = sessionSource(session.sessionId),
+                        modifier = Modifier
+                            .size((16f * scale).dp)
+                            .testTag("session-source-${session.sessionId}"),
+                    )
+                    Spacer(modifier = Modifier.width((7f * scale).dp))
                     Text(
                         text = session.title,
                         color = InkColor,
