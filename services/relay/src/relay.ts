@@ -1435,9 +1435,10 @@ export class Relay {
       !isRecord(message.payload) || Object.keys(message.payload).length !== 0)) return undefined;
     if (eventType === "session_metadata_updated") {
       if (sessionId === "unknown" || !isRecord(message.payload) ||
-        Object.keys(message.payload).some((key) => !["source_started_at", "source_last_activity_at"].includes(key))) return undefined;
-      for (const value of Object.values(message.payload)) {
-        if (!safeWireTimestamp(value)) return undefined;
+        Object.keys(message.payload).some((key) => !["source_started_at", "source_last_activity_at", "source_execution_status"].includes(key))) return undefined;
+      for (const [key, value] of Object.entries(message.payload)) {
+        if (key === "source_execution_status") { if (value !== "unknown") return undefined; }
+        else if (!safeWireTimestamp(value)) return undefined;
       }
       if (message.task_id !== undefined || message.correlation_id !== undefined) return undefined;
     }

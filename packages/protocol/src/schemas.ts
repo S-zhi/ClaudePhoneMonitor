@@ -172,6 +172,7 @@ const payloadSchemas: Record<MonitorEventType, JsonSchema> = {
   [EVENT_TYPES.SESSION_METADATA_UPDATED]: strictObject({
     source_started_at: wireTimestampSchema,
     source_last_activity_at: wireTimestampSchema,
+    source_execution_status: { const: "unknown" },
   }),
   [EVENT_TYPES.SESSION_CLASSIFICATION_UPDATED]: strictObject({}),
   [EVENT_TYPES.TASK_STARTED]: strictObject({}),

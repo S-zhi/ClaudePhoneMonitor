@@ -57,6 +57,8 @@ test("metadata event and bounded history have strict safe wire shapes", () => {
   assert.equal(validateEventEnvelope({ ...metadata, payload: { source_started_at: "2026-02-30T00:00:00Z" } }).success, false);
   assert.equal(validateEventEnvelope({ ...metadata, payload: { source_started_at: "2026-10-02T00:00:00Z", source_last_activity_at: "2026-10-01T00:00:00Z" } }).success, false);
   assert.equal(validateEventEnvelope({ ...metadata, payload: { prompt: "private" } }).success, false);
+  assert.equal(validateEventEnvelope({ ...metadata, payload: { source_execution_status: "unknown" } }).success, true);
+  assert.equal(validateEventEnvelope({ ...metadata, payload: { source_execution_status: "working" } }).success, false);
   assert.equal(validateEventEnvelope({ ...metadata, session_id: "unknown" }).success, false);
   assert.equal(validateEventEnvelope({ ...metadata, task_id: "task-1" }).success, false);
   assert.equal(validateEventEnvelope({ ...metadata, correlation_id: "call-1" }).success, false);

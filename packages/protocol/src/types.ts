@@ -60,6 +60,7 @@ export type EventAckStatus = "accepted" | "duplicate" | "rejected";
 export interface SafeEventPayload {
   readonly source_started_at?: WireTimestamp;
   readonly source_last_activity_at?: WireTimestamp;
+  readonly source_execution_status?: "unknown";
   readonly tool_name?: string;
   readonly duration_ms?: number;
   readonly exit_code?: number;
@@ -95,6 +96,7 @@ export interface EventPayloadByType {
   readonly [EVENT_TYPES.SESSION_METADATA_UPDATED]: {
     readonly source_started_at?: WireTimestamp;
     readonly source_last_activity_at?: WireTimestamp;
+    readonly source_execution_status?: "unknown";
   };
   readonly [EVENT_TYPES.TASK_STARTED]: EmptyPayload;
   readonly [EVENT_TYPES.TOOL_STARTED]: {

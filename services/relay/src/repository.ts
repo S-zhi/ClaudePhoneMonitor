@@ -137,6 +137,7 @@ interface SessionState {
   /** Task completion is terminal until a newer task starts, even after recent_completion expires. */
   terminalTask?: boolean;
   completion?: RecentCompletion;
+  source_execution_unknown?: boolean;
 }
 
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
@@ -241,9 +242,20 @@ function applySessionEvent(
   next.session_kind = previous?.session_kind === "subagent" ? "subagent" : event.session_kind ?? previous?.session_kind ?? "main";
   if (event.event_type === "session_classification_updated") return next;
   if (event.event_type === "session_metadata_updated") {
-    const payload = event.payload as { source_started_at?: string; source_last_activity_at?: string };
+    const payload = event.payload as { source_started_at?: string; source_last_activity_at?: string; source_execution_status?: "unknown" };
     next.source_started_at = earlierTimestamp(next.source_started_at, payload.source_started_at);
     next.source_last_activity_at = laterTimestamp(next.source_last_activity_at, payload.source_last_activity_at);
+    if (payload.source_execution_status === "unknown") {
+      next.source_execution_unknown = true;
+      next.claude_state = "idle";
+      next.task_id = undefined;
+      next.task_started_at = undefined;
+      next.waiting_reason = undefined;
+      next.waiting_correlation_id = undefined;
+      next.waiting_tool_name = undefined;
+      next.terminalTask = true;
+      next.completion = undefined;
+    }
     if (event.session_title) {
       next.title = event.session_title;
       if (next.completion && (next.terminalTask ?? Boolean(next.completion)) &&
@@ -316,6 +328,7 @@ function applySessionEvent(
       break;
     case "task_started":
       next.claude_state = "working";
+      next.source_execution_unknown = false;
       // Repeated starts for the same explicit task must not shorten its age.
       if (!(event.task_id && next.task_id === event.task_id && next.task_started_at && !next.terminalTask)) {
         next.task_started_at = taskTimestamp(event.occurred_at) !== undefined ? event.occurred_at : undefined;
@@ -391,7 +404,7 @@ function aggregatedState(
   "claude_state" | "sessions" | "running_count" | "session_count" | "recent_completion" | "active_tasks" | "main_running_count" | "main_session_count" | "total_running_count"
 > {
   const nowMs = Date.parse(now);
-  const allActive = records.filter((record) => !record.ended && (record.last_activity_sequence ?? record.last_sequence) >= 0 &&
+  const allActive = records.filter((record) => !record.ended && !record.source_execution_unknown && (record.last_activity_sequence ?? record.last_sequence) >= 0 &&
     nowMs - Date.parse(record.last_activity_at) < SESSION_TTL_MS);
   const active = allActive.filter((record) => record.session_kind !== "subagent");
   const ordered = active.sort((a, b) =>
@@ -455,7 +468,7 @@ function presentInstallationState(state: InstallationState, records: SessionStat
       title: sessionDisplayName(record),
       ...(started ? { started_at: started } : {}),
       ...(lastActivity ? { last_activity_at: lastActivity } : {}),
-      activity_status: record.ended ? "ended" : !hasNativeActivity || nowMs - Date.parse(record.last_activity_at) >= SESSION_TTL_MS
+      activity_status: record.ended ? "ended" : record.source_execution_unknown ? "unknown" : !hasNativeActivity || nowMs - Date.parse(record.last_activity_at) >= SESSION_TTL_MS
         ? "unknown" : record.claude_state,
     };
   }).sort((a, b) => (Date.parse(b.last_activity_at ?? b.started_at ?? "") || 0) -

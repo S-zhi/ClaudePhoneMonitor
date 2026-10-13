@@ -153,6 +153,36 @@ test("metadata changes snapshot history without broadcasting or replaying activi
   }
 });
 
+test("unknown metadata revokes observed work without emitting a terminal event", () => {
+  const relay = new Relay({ autoStart: false, now: () => new Date("2026-10-02T00:00:10Z") });
+  const phoneMessages: ServerMessage[] = [];
+  const collector = relay.connect({ gateway: "collector", installation_id: "install-1", transport: { send: () => {} } });
+  const phone = relay.connect({ gateway: "android", installation_id: "install-1", transport: { send: (message) => phoneMessages.push(message) } });
+  const sessionId = `codex:sess:${"a".repeat(64)}`;
+  try {
+    relay.receive(collector.connection_id, JSON.stringify(event({ event_id: "unknown-start", session_id: sessionId,
+      agent_id: "codex", session_kind: "main", event_type: "task_started", task_id: `codex:turn:${"b".repeat(64)}`, payload: {} })));
+    const unknown = event({ event_id: "unknown-marker", sequence: 2, session_id: sessionId, agent_id: "codex",
+      session_kind: "main", event_type: "session_metadata_updated", payload: { source_execution_status: "unknown" } });
+    phoneMessages.length = 0;
+    relay.receive(collector.connection_id, JSON.stringify(unknown));
+    const state = relay.snapshot("install-1");
+    assert.equal(state.main_running_count, 0);
+    assert.equal(state.recent_completion, undefined);
+    assert.equal(state.history_sessions?.find((row) => row.session_id === sessionId)?.activity_status, "unknown");
+    assert.equal(phoneMessages.some((message) => message.type === "event"), false);
+
+    relay.receive(collector.connection_id, JSON.stringify({ ...unknown, event_id: "invalid-unknown", sequence: 3,
+      payload: { source_execution_status: "working" } }));
+    assert.equal(relay.snapshot("install-1").last_sequence, 2);
+    relay.receive(collector.connection_id, JSON.stringify(event({ event_id: "fresh-start", sequence: 3, session_id: sessionId,
+      agent_id: "codex", session_kind: "main", event_type: "task_started", task_id: `codex:turn:${"c".repeat(64)}`, payload: {} })));
+    assert.equal(relay.snapshot("install-1").main_running_count, 1);
+    assert.equal(relay.snapshot("install-1").recent_completion, undefined);
+  } finally { relay.stop(); }
+  void phone;
+});
+
 test("relay accepts a current quota sample without claiming a startup baseline", () => {
   const relay = new Relay({ autoStart: false });
   const collectorMessages = messages();

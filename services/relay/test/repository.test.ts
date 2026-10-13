@@ -132,6 +132,48 @@ test("metadata rename refreshes a recent completion label without changing its i
   }
 });
 
+test("unknown source execution revokes stale work without a false completion and fresh work clears it", () => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-unknown-execution-"));
+  const dbPath = join(directory, "relay.sqlite");
+  let sqlite = new SqliteRelayRepository(dbPath);
+  const memory = new InMemoryRelayRepository();
+  try {
+    for (const repository of [memory, sqlite]) {
+      repository.recordEvent(event({ event_id: "unknown-start", sequence: 1, session_id: "codex-session",
+        agent_id: "codex", session_kind: "main", event_type: "task_started", task_id: "codex:turn:one",
+        occurred_at: "2026-10-02T00:00:01Z", payload: {} }), "2026-10-02T00:00:01Z");
+      repository.recordEvent(event({ event_id: "unknown-metadata", sequence: 2, session_id: "codex-session",
+        agent_id: "codex", session_kind: "main", event_type: "session_metadata_updated",
+        occurred_at: "2026-10-02T00:00:02Z", payload: { source_execution_status: "unknown" } }), "2026-10-02T00:00:02Z");
+      let state = repository.getInstallationState("install-1", "2026-10-02T00:00:03Z")!;
+      assert.equal(state.main_running_count, 0);
+      assert.equal(state.active_tasks?.length, 0);
+      assert.equal(state.recent_completion, undefined);
+      assert.equal(state.history_sessions?.find((session) => session.session_id === "codex-session")?.activity_status, "unknown");
+      repository.recordEvent(event({ event_id: "unknown-restart", sequence: 3, session_id: "codex-session",
+        agent_id: "codex", session_kind: "main", event_type: "task_started", task_id: "codex:turn:two",
+        occurred_at: "2026-10-02T00:00:04Z", payload: {} }), "2026-10-02T00:00:04Z");
+      state = repository.getInstallationState("install-1", "2026-10-02T00:00:05Z")!;
+      assert.equal(state.main_running_count, 1);
+      assert.equal(state.history_sessions?.find((session) => session.session_id === "codex-session")?.activity_status, "working");
+    }
+    sqlite.close();
+    sqlite = new SqliteRelayRepository(dbPath);
+    sqlite.recordEvent(event({ event_id: "persist-start", sequence: 4, session_id: "persist-session",
+      agent_id: "codex", event_type: "task_started", task_id: "codex:turn:persist",
+      occurred_at: "2026-10-02T00:00:06Z", payload: {} }), "2026-10-02T00:00:06Z");
+    sqlite.recordEvent(event({ event_id: "persist-unknown", sequence: 5, session_id: "persist-session",
+      agent_id: "codex", event_type: "session_metadata_updated", payload: { source_execution_status: "unknown" },
+      occurred_at: "2026-10-02T00:00:07Z" }), "2026-10-02T00:00:07Z");
+    sqlite.close();
+    sqlite = new SqliteRelayRepository(dbPath);
+    assert.equal(sqlite.getInstallationState("install-1", "2026-10-02T00:00:08Z")?.history_sessions?.find((row) => row.session_id === "persist-session")?.activity_status, "unknown");
+  } finally {
+    sqlite.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("observed session start does not claim creation time without explicit source metadata", () => {
   for (const repository of [new InMemoryRelayRepository(), new SqliteRelayRepository(":memory:")]) {
     try {

@@ -1,0 +1,8 @@
+{
+  "name": "opencode-magpie-session-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "files": ["index.mjs", "monitor.mjs", "identity.mjs", "sources.mjs", "lifecycle.mjs", "command.mjs", "relay-bridge.mjs", "README.md", "test"]
+}
