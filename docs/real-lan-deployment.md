@@ -138,7 +138,7 @@ are not claims about a particular Hook payload schema.
 ## Mac setup
 
 1. Put the Mac and the Android device on the same trusted Wi-Fi or wired LAN.
-2. Install Node.js 20 or newer and the relay dependencies:
+2. Install Node.js 24.13.0 (the version pinned by `.node-version`) and the relay dependencies:
 
    ```bash
    npm install --prefix services/relay
