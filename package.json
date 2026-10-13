@@ -33,7 +33,8 @@
     "test:ci": "npm run build && node --test tests/ci/*.test.mjs",
     "check:shell": "node scripts/ci/check-shell.mjs",
     "check:workflows": "bash scripts/ci/check-workflows.sh",
-    "package:backend": "node scripts/ci/package-backend.mjs"
+    "package:backend": "node scripts/ci/package-backend.mjs",
+    "package:magpie": "node scripts/ci/package-magpie.mjs"
   },
   "devDependencies": {
     "eslint": "9.39.1",

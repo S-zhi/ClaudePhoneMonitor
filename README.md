@@ -207,6 +207,13 @@ Magpie 的标题可能退化为首条提示词，因此不会直接发送。Code
 Claude Code 的 Magpie 行在组合监听中排除，由现有 Hook 负责活动状态。
 配置边界和开发说明见 [Magpie 集成说明](docs/magpie-development.md)。
 
+独立 Magpie 桌面包入口默认开启此读取与 Codex 原生活动监听。桌面测试归档可在本地由
+`npm run build && npm run package:magpie` 生成；macOS 解压后先运行
+`scripts/setup-magpie-monitor.sh`，再运行 `scripts/start-magpie-monitor.sh --check` 和
+`scripts/start-magpie-monitor.sh --pair --open-qr`。它使用独立状态目录和 8788 端口，
+不会安装原服务的 Hook；需要 Node 24.13.0+（24.x）、Python 3、Swift 和 Magpie CLI。
+`--no-watch-codex` 可保存关闭选择。Android APK 目前仅供本地测试，尚未发布，也没有可下载的 GitHub Release；手机测试需从当前源码自行构建并安装 APK，再使用运行包的 QR 配对。
+
 Codex 会话名称只从本机原生标题元数据读取：优先使用 `state_*.sqlite` 的
 `threads.name`，其次是 `session_index.jsonl` 中同 UUID 的最新 `thread_name`，
 旧版无 name 时才使用安全的 `threads.title`；不从 prompt、消息正文或预览生成名称。

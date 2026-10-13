@@ -212,3 +212,19 @@ separate Usage watcher are not treated as proof that a task is still WORKING.
 ## Privacy boundary
 
 The normalizer is an allowlist. It retains only canonical lifecycle metadata, safe tool names, bounded duration/exit code, waiting reason, safe IDs, and timestamps. On `SessionStart`, it may also retain Claude's explicit `session_title` after rejecting paths, URLs, control characters, credential-like values, and titles longer than 64 characters. `prompt_id` is used as `task_id` only when an explicit `task_id` is absent. Claude identifiers outside the reserved `codex:` namespace remain unchanged; a collision is replaced with a stable SHA-256 namespaced ID. Codex session/task IDs use that reserved namespace and hashed source identities. Prompt text, assistant messages, tool input/result, command arguments, paths, stdout/stderr, secrets and unknown fields are discarded before the local outbox.
+
+## Standalone Magpie desktop package
+
+From the repository, `npm run build && npm run package:magpie` creates
+`artifacts/magpie-backend-<SOURCE_SHA>.tar.gz` and its SHA-256 file. The archive
+contains compiled services and locked manifests, with no `node_modules`,
+credentials or session data. On macOS, extract it, run
+`scripts/setup-magpie-monitor.sh` while online, then
+`scripts/start-magpie-monitor.sh --check` and
+`scripts/start-magpie-monitor.sh --pair --open-qr`. This needs Node 24.13.0
+through 24.x, Python 3, the Swift CLI, curl, OpenSSL and the Magpie CLI.
+The separate state directory is `~/.claude-phone-monitor-magpie` and the
+trusted-LAN Relay port is 8788. Magpie session metadata and native Codex
+activity watching are on by default; `--no-watch-codex` saves an opt-out.
+No Claude Hooks or existing monitor service settings are changed. Pair the
+independent Android build with this runtime's one-time QR.

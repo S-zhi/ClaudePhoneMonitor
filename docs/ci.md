@@ -1,6 +1,6 @@
 # CI 与本地复现
 
-`.github/workflows/ci.yml` 在每个 PR 以及 `main`、`dev/magpie` push 上运行。`Node checks` 与 `Android checks` 是稳定的合并检查；`Publish validated artifacts` 仅在 main push 的两个检查都成功后发布制品。CI 不需要 Claude、Codex 账户、API key、用户 Hook 或现有 Relay。
+`.github/workflows/ci.yml` 在每个 PR 以及 `main`、`dev/magpie` push 上运行。`Node checks` 与 `Android checks` 是稳定的合并检查；`Publish validated artifacts` 仅在 main push 的两个检查都成功后发布原有制品。当前 Magpie 只生成本地测试包：`dev/magpie` push 和以它为目标的 PR 执行无发行密钥的 Magpie lint、单元测试与 APK 构建，不暂存 Magpie 下载制品，也不创建 Release。
 
 Magpie 开发规则见 [Magpie 开发约定](magpie-development.md)：相关提交直接进入 `dev/magpie`，Magpie 功能禁止合并回 `main`。`branch-policy.yml` 提供只读取 PR 元数据的 `Prevent dev/magpie to main` 检查，要求 `dev/magpie`、`dev/magpie-*`、`codex/magpie-*` 的 PR 目标必须为 `dev/magpie`。该工作流尚未部署到远端基线分支并设为 required status check 前，远端门禁不生效；YAML 不会自行创建 GitHub 保护规则。
 
@@ -57,3 +57,9 @@ Issue #16 开始时的既有报告为 **0 errors、15 warnings**：8 条 `Gradle
 每次运行的 Node 日志、`reports/relay-smoke` 结果和 Android 日志、lint/测试报告保存为 `node-diagnostics-<github.sha>`、`android-diagnostics-<github.sha>`，保留 14 天。main 上验证的 backend/APK 先临时保存 1 天，全部检查成功后才发布 `backend-<github.sha>` 和 `apk-<github.sha>`，保留 14 天；名称中的 SHA 是该运行的 GitHub source SHA，可从 Actions run 核对，PR 运行可能使用合并测试 SHA。下载前确认两个检查与发布 job 均成功。APK 位于 `apps/android/build/outputs/apk/debug/android-debug.apk`，是 debug 构建，不是签名发布版。
 
 backend 压缩包含构建后的 protocol、collector、relay、对应锁文件、`.node-version`、`SOURCE_COMMIT` 与运行 README，不含 node_modules、用户配置或 secret。解压后按包内 README 在各包执行 `npm ci --omit=dev`，设置 `RELAY_AUTH_MODE=paired`、`RELAY_HOST`、`RELAY_DB_PATH`、`RELAY_BOOTSTRAP_SECRET` 和可达的 `RELAY_PUBLIC_URL`，用 `npm --prefix services/relay start` 启动 Relay；Collector 使用 `npm --prefix services/collector start`。保留 bootstrap secret 供配对使用。LAN 一键启动和 Hook 安装脚本在源码 checkout 中，完整步骤见 [真实 LAN 部署](real-lan-deployment.md) 与根 [README](../README.md)。
+
+## Magpie 开发下载
+
+当前仅本地构建测试包：`./gradlew --no-daemon :apps:android:lintMagpie :apps:android:testMagpieUnitTest :apps:android:assembleMagpie`，APK 在 `apps/android/build/outputs/apk/magpie/`；运行 `npm run build && npm run package:magpie` 可在 `artifacts/` 得到桌面后端包。APK 包名是 `com.example.claudephonemonitor.magpie`，可与日常应用并存。后端包是 macOS 启动材料，需要 Node 24.13+、Python 3 和 Magpie CLI；自动配对还调用 Swift CLI/CoreImage。它不是原生单文件程序，也不是 Magpie 插件。
+
+远端分发流程目前关闭：只有仓库变量 `MAGPIE_PUBLISH_ENABLED` **明确设为 `true`**，且配置长期保存的私有开发签名密钥 `MAGPIE_KEYSTORE_BASE64`、`MAGPIE_KEYSTORE_PASSWORD`、`MAGPIE_KEY_ALIAS`、`MAGPIE_KEY_PASSWORD`，才会在 `dev/magpie` push 上构建签名包、暂存制品并发布 Magpie 预发布版。未设置变量或设为 `false` 不读取密钥、不暂存制品、不发布。将来开启后，可在仓库 [Releases 页面](https://github.com/S-zhi/ClaudePhoneMonitor/releases) 查找 `magpie-dev-` tag，下载 `magpie-monitor.apk`、`magpie-backend.tar.gz`、`SHA256SUMS` 和 `build-manifest.json`。发布 job 独有 `contents: write`；脚本仍复核显式开关、事件、分支、两项检查结果、包内 `SOURCE_COMMIT` 和已存在 Release 的来源及摘要。

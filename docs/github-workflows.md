@@ -2,7 +2,7 @@
 
 本仓库的 `.github/` 复制自 [S-zhi/Juejin](https://github.com/S-zhi/Juejin)，源 commit：`b86acaa63e325e0bce565b8b8d21021e69c27b70`。
 
-项目 CI 的检查、前置条件、制品和合并保护配置见 [CI 指南](ci.md)。`ci.yml` 在 PR、`main` push 和 `dev/magpie` push 上运行；发布制品仍只从 `main` 产生。`branch-policy.yml` 提供名为 `Prevent dev/magpie to main` 的检查，要求 Magpie 分支 PR 只以 `dev/magpie` 为目标；部署并配置 required check 后才具有远端强制作用。以下三个工作流分别负责 issue 状态流转（`state-control.yaml`）、issue 动作控制（`action-control.yaml`）和标签同步（`sync-labels.yml`）。
+项目 CI 的检查、前置条件、制品和合并保护配置见 [CI 指南](ci.md)。`ci.yml` 在 PR、`main` push 和 `dev/magpie` push 上运行；main 的原有调试制品流程保留。Magpie 当前只做无发行密钥的变体检查及本地测试包构建，远端发布由默认关闭的 `MAGPIE_PUBLISH_ENABLED` 仓库变量控制。`branch-policy.yml` 提供名为 `Prevent dev/magpie to main` 的检查，要求 Magpie 分支 PR 只以 `dev/magpie` 为目标；部署并配置 required check 后才具有远端强制作用。以下三个工作流分别负责 issue 状态流转（`state-control.yaml`）、issue 动作控制（`action-control.yaml`）和标签同步（`sync-labels.yml`）。
 
 ## Magpie 分支规则
 

@@ -65,6 +65,9 @@ jobs:
         run: set -o pipefail; npm run test:live 2>&1 | tee ci-logs/live.log
       - name: Package backend
         run: set -o pipefail; npm run package:backend 2>&1 | tee ci-logs/package.log
+      - name: Package Magpie backend
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev/magpie' && vars.MAGPIE_PUBLISH_ENABLED == 'true'
+        run: set -o pipefail; npm run package:magpie 2>&1 | tee ci-logs/package-magpie.log
       - name: Upload Node diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -80,6 +83,14 @@ jobs:
         with:
           name: validated-backend-${{ github.sha }}
           path: artifacts/backend-${{ github.sha }}.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+      - name: Stage Magpie backend
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev/magpie' && vars.MAGPIE_PUBLISH_ENABLED == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: magpie-backend-${{ github.sha }}
+          path: artifacts/magpie-backend-${{ github.sha }}.tar.gz
           retention-days: 1
           if-no-files-found: error
   android-checks:
@@ -112,6 +123,31 @@ jobs:
           mkdir -p ci-logs
           set -o pipefail
           ./gradlew --no-daemon :apps:android:lintDebug :apps:android:testDebugUnitTest :apps:android:assembleDebug 2>&1 | tee ci-logs/android.log
+      - name: Check Magpie variant without distribution signing
+        if: (github.event_name == 'pull_request' && github.base_ref == 'dev/magpie') || (github.event_name == 'push' && github.ref == 'refs/heads/dev/magpie' && vars.MAGPIE_PUBLISH_ENABLED != 'true')
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon :apps:android:lintMagpie :apps:android:testMagpieUnitTest :apps:android:assembleMagpie 2>&1 | tee ci-logs/android-magpie-pr.log
+      - name: Prepare Magpie signing key
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev/magpie' && vars.MAGPIE_PUBLISH_ENABLED == 'true'
+        env:
+          MAGPIE_KEYSTORE_BASE64: ${{ secrets.MAGPIE_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$MAGPIE_KEYSTORE_BASE64"
+          umask 077
+          printf '%s' "$MAGPIE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/magpie-release.jks"
+      - name: Magpie lint, unit tests and signed APK
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev/magpie' && vars.MAGPIE_PUBLISH_ENABLED == 'true'
+        env:
+          MAGPIE_KEYSTORE_PATH: ${{ runner.temp }}/magpie-release.jks
+          MAGPIE_KEYSTORE_PASSWORD: ${{ secrets.MAGPIE_KEYSTORE_PASSWORD }}
+          MAGPIE_KEY_ALIAS: ${{ secrets.MAGPIE_KEY_ALIAS }}
+          MAGPIE_KEY_PASSWORD: ${{ secrets.MAGPIE_KEY_PASSWORD }}
+          MAGPIE_REQUIRE_SIGNING: '1'
+        run: |
+          set -o pipefail
+          export MAGPIE_VERSION_CODE=$((100000 + GITHUB_RUN_NUMBER))
+          ./gradlew --no-daemon :apps:android:lintMagpie :apps:android:testMagpieUnitTest :apps:android:assembleMagpie 2>&1 | tee ci-logs/android-magpie.log
       - name: Upload Android diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -128,6 +164,14 @@ jobs:
         with:
           name: validated-apk-${{ github.sha }}
           path: apps/android/build/outputs/apk/debug/*.apk
+          retention-days: 1
+          if-no-files-found: error
+      - name: Stage signed Magpie APK
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev/magpie' && vars.MAGPIE_PUBLISH_ENABLED == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: magpie-apk-${{ github.sha }}
+          path: apps/android/build/outputs/apk/magpie/*.apk
           retention-days: 1
           if-no-files-found: error
   publish-artifacts:
@@ -157,3 +201,33 @@ jobs:
           path: apk/*.apk
           if-no-files-found: error
           retention-days: 14
+  publish-magpie:
+    name: Publish Magpie development build
+    needs: [node-checks, android-checks]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev/magpie' && vars.MAGPIE_PUBLISH_ENABLED == 'true' && needs.node-checks.result == 'success' && needs.android-checks.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - uses: actions/download-artifact@v4
+        with:
+          name: magpie-backend-${{ github.sha }}
+          path: backend
+      - uses: actions/download-artifact@v4
+        with:
+          name: magpie-apk-${{ github.sha }}
+          path: apk
+      - name: Publish source-pinned Magpie prerelease
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MAGPIE_PUBLISH_ENABLED: ${{ vars.MAGPIE_PUBLISH_ENABLED }}
+          NODE_CHECKS_RESULT: ${{ needs.node-checks.result }}
+          ANDROID_CHECKS_RESULT: ${{ needs.android-checks.result }}
+        run: node scripts/ci/publish-magpie.mjs

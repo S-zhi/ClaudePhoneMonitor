@@ -6,6 +6,30 @@ plugins {
 
 // Opt-in device fixtures can coexist with the daily app and other test runs.
 val deviceTestApplicationIdSuffix = providers.gradleProperty("deviceTestApplicationIdSuffix").orNull
+val magpieSigningVariables = listOf(
+    "MAGPIE_KEYSTORE_PATH",
+    "MAGPIE_KEYSTORE_PASSWORD",
+    "MAGPIE_KEY_ALIAS",
+    "MAGPIE_KEY_PASSWORD",
+)
+val magpieSigningValues = magpieSigningVariables.associateWith { providers.environmentVariable(it).orNull }
+val magpieMissingSigningVariables = magpieSigningValues.filterValues { it.isNullOrBlank() }.keys
+val magpieRequireSigning = providers.environmentVariable("MAGPIE_REQUIRE_SIGNING").orNull == "1"
+val magpieSigningConfigured = magpieMissingSigningVariables.isEmpty()
+
+require(!magpieRequireSigning || magpieSigningConfigured) {
+    "Magpie distribution signing requires: ${magpieMissingSigningVariables.joinToString()}"
+}
+require(magpieMissingSigningVariables.size == magpieSigningVariables.size || magpieSigningConfigured) {
+    "Incomplete Magpie signing configuration; missing: ${magpieMissingSigningVariables.joinToString()}"
+}
+
+val magpieVersionCode = providers.environmentVariable("MAGPIE_VERSION_CODE").orNull?.let { value ->
+    require(value.toIntOrNull()?.let { it > 0 } == true) {
+        "MAGPIE_VERSION_CODE must be a positive integer"
+    }
+    value.toInt()
+}
 
 android {
     namespace = "com.example.claudephonemonitor"
@@ -25,6 +49,20 @@ android {
     buildTypes {
         debug {
             deviceTestApplicationIdSuffix?.let { applicationIdSuffix = it }
+        }
+        create("magpie") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".magpie"
+            versionNameSuffix = "-magpie"
+            matchingFallbacks += listOf("debug")
+            if (magpieSigningConfigured) {
+                signingConfig = signingConfigs.create("magpie") {
+                    storeFile = file(requireNotNull(magpieSigningValues["MAGPIE_KEYSTORE_PATH"]))
+                    storePassword = magpieSigningValues["MAGPIE_KEYSTORE_PASSWORD"]
+                    keyAlias = magpieSigningValues["MAGPIE_KEY_ALIAS"]
+                    keyPassword = magpieSigningValues["MAGPIE_KEY_PASSWORD"]
+                }
+            }
         }
         release {
             isMinifyEnabled = false
@@ -56,6 +94,14 @@ android {
 
     testOptions {
         unitTests.isReturnDefaultValues = true
+    }
+}
+
+androidComponents {
+    onVariants(selector().withBuildType("magpie")) { variant ->
+        magpieVersionCode?.let { code ->
+            variant.outputs.forEach { it.versionCode.set(code) }
+        }
     }
 }
 
