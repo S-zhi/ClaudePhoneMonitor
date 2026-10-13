@@ -3,6 +3,7 @@ export const SCHEMA_VERSION = 1 as const;
 export const EVENT_TYPES = [
   "session_started",
   "session_title_updated",
+  "session_metadata_updated",
   "session_classification_updated",
   "task_started",
   "tool_started",
@@ -56,6 +57,8 @@ export interface SafeEventPayload {
   status?: ApprovalStatus;
   can_respond?: boolean;
   expires_at?: string;
+  source_started_at?: string;
+  source_last_activity_at?: string;
 }
 
 /** Canonical v1 event wire envelope. */
@@ -65,6 +68,7 @@ export interface EventEnvelope {
   event_id: string;
   installation_id: string;
   session_id: string;
+  agent_id?: string;
   task_id?: string;
   session_title?: string;
   session_kind?: SessionKind;
@@ -238,6 +242,7 @@ export interface Outbox<T> {
 export interface NormalizedHookEvent {
   event_type: EventType;
   session_id: string;
+  agent_id?: string;
   task_id?: string;
   session_title?: string;
   session_kind?: SessionKind;
@@ -258,7 +263,7 @@ export function isSafeEventPayload(value: unknown): value is SafeEventPayload {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   for (const key of Object.keys(record)) {
-    if (!["tool_name", "duration_ms", "exit_code", "reason", "request_id", "source", "status", "can_respond", "expires_at"].includes(key)) return false;
+    if (!["tool_name", "duration_ms", "exit_code", "reason", "request_id", "source", "status", "can_respond", "expires_at", "source_started_at", "source_last_activity_at"].includes(key)) return false;
   }
   if (record.tool_name !== undefined && typeof record.tool_name !== "string") return false;
   if (record.reason !== undefined && !isWaitingReason(record.reason)) return false;
@@ -269,6 +274,9 @@ export function isSafeEventPayload(value: unknown): value is SafeEventPayload {
   if (record.source === "claude_code" && record.status === "resolved") return false;
   if (record.can_respond !== undefined && typeof record.can_respond !== "boolean") return false;
   if (record.expires_at !== undefined && (typeof record.expires_at !== "string" || Number.isNaN(Date.parse(record.expires_at)))) return false;
+  for (const key of ["source_started_at", "source_last_activity_at"] as const) {
+    if (record[key] !== undefined && (typeof record[key] !== "string" || !Number.isFinite(Date.parse(record[key])) || new Date(record[key]).toISOString() !== record[key])) return false;
+  }
   if (
     record.duration_ms !== undefined &&
     (typeof record.duration_ms !== "number" || !Number.isInteger(record.duration_ms) || record.duration_ms < 0)
@@ -301,9 +309,11 @@ export function isEventEnvelope(value: unknown): value is EventEnvelope {
     typeof candidate.event_id === "string" &&
     typeof candidate.installation_id === "string" &&
     typeof candidate.session_id === "string" &&
+    (candidate.agent_id === undefined || (typeof candidate.agent_id === "string" && /^[a-z0-9._-]{1,64}$/.test(candidate.agent_id))) &&
     Number.isSafeInteger(candidate.sequence) &&
     typeof candidate.occurred_at === "string" &&
     isEventType(candidate.event_type) &&
-    isSafeEventPayload(candidate.payload)
+    isSafeEventPayload(candidate.payload) &&
+    (candidate.event_type === "session_metadata_updated" || (candidate.payload?.source_started_at === undefined && candidate.payload?.source_last_activity_at === undefined))
   );
 }

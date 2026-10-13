@@ -3,6 +3,7 @@ export const RELAY_SCHEMA_VERSION = 1 as const;
 export const EVENT_TYPES = [
   "session_started",
   "session_title_updated",
+  "session_metadata_updated",
   "session_classification_updated",
   "task_started",
   "tool_started",
@@ -109,6 +110,15 @@ export interface SessionSummary {
   last_activity_sequence: number;
 }
 
+export interface HistorySession {
+  session_id: string;
+  agent_id?: AgentId;
+  title: string;
+  started_at?: string;
+  last_activity_at?: string;
+  activity_status: "working" | "waiting" | "idle" | "ended" | "unknown";
+}
+
 export interface RecentCompletion {
   session_id: string;
   task_id?: string;
@@ -177,6 +187,7 @@ export interface SnapshotMessage {
   last_sequence: number | null;
   updated_at: string;
   sessions?: SessionSummary[];
+  history_sessions?: HistorySession[];
   main_running_count?: number;
   main_session_count?: number;
   total_running_count?: number;
@@ -356,6 +367,7 @@ export interface InstallationState {
   activity?: SnapshotActivity;
   updated_at: string;
   sessions?: SessionSummary[];
+  history_sessions?: HistorySession[];
   main_running_count?: number;
   main_session_count?: number;
   total_running_count?: number;

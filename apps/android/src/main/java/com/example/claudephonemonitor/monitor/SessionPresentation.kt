@@ -1,6 +1,10 @@
 package com.example.claudephonemonitor.monitor
 
 import java.security.MessageDigest
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 /** The visual result is local presentation state; the wire session state stays unchanged. */
 enum class SessionDisplayState(val label: String) {
@@ -32,6 +36,19 @@ internal fun fallbackSessionTitle(sessionId: String): String {
         .takeLast(3).joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
     return "会话 $suffix"
 }
+
+internal fun sessionSourceLabel(agentId: String?, sessionId: String): String = when {
+    agentId == "magpie" -> "Magpie"
+    agentId == "codex" || (agentId == null && codexSessionId.matches(sessionId)) -> "Codex"
+    agentId == "claude_code" || agentId == "claude" -> "Claude"
+    agentId.isNullOrBlank() -> "Claude"
+    else -> agentId
+}
+
+internal fun formatHistoryTime(value: String): String = wireTimestampMillis(value)?.let {
+    Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault())
+        .format(DateTimeFormatter.ofPattern("MMM d, HH:mm", Locale.getDefault()))
+} ?: "unknown"
 
 /** Stop hooks may omit task_id; only the matching authoritative result may fill it in. */
 internal fun RecentCompletion.matchesCompletion(other: RecentCompletion?): Boolean =

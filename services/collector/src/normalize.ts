@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { safeAgentId } from "./agent-identity.js";
 import {
   EVENT_TYPES,
   isWaitingReason,
@@ -73,6 +74,7 @@ const MAX_TIMESTAMP_SKEW_MS = 366 * 24 * 60 * 60 * 1000;
 
 export interface NormalizeOptions {
   now?: Date | (() => Date);
+  trustedAgentId?: string;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -148,6 +150,21 @@ function safeOccurredAt(record: Record<string, unknown>, now: Date): string {
   return parsed.toISOString();
 }
 
+function safeSourceTimestamp(value: unknown, now: Date): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(value);
+  if (!parts) return undefined;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, zoneHourText, zoneMinuteText] = parts;
+  const year = Number(yearText), month = Number(monthText), day = Number(dayText);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  if (days === undefined || day < 1 || day > days || Number(hourText) > 23 || Number(minuteText) > 59 ||
+      Number(secondText) > 59 || (zoneHourText !== undefined && (Number(zoneHourText) > 23 || Number(zoneMinuteText) > 59))) return undefined;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || parsed < MIN_TIMESTAMP_MS || parsed > now.valueOf() + MAX_TIMESTAMP_SKEW_MS) return undefined;
+  return new Date(parsed).toISOString();
+}
+
 function normalizeToolName(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const canonical = SAFE_TOOL_NAMES.get(value.toLowerCase());
@@ -195,6 +212,8 @@ function deriveEventType(record: Record<string, unknown>): EventType | undefined
     session_started: "session_started",
     sessiontitleupdated: "session_title_updated",
     session_title_updated: "session_title_updated",
+    sessionmetadataupdated: "session_metadata_updated",
+    session_metadata_updated: "session_metadata_updated",
     sessionend: "session_ended",
     sessionended: "session_ended",
     session_end: "session_ended",
@@ -255,15 +274,19 @@ export function normalizeHookEvent(
   if (eventType === "approval_requested" || eventType === "approval_resolved") return null;
 
   const now = currentDate(options);
+  const rawAgentId = record.agent_id ?? record.agentId;
+  const trustedAgentId = safeAgentId(options?.trustedAgentId);
+  const requestedAgentId = rawAgentId === undefined ? "claude_code" : safeAgentId(rawAgentId);
+  const agentId = trustedAgentId ?? (requestedAgentId === "codex" ? "claude_code" : requestedAgentId);
   const rawSessionId = getString(record, "session_id", "sessionId");
-  const taskId = escapeClaudeIdentifier(
+  const safeSessionCandidate = safeIdentifier(rawSessionId);
+  const taskIdCandidate =
     safeIdentifier(getString(record, "task_id", "taskId"))
-      ?? safeIdentifier(getString(record, "prompt_id", "promptId")),
-    "task",
-  );
+      ?? safeIdentifier(getString(record, "prompt_id", "promptId"));
+  const taskId = trustedAgentId === "codex" ? taskIdCandidate : escapeClaudeIdentifier(taskIdCandidate, "task");
   // Accept only explicit native labels on lifecycle/title metadata events;
   // prompt text, commands and paths are never considered title sources.
-  const sessionTitle = ["session_started", "task_started", "task_finished", "session_title_updated"].includes(eventType)
+  const sessionTitle = ["session_started", "task_started", "task_finished", "session_title_updated", "session_metadata_updated"].includes(eventType)
     ? safeSessionTitle(getString(record, "session_title", "sessionTitle"))
     : undefined;
   if (eventType === "session_title_updated" && !sessionTitle) return null;
@@ -311,18 +334,28 @@ export function normalizeHookEvent(
     const reason = interactionReason ?? waitingReason(record, nestedPayload, toolName);
     if (reason !== undefined) payload.reason = reason;
   }
+  if (eventType === "session_metadata_updated") {
+    const started = safeSourceTimestamp(nestedPayload.source_started_at ?? record.source_started_at, now);
+    const activity = safeSourceTimestamp(nestedPayload.source_last_activity_at ?? record.source_last_activity_at, now);
+    if (started) payload.source_started_at = started;
+    if (activity) payload.source_last_activity_at = activity;
+    if (!sessionTitle && !started && !activity && !(trustedAgentId && safeSessionCandidate && safeSessionCandidate !== "unknown")) return null;
+  }
 
-  const safeSession =
-    escapeClaudeIdentifier(safeIdentifier(rawSessionId), "session") ?? "unknown";
+  const safeSession = (trustedAgentId === "codex" ? safeSessionCandidate : escapeClaudeIdentifier(safeSessionCandidate, "session")) ?? "unknown";
 
   return {
     event_type: eventType,
     session_id: safeSession,
-    ...(taskId ? { task_id: taskId } : {}),
+    ...(agentId ? { agent_id: agentId } : {}),
+    ...(taskId && eventType !== "session_metadata_updated" ? { task_id: taskId } : {}),
     ...(sessionTitle ? { session_title: sessionTitle } : {}),
     occurred_at: safeOccurredAt(record, now),
-    payload: eventType === "session_title_updated" ? {} : payload,
-    ...(correlationId ? { correlation_id: correlationId } : {}),
+    payload: eventType === "session_title_updated" ? {} : eventType === "session_metadata_updated"
+      ? { ...(payload.source_started_at ? { source_started_at: payload.source_started_at } : {}),
+          ...(payload.source_last_activity_at ? { source_last_activity_at: payload.source_last_activity_at } : {}) }
+      : payload,
+    ...(correlationId && eventType !== "session_metadata_updated" ? { correlation_id: correlationId } : {}),
   };
 }
 

@@ -121,6 +121,38 @@ test("preserves safe agent metadata while rejecting unsafe identifiers", () => {
   assert.equal(invalid, undefined);
 });
 
+test("metadata changes snapshot history without broadcasting or replaying activity events", () => {
+  const relay = new Relay({ autoStart: false, now: () => new Date("2026-10-02T00:00:10Z") });
+  const collectorMessages: ServerMessage[] = [];
+  const phoneMessages: ServerMessage[] = [];
+  const collector = relay.connect({ gateway: "collector", installation_id: "install-1",
+    transport: { send: (message) => collectorMessages.push(message) } });
+  const phone = relay.connect({ gateway: "android", installation_id: "install-1",
+    transport: { send: (message) => phoneMessages.push(message) } });
+  try {
+    const metadata = event({ event_type: "session_metadata_updated", agent_id: "magpie", session_id: "agent-1",
+      session_title: "An Agent session", payload: { source_started_at: "2026-09-30T00:00:00Z",
+        source_last_activity_at: "2026-10-01T00:00:00Z" } });
+    phoneMessages.length = 0;
+    relay.receive(collector.connection_id, JSON.stringify(metadata));
+    assert.equal(phoneMessages.filter((message) => message.type === "event").length, 0);
+    assert.equal(phoneMessages.some((message) => message.type === "snapshot"), true);
+    assert.equal(relay.snapshot("install-1").history_sessions?.[0]?.activity_status, "unknown");
+    assert.equal(relay.snapshot("install-1").main_session_count, 0);
+    phoneMessages.length = 0;
+    relay.receive(phone.connection_id, JSON.stringify({ type: "resume", schema_version: 1,
+      installation_id: "install-1", last_sequence: 0 }));
+    assert.equal(phoneMessages.filter((message) => message.type === "event").length, 0);
+    const bad = { ...metadata, event_id: "bad-metadata", sequence: 2,
+      payload: { source_last_activity_at: "2026-02-30T00:00:00Z" } };
+    relay.receive(collector.connection_id, JSON.stringify(bad));
+    assert.equal(collectorMessages.some((message) => message.type === "event_ack" && message.event_id === "bad-metadata" && !message.accepted), true);
+    assert.equal(relay.snapshot("install-1").last_sequence, 1);
+  } finally {
+    relay.stop();
+  }
+});
+
 test("relay accepts a current quota sample without claiming a startup baseline", () => {
   const relay = new Relay({ autoStart: false });
   const collectorMessages = messages();

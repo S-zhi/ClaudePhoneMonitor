@@ -61,6 +61,7 @@ enum class MonitorEventName(val wireValue: String) {
     TASK_FAILED("task_failed"),
     SESSION_STARTED("session_started"),
     SESSION_TITLE_UPDATED("session_title_updated"),
+    SESSION_METADATA_UPDATED("session_metadata_updated"),
     SESSION_ENDED("session_ended"),
     SESSION_CLASSIFICATION_UPDATED("session_classification_updated"),
     UNKNOWN("unknown"),
@@ -77,6 +78,7 @@ data class MonitorSnapshot(
     val updatedAt: String = "",
     /** Present only on new Relay snapshots. Its presence means the list is authoritative. */
     val sessions: List<SessionSummary>? = null,
+    val historySessions: List<HistorySession>? = null,
     val mainRunningCount: Int? = null,
     val mainSessionCount: Int? = null,
     val totalRunningCount: Int? = null,
@@ -212,6 +214,20 @@ data class SessionSummary(
     /** Null identifies older Relay versions without a durable task result. */
     val taskCompleted: Boolean? = null,
     val agentId: String? = null,
+)
+
+enum class HistoryActivityStatus(val wireValue: String, val label: String) {
+    WORKING("working", "Working"), WAITING("waiting", "Waiting"), IDLE("idle", "Idle"),
+    ENDED("ended", "Ended"), UNKNOWN("unknown", "Activity unknown"),
+}
+
+data class HistorySession(
+    val sessionId: String,
+    val title: String,
+    val activityStatus: HistoryActivityStatus,
+    val agentId: String? = null,
+    val startedAt: String? = null,
+    val lastActivityAt: String? = null,
 )
 
 data class RecentCompletion(
@@ -387,6 +403,25 @@ data class MonitorEvent(
                                     ?.takeIf { state == ClaudeState.WAITING && it in USER_ACTION_WAITING_REASONS },
                             ),
                         )
+                    }
+                }
+            },
+            historySessions = json.optJSONArray("history_sessions")?.let { array ->
+                buildList {
+                    for (index in 0 until minOf(array.length(), 50)) {
+                        val item = array.optJSONObject(index) ?: continue
+                        val id = item.stringOrNull("session_id")?.takeUnless { it == "unknown" } ?: continue
+                        val status = HistoryActivityStatus.entries.firstOrNull {
+                            it.wireValue == item.optString("activity_status")
+                        } ?: continue
+                        add(HistorySession(
+                            sessionId = id,
+                            title = item.optString("title").ifBlank { fallbackSessionTitle(id) },
+                            activityStatus = status,
+                            agentId = item.agentIdOrNull(),
+                            startedAt = item.stringOrNull("started_at")?.takeIf { wireTimestampMillis(it) != null },
+                            lastActivityAt = item.stringOrNull("last_activity_at")?.takeIf { wireTimestampMillis(it) != null },
+                        ))
                     }
                 }
             },
@@ -597,6 +632,20 @@ fun MonitorSnapshot.toJson(): JSONObject = JSONObject().apply {
                     session.taskCompleted?.let { put("task_completed", it) }
                     put("last_activity_sequence", session.lastActivitySequence)
                     session.waitingReason?.takeIf { session.claudeState == ClaudeState.WAITING }?.let { put("waiting_reason", it) }
+                })
+            }
+        })
+    }
+    historySessions?.let { rows ->
+        put("history_sessions", org.json.JSONArray().apply {
+            rows.take(50).forEach { session ->
+                put(JSONObject().apply {
+                    put("session_id", session.sessionId)
+                    session.agentId?.let { put("agent_id", it) }
+                    put("title", session.title)
+                    put("activity_status", session.activityStatus.wireValue)
+                    session.startedAt?.let { put("started_at", it) }
+                    session.lastActivityAt?.let { put("last_activity_at", it) }
                 })
             }
         })
@@ -820,6 +869,7 @@ fun MonitorEventName.toPetState(): PetState = when (this) {
     MonitorEventName.TOOL_FINISHED -> PetState.WORKING
     MonitorEventName.SESSION_STARTED,
     MonitorEventName.SESSION_TITLE_UPDATED,
+    MonitorEventName.SESSION_METADATA_UPDATED,
     MonitorEventName.SESSION_CLASSIFICATION_UPDATED,
     MonitorEventName.SESSION_ENDED,
     MonitorEventName.APPROVAL_RESOLVED,

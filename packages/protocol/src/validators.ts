@@ -1,4 +1,4 @@
-import { FORBIDDEN_FORWARD_KEYS, MESSAGE_TYPES } from "./constants.js";
+import { EVENT_TYPES, FORBIDDEN_FORWARD_KEYS, MESSAGE_TYPES } from "./constants.js";
 import {
   EVENT_ENVELOPE_SCHEMA,
   EVENT_PAYLOAD_SCHEMAS,
@@ -29,8 +29,15 @@ const isRecord = (value: unknown): value is UnknownRecord =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 function isWireTimestamp(value: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
-    && Number.isFinite(Date.parse(value));
+  const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(value);
+  if (!parts) return false;
+  const [, y, m, d, h, min, sec, zoneH, zoneMin] = parts;
+  const year = Number(y), month = Number(m), day = Number(d);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  return days !== undefined && day >= 1 && day <= days && Number(h) < 24 && Number(min) < 60 &&
+    Number(sec) < 60 && (zoneH === undefined || (Number(zoneH) < 24 && Number(zoneMin) < 60)) &&
+    Number.isFinite(Date.parse(value));
 }
 
 const pathFor = (path: string, key: string): string =>
@@ -205,6 +212,10 @@ export function validateEventEnvelope(value: unknown): ValidationResult<EventEnv
   const result = resultFor<EventEnvelope>(value, EVENT_ENVELOPE_SCHEMA);
   if (!result.success) return result;
   const payload = result.data.payload as SafeEventPayload;
+  if (result.data.event_type === EVENT_TYPES.SESSION_METADATA_UPDATED && payload.source_started_at && payload.source_last_activity_at &&
+    Date.parse(payload.source_last_activity_at) < Date.parse(payload.source_started_at)) {
+    return { success: false, issues: [{ path: "$.payload.source_last_activity_at", message: "must not precede source_started_at" }] };
+  }
   if (payload.source === "codex" && (payload.can_respond !== false || !["pending", "resolved", "unknown"].includes(String(payload.status)))) {
     return { success: false, issues: [{ path: "$.payload", message: "Codex approvals are observations and cannot accept decisions or claim approval outcomes" }] };
   }

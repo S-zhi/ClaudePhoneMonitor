@@ -6,6 +6,26 @@ import org.junit.Test
 
 class MonitorModelsTest {
     @Test
+    fun historySessionsRoundTripWithUnknownActivityAndSourceFacts() {
+        val history = listOf(
+            HistorySession("magpie-1", "A project", HistoryActivityStatus.UNKNOWN,
+                agentId = "magpie", startedAt = "2026-10-01T00:00:00Z", lastActivityAt = "2026-10-02T00:00:00Z"),
+            HistorySession("codex-1", "Finished", HistoryActivityStatus.ENDED, agentId = "codex"),
+        )
+        val snapshot = MonitorSnapshot(historySessions = history)
+        val decoded = requireNotNull(MonitorEvent.fromWireJson(MonitorEvent(MonitorEventType.SNAPSHOT, snapshot = snapshot).toWireJson()))
+        assertEquals(history, decoded.snapshot?.historySessions)
+        assertEquals("Activity unknown", decoded.snapshot?.historySessions?.first()?.activityStatus?.label)
+        assertEquals("Magpie", sessionSourceLabel(history[0].agentId, history[0].sessionId))
+        assertEquals("Codex", sessionSourceLabel(history[1].agentId, history[1].sessionId))
+        assertEquals("Claude", sessionSourceLabel(null, "legacy-claude-session"))
+        assertEquals("Codex", sessionSourceLabel(null, "codex:sess:${"a".repeat(64)}"))
+        val malformed = requireNotNull(MonitorEvent.fromWireJson(
+            """{"type":"snapshot","history_sessions":[{"session_id":"one","title":"Safe","activity_status":"unknown","last_activity_at":"bad"}]}"""))
+        assertEquals(null, malformed.snapshot?.historySessions?.single()?.lastActivityAt)
+    }
+
+    @Test
     fun durableSessionResultsRoundTripAndMalformedFlagsStayUnknown() {
         val rows = listOf(
             SessionSummary("done", "Done task", ClaudeState.IDLE, 3, taskCompleted = true),

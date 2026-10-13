@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import { normalizeHookEvent, safeSessionTitle } from "../src/normalize.ts";
 import { Collector } from "../src/collector.ts";
-import { isSafeEventPayload } from "../src/types.ts";
+import { isEventEnvelope, isSafeEventPayload } from "../src/types.ts";
+import { agentSessionId, safeAgentId } from "../src/agent-identity.ts";
 
 const now = new Date("2026-10-02T11:00:00.000Z");
 
@@ -50,6 +51,7 @@ test("canonical event_type and allowlisted payload survive local socket normaliz
   assert.deepEqual(normalized, {
     event_type: "tool_finished",
     session_id: "s1",
+    agent_id: "claude_code",
     task_id: "t1",
     correlation_id: "c1",
     occurred_at: "2026-10-02T10:59:00.000Z",
@@ -154,6 +156,7 @@ test("SessionStart carries only a safe explicit title and prompt_id fills task_i
   assert.deepEqual(normalized, {
     event_type: "session_started",
     session_id: "s1",
+    agent_id: "claude_code",
     task_id: "round-2",
     session_title: "Release review",
     occurred_at: now.toISOString(),
@@ -269,4 +272,59 @@ test("collector preserves the sanitized title and normalized prompt_id on the wi
   assert.equal(outboxText.includes("/Users/alice/private"), false);
   assert.equal(outboxText.includes("C:\\private\\project"), false);
   assert.equal(outboxText.includes("\\\\server\\share"), false);
+});
+
+test("agent identity is canonical and Codex namespace requires a trusted adapter", () => {
+  assert.equal(safeAgentId("claude-code"), "claude_code");
+  assert.equal(safeAgentId("Open-Code"), undefined);
+  assert.equal(safeAgentId("private key"), undefined);
+  const uuid = "019c7714-3b77-74d1-9866-e1f484aae2ab";
+  assert.equal(agentSessionId("codex", uuid), `codex:sess:${createHash("sha256").update(uuid).digest("hex")}`);
+  assert.equal(agentSessionId("pi", "private-id").startsWith("agent_"), true);
+  const claimed = normalizeHookEvent({ event_type: "session_started", session_id: "codex:sess:fake", agent_id: "codex" }, { now });
+  assert.equal(claimed?.agent_id, "claude_code");
+  assert.equal(claimed?.session_id.startsWith("claude:session:"), true);
+  const trusted = normalizeHookEvent({ event_type: "session_started", session_id: agentSessionId("codex", uuid), agent_id: "codex" }, { now, trustedAgentId: "codex" });
+  assert.equal(trusted?.session_id, agentSessionId("codex", uuid));
+  assert.equal(trusted?.agent_id, "codex");
+});
+
+test("source timestamps are accepted only on metadata updates and never fabricated", () => {
+  const metadata = normalizeHookEvent({ event_type: "session_metadata_updated", agent_id: "pi", session_id: "s1",
+    session_title: "  Work   title ", payload: { source_started_at: "2026-10-01T09:00:00Z",
+      source_last_activity_at: "not a date", private_note: "do not send" } }, { now });
+  assert.equal(metadata?.agent_id, "pi");
+  assert.equal(metadata?.session_title, "Work title");
+  assert.deepEqual(metadata?.payload, { source_started_at: "2026-10-01T09:00:00.000Z" });
+  assert.equal(normalizeHookEvent({ event_type: "session_metadata_updated", session_id: "s1", source_started_at: "2026-02-30T09:00:00Z" }, { now }), null);
+  assert.equal(normalizeHookEvent({ event_type: "session_metadata_updated", session_id: "s1", source_started_at: "garbage" }, { now }), null);
+  assert.deepEqual(normalizeHookEvent({ event_type: "task_started", session_id: "s1", source_started_at: "2026-10-01T09:00:00Z" }, { now })?.payload, {});
+  const identityOnly = normalizeHookEvent({ event_type: "session_metadata_updated", session_id: "agent_0123456789abcdef0123456789abcdef",
+    agent_id: "pi", task_id: "private-task", correlation_id: "private-correlation", payload: { tool_name: "Bash" } }, { now, trustedAgentId: "pi" });
+  assert.deepEqual(identityOnly?.payload, {});
+  assert.equal(identityOnly?.task_id, undefined);
+  assert.equal(identityOnly?.correlation_id, undefined);
+  assert.equal(identityOnly?.agent_id, "pi");
+  assert.equal(normalizeHookEvent({ event_type: "session_metadata_updated", session_id: "agent_0123456789abcdef0123456789abcdef" },
+    { now, trustedAgentId: "pi" })?.agent_id, "pi");
+  assert.equal(normalizeHookEvent({ event_type: "session_metadata_updated", session_id: "unknown", agent_id: "pi" }, { now, trustedAgentId: "pi" }), null);
+  assert.equal(normalizeHookEvent({ event_type: "session_metadata_updated", session_id: "/private", agent_id: "pi" }, { now, trustedAgentId: "pi" }), null);
+});
+
+test("trusted Collector ingress validates agent_id before enqueuing", async () => {
+  let sequence = 0;
+  const collector = new Collector({ installationId: "installation-1", now: () => now,
+    sequence: { next: async () => ++sequence, current: () => sequence },
+    outbox: { enqueue: async (input) => input as never, size: async () => 0 } });
+  const base = { event_type: "task_started" as const, session_id: "s1", occurred_at: now.toISOString(), payload: {} };
+  const invalid = await collector.ingestNormalized({ ...base, agent_id: "private agent name" });
+  assert.equal(invalid.agent_id, undefined);
+  const canonical = await collector.ingestNormalized({ ...base, agent_id: "claude-code" });
+  assert.equal(canonical.agent_id, "claude_code");
+  const metadata = await collector.ingestNormalized({ ...base, event_type: "session_metadata_updated", agent_id: "pi",
+    task_id: "private-task", correlation_id: "private-correlation", payload: { tool_name: "Bash" } });
+  assert.equal(metadata.task_id, undefined);
+  assert.equal(metadata.correlation_id, undefined);
+  assert.deepEqual(metadata.payload, {});
+  assert.equal(isEventEnvelope(metadata), true);
 });

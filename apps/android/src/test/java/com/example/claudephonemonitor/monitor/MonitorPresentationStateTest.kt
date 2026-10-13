@@ -21,6 +21,19 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class MonitorPresentationStateTest {
     @Test
+    fun metadataEventAdvancesSequenceWithoutChangingActivityOrReminder() {
+        var state = reduce(MonitorPresentationState(), snapshot(1, PetState.IDLE), 0L)
+        state = reduce(state, snapshot(2, PetState.WORKING), 100L)
+        val deadline = state.changeDeadlineMs
+        state = reduce(state, MonitorEvent(type = MonitorEventType.EVENT,
+            name = MonitorEventName.SESSION_METADATA_UPDATED, sessionId = "historical",
+            agentId = "magpie", sequence = 3, sessionTitle = "Renamed"), 1_000L)
+        assertEquals(PetState.WORKING, state.baseState)
+        assertEquals(deadline, state.changeDeadlineMs)
+        assertEquals(3L, state.lastSequence)
+    }
+
+    @Test
     fun allSixStatusesWithoutLongTaskEvidenceExpireAtExactFiveSecondBoundary() {
         val cases = listOf(
             Triple(PetState.IDLE, snapshot(2, PetState.IDLE), snapshot(1, PetState.WORKING)),

@@ -167,6 +167,7 @@ export function codexEvent(
 ): NormalizedHookEvent {
   return {
     event_type,
+    agent_id: "codex",
     ...(sessionKind ? { session_kind: sessionKind } : {}),
     session_id: codexSessionId(sessionHash),
     ...(turnHash ? { task_id: codexTaskId(turnHash) } : {}),

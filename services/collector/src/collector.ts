@@ -1,6 +1,7 @@
 import { eventId, type LocalSequence } from "./sequence.js";
 import { normalizeHookEvent, type NormalizeOptions } from "./normalize.js";
-import type { EventEnvelope, Outbox, NormalizedHookEvent, RelayOutboundMessage } from "./types.js";
+import { safeAgentId } from "./agent-identity.js";
+import { isSafeEventPayload, type EventEnvelope, type Outbox, type NormalizedHookEvent, type RelayOutboundMessage } from "./types.js";
 
 export interface CollectorOptions {
   installationId: string;
@@ -24,6 +25,13 @@ export class Collector {
   }
 
   public async ingestNormalized(normalized: NormalizedHookEvent): Promise<EventEnvelope> {
+    const agentId = safeAgentId(normalized.agent_id);
+    const { source_started_at: _started, source_last_activity_at: _activity, ...ordinaryPayload } = normalized.payload;
+    const metadata = normalized.event_type === "session_metadata_updated";
+    const metadataPayload = metadata && isSafeEventPayload(normalized.payload) ? {
+      ...(normalized.payload.source_started_at ? { source_started_at: normalized.payload.source_started_at } : {}),
+      ...(normalized.payload.source_last_activity_at ? { source_last_activity_at: normalized.payload.source_last_activity_at } : {}),
+    } : {};
     const sequence = await this.options.sequence.next();
     const envelope: EventEnvelope = {
       type: "event",
@@ -31,14 +39,15 @@ export class Collector {
       event_id: eventId(this.options.installationId, sequence),
       installation_id: this.options.installationId,
       session_id: normalized.session_id,
-      ...(normalized.task_id ? { task_id: normalized.task_id } : {}),
+      ...(agentId ? { agent_id: agentId } : {}),
+      ...(normalized.task_id && !metadata ? { task_id: normalized.task_id } : {}),
       ...(normalized.session_title ? { session_title: normalized.session_title } : {}),
       ...(normalized.session_kind ? { session_kind: normalized.session_kind } : {}),
       sequence,
       occurred_at: normalized.occurred_at,
       event_type: normalized.event_type,
-      payload: normalized.payload,
-      ...(normalized.correlation_id ? { correlation_id: normalized.correlation_id } : {}),
+      payload: metadata ? metadataPayload : ordinaryPayload,
+      ...(normalized.correlation_id && !metadata ? { correlation_id: normalized.correlation_id } : {}),
     };
     await this.options.outbox.enqueue({
       id: envelope.event_id,

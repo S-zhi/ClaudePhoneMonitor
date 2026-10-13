@@ -11,6 +11,7 @@ import type {
   EventEnvelope,
   InstallationState,
   SessionSummary,
+  HistorySession,
   SessionKind,
   RecentCompletion,
   PairingCreateInput,
@@ -126,6 +127,8 @@ interface SessionState {
   /** Activity ordering is independent of the accepted event watermark. */
   last_activity_sequence?: number;
   last_activity_at: string;
+  source_started_at?: string;
+  source_last_activity_at?: string;
   updated_at: string;
   task_id?: string;
   /** Only an observed task_started establishes a timing origin. */
@@ -196,6 +199,16 @@ function canUpdateSessionTitle(previous: SessionState | undefined, event: EventE
     !(event.task_id && knownTaskId && event.task_id !== knownTaskId));
 }
 
+function earlierTimestamp(previous: string | undefined, incoming: string | undefined): string | undefined {
+  if (!incoming || taskTimestamp(incoming) === undefined) return previous;
+  return !previous || Date.parse(incoming) < Date.parse(previous) ? incoming : previous;
+}
+
+function laterTimestamp(previous: string | undefined, incoming: string | undefined): string | undefined {
+  if (!incoming || taskTimestamp(incoming) === undefined) return previous;
+  return !previous || Date.parse(incoming) > Date.parse(previous) ? incoming : previous;
+}
+
 function applySessionEvent(
   previous: SessionState | undefined,
   event: EventEnvelope,
@@ -218,8 +231,8 @@ function applySessionEvent(
     claude_state: "idle",
     last_sequence: -1,
     last_activity_sequence: -1,
-    last_activity_at: event.event_type === "session_classification_updated" ? "1970-01-01T00:00:00.000Z" : event.occurred_at,
-    updated_at: event.event_type === "session_classification_updated" ? "1970-01-01T00:00:00.000Z" : event.occurred_at,
+    last_activity_at: ["session_classification_updated", "session_metadata_updated"].includes(event.event_type) ? "1970-01-01T00:00:00.000Z" : event.occurred_at,
+    updated_at: ["session_classification_updated", "session_metadata_updated"].includes(event.event_type) ? "1970-01-01T00:00:00.000Z" : event.occurred_at,
     ended: false,
   };
   if (event.agent_id) next.agent_id = event.agent_id;
@@ -227,6 +240,19 @@ function applySessionEvent(
   next.last_sequence = event.sequence;
   next.session_kind = previous?.session_kind === "subagent" ? "subagent" : event.session_kind ?? previous?.session_kind ?? "main";
   if (event.event_type === "session_classification_updated") return next;
+  if (event.event_type === "session_metadata_updated") {
+    const payload = event.payload as { source_started_at?: string; source_last_activity_at?: string };
+    next.source_started_at = earlierTimestamp(next.source_started_at, payload.source_started_at);
+    next.source_last_activity_at = laterTimestamp(next.source_last_activity_at, payload.source_last_activity_at);
+    if (event.session_title) {
+      next.title = event.session_title;
+      if (next.completion && (next.terminalTask ?? Boolean(next.completion)) &&
+          Date.parse(now) - Date.parse(next.completion.occurred_at) <= COMPLETION_TTL_MS) {
+        next.completion = { ...next.completion, display_name: sessionDisplayName(next) };
+      }
+    }
+    return next;
+  }
   if (event.event_type === "session_title_updated") {
     if (!canUpdateSessionTitle(previous, event)) return next;
     next.title = event.session_title;
@@ -365,7 +391,8 @@ function aggregatedState(
   "claude_state" | "sessions" | "running_count" | "session_count" | "recent_completion" | "active_tasks" | "main_running_count" | "main_session_count" | "total_running_count"
 > {
   const nowMs = Date.parse(now);
-  const allActive = records.filter((record) => !record.ended && nowMs - Date.parse(record.last_activity_at) < SESSION_TTL_MS);
+  const allActive = records.filter((record) => !record.ended && (record.last_activity_sequence ?? record.last_sequence) >= 0 &&
+    nowMs - Date.parse(record.last_activity_at) < SESSION_TTL_MS);
   const active = allActive.filter((record) => record.session_kind !== "subagent");
   const ordered = active.sort((a, b) =>
     (b.last_activity_sequence ?? b.last_sequence) - (a.last_activity_sequence ?? a.last_sequence) ||
@@ -414,8 +441,25 @@ function aggregatedState(
 }
 
 function presentInstallationState(state: InstallationState, records: SessionState[], now: string): InstallationState {
-  if (!records.length) return { ...state, active_tasks: [], main_running_count: 0, main_session_count: 0, total_running_count: 0, running_count: 0, session_count: 0 };
+  if (!records.length) return { ...state, history_sessions: [], active_tasks: [], main_running_count: 0, main_session_count: 0, total_running_count: 0, running_count: 0, session_count: 0 };
   const next = { ...state, ...aggregatedState(records, now) };
+  const nowMs = Date.parse(now);
+  next.history_sessions = records.filter((record) => record.session_kind !== "subagent").map((record): HistorySession => {
+    const hasNativeActivity = (record.last_activity_sequence ?? record.last_sequence) >= 0;
+    const lastActivity = laterTimestamp(record.source_last_activity_at,
+      hasNativeActivity ? record.last_activity_at : undefined);
+    const started = record.source_started_at;
+    return {
+      session_id: record.session_id,
+      ...(record.agent_id ? { agent_id: record.agent_id } : {}),
+      title: sessionDisplayName(record),
+      ...(started ? { started_at: started } : {}),
+      ...(lastActivity ? { last_activity_at: lastActivity } : {}),
+      activity_status: record.ended ? "ended" : !hasNativeActivity || nowMs - Date.parse(record.last_activity_at) >= SESSION_TTL_MS
+        ? "unknown" : record.claude_state,
+    };
+  }).sort((a, b) => (Date.parse(b.last_activity_at ?? b.started_at ?? "") || 0) -
+    (Date.parse(a.last_activity_at ?? a.started_at ?? "") || 0) || a.session_id.localeCompare(b.session_id)).slice(0, 50);
   if (typeof next.activity === "object" && records.some((record) =>
       record.session_id === next.activity?.session_id && record.session_kind === "subagent")) {
     delete next.activity;
@@ -684,10 +728,10 @@ export class InMemoryRelayRepository implements RelayRepository {
     const updatedSession = applySessionEvent(priorSession, event, receivedAt);
     const titleUpdated = canUpdateSessionTitle(priorSession, event);
     const changesActivity = updatedSession?.session_kind !== "subagent" &&
-      !["session_title_updated", "session_classification_updated"].includes(event.event_type) &&
+      !["session_title_updated", "session_classification_updated", "session_metadata_updated"].includes(event.event_type) &&
       (event.session_id === "unknown" || updatedSession?.last_activity_sequence === event.sequence);
     stored.event = { ...eventWithTaskDuration(priorSession, stored.event), ...(updatedSession?.agent_id ? { agent_id: updatedSession.agent_id } : {}), ...(updatedSession?.session_kind ? { session_kind: updatedSession.session_kind } : {}) };
-    stored.activity_applied = (changesActivity || (titleUpdated && updatedSession?.session_kind !== "subagent") || event.event_type === "session_classification_updated" || updatedSession?.session_kind === "subagent") && sequence_status !== "out_of_order" &&
+    stored.activity_applied = event.event_type !== "session_metadata_updated" && (changesActivity || (titleUpdated && updatedSession?.session_kind !== "subagent") || event.event_type === "session_classification_updated" || updatedSession?.session_kind === "subagent") && sequence_status !== "out_of_order" &&
       !(event.session_id === "unknown" && event.event_type === "task_finished");
 
     const nextState: InstallationState =
@@ -1243,10 +1287,10 @@ export class SqliteRelayRepository implements RelayRepository {
     const updatedSession = applySessionEvent(priorSession, event, receivedAt);
     const titleUpdated = canUpdateSessionTitle(priorSession, event);
     const changesActivity = updatedSession?.session_kind !== "subagent" &&
-      !["session_title_updated", "session_classification_updated"].includes(event.event_type) &&
+      !["session_title_updated", "session_classification_updated", "session_metadata_updated"].includes(event.event_type) &&
       (event.session_id === "unknown" || updatedSession?.last_activity_sequence === event.sequence);
     stored.event = { ...eventWithTaskDuration(priorSession, stored.event), ...(updatedSession?.agent_id ? { agent_id: updatedSession.agent_id } : {}), ...(updatedSession?.session_kind ? { session_kind: updatedSession.session_kind } : {}) };
-    stored.activity_applied = (changesActivity || (titleUpdated && updatedSession?.session_kind !== "subagent") || event.event_type === "session_classification_updated" || updatedSession?.session_kind === "subagent") && sequence_status !== "out_of_order" &&
+    stored.activity_applied = event.event_type !== "session_metadata_updated" && (changesActivity || (titleUpdated && updatedSession?.session_kind !== "subagent") || event.event_type === "session_classification_updated" || updatedSession?.session_kind === "subagent") && sequence_status !== "out_of_order" &&
       !(event.session_id === "unknown" && event.event_type === "task_finished");
     const nextState: InstallationState =
       current && previousSequence !== null && event.sequence < previousSequence

@@ -58,6 +58,8 @@ export type EventAckStatus = "accepted" | "duplicate" | "rejected";
 
 /** Allowlisted metadata shape shared by collector normalizers and envelopes. */
 export interface SafeEventPayload {
+  readonly source_started_at?: WireTimestamp;
+  readonly source_last_activity_at?: WireTimestamp;
   readonly tool_name?: string;
   readonly duration_ms?: number;
   readonly exit_code?: number;
@@ -90,6 +92,10 @@ export interface EventPayloadByType {
   readonly [EVENT_TYPES.SESSION_STARTED]: EmptyPayload;
   readonly [EVENT_TYPES.SESSION_CLASSIFICATION_UPDATED]: EmptyPayload;
   readonly [EVENT_TYPES.SESSION_TITLE_UPDATED]: EmptyPayload;
+  readonly [EVENT_TYPES.SESSION_METADATA_UPDATED]: {
+    readonly source_started_at?: WireTimestamp;
+    readonly source_last_activity_at?: WireTimestamp;
+  };
   readonly [EVENT_TYPES.TASK_STARTED]: EmptyPayload;
   readonly [EVENT_TYPES.TOOL_STARTED]: {
     readonly tool_name?: string;
@@ -183,6 +189,16 @@ export interface SessionSummary {
   readonly last_activity_sequence: SequenceNumber;
 }
 
+/** Bounded session history; source timestamps are facts, not collector observation times. */
+export interface HistorySession {
+  readonly session_id: string;
+  readonly agent_id?: AgentId;
+  readonly title: string;
+  readonly started_at?: WireTimestamp;
+  readonly last_activity_at?: WireTimestamp;
+  readonly activity_status: "working" | "waiting" | "idle" | "ended" | "unknown";
+}
+
 export interface RecentCompletion {
   readonly session_id: string;
   readonly task_id?: string;
@@ -210,6 +226,7 @@ export interface Snapshot {
   /** Short, sanitized label or event metadata; never a prompt/tool input/result. */
   readonly activity?: string | SnapshotActivity;
   readonly sessions?: readonly SessionSummary[];
+  readonly history_sessions?: readonly HistorySession[];
   readonly main_running_count?: number;
   readonly main_session_count?: number;
   readonly total_running_count?: number;

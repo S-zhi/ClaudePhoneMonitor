@@ -201,6 +201,12 @@ scripts/start-lan-monitor.sh --watch-codex
 `RELAY CONNECTED` 只表示手机连上 Relay，不能证明 Codex 生命周期正在采集；
 用 `scripts/start-lan-monitor.sh --watch-codex` 重启服务会恢复监听并保存该选择。
 
+Magpie 的会话历史读取可通过 `COLLECTOR_WATCH_MAGPIE_SESSIONS=1` 单独开启，默认关闭。
+首次读取只补充历史元数据和来源时间，不把历史会话标记为运行中；列表缺失也不推断结束。
+Magpie 的标题可能退化为首条提示词，因此不会直接发送。Codex 会话只采用可验证的原生标题；
+Claude Code 的 Magpie 行在组合监听中排除，由现有 Hook 负责活动状态。
+配置边界和开发说明见 [Magpie 集成说明](docs/magpie-development.md)。
+
 Codex 会话名称只从本机原生标题元数据读取：优先使用 `state_*.sqlite` 的
 `threads.name`，其次是 `session_index.jsonl` 中同 UUID 的最新 `thread_name`，
 旧版无 name 时才使用安全的 `threads.title`；不从 prompt、消息正文或预览生成名称。

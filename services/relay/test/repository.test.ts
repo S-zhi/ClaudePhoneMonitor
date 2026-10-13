@@ -48,6 +48,113 @@ function usageMessage(overrides: Partial<UsageSnapshotMessage> = {}): UsageSnaps
   };
 }
 
+test("metadata history is durable, neutral, monotonic, and independent of native current activity", () => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-session-history-"));
+  const path = join(directory, "relay.sqlite");
+  const memory = new InMemoryRelayRepository();
+  let sqlite = new SqliteRelayRepository(path);
+  const metadata = (sequence: number, payload: object, title = "First name", sessionId = "history-1", agentId = "magpie"): EventEnvelope =>
+    event({ event_id: `metadata-${sequence}`, sequence, session_id: sessionId, agent_id: agentId,
+      session_title: title, event_type: "session_metadata_updated", payload,
+      occurred_at: `2026-10-02T00:00:${String(sequence).padStart(2, "0")}.000Z` });
+  try {
+    for (const repository of [memory, sqlite]) {
+      const first = metadata(1, { source_started_at: "2026-09-20T00:00:00Z", source_last_activity_at: "2026-10-01T00:00:00Z" });
+      const result = repository.recordEvent(first, "2026-10-02T00:00:01Z");
+      assert.equal(result.activity_applied, false);
+      assert.equal(repository.recordEvent(first, "2026-10-02T00:00:01Z").duplicate, true);
+      const initial = repository.getInstallationState("install-1", "2026-10-02T00:00:05Z")!;
+      assert.equal(initial.activity, undefined);
+      assert.deepEqual(initial.sessions, []);
+      assert.equal(initial.main_session_count, 0);
+      assert.equal(initial.history_sessions?.[0]?.activity_status, "unknown");
+      assert.equal(initial.history_sessions?.[0]?.last_activity_at, "2026-10-01T00:00:00Z");
+      repository.recordEvent(metadata(2, { source_started_at: "2026-09-25T00:00:00Z",
+        source_last_activity_at: "2026-09-30T00:00:00Z" }, "Renamed"), "2026-10-02T00:00:02Z");
+      const renamed = repository.getInstallationState("install-1", "2026-10-02T00:00:05Z")!;
+      assert.equal(renamed.history_sessions?.[0]?.title, "Renamed");
+      assert.equal(renamed.history_sessions?.[0]?.started_at, "2026-09-20T00:00:00Z");
+      assert.equal(renamed.history_sessions?.[0]?.last_activity_at, "2026-10-01T00:00:00Z");
+      repository.recordEvent(event({ event_id: "native-start", sequence: 3, session_id: "native-1",
+        agent_id: "codex", event_type: "task_started", task_id: "task-1",
+        occurred_at: "2026-10-02T00:00:03Z", payload: {} }), "2026-10-02T00:00:03Z");
+      const active = repository.getInstallationState("install-1", "2026-10-02T00:00:05Z")!;
+      assert.deepEqual(active.sessions?.map((row) => row.session_id), ["native-1"]);
+      assert.equal(active.main_running_count, 1);
+      assert.equal(active.history_sessions?.find((row) => row.session_id === "native-1")?.activity_status, "working");
+      repository.recordEvent(metadata(4, { source_last_activity_at: "2026-10-02T00:00:04Z" }, "Later title", "native-1", "codex"), "2026-10-02T00:00:04Z");
+      const afterMetadata = repository.getInstallationState("install-1", "2026-10-02T00:00:05Z")!;
+      assert.equal(afterMetadata.activity?.event_type, "task_started");
+      assert.equal(afterMetadata.sessions?.[0]?.last_activity_sequence, 3);
+      assert.equal(afterMetadata.active_tasks?.length, 1);
+      const stale = repository.getInstallationState("install-1", "2026-10-02T03:00:00Z")!;
+      assert.equal(stale.main_running_count, 0);
+      assert.equal(stale.history_sessions?.find((row) => row.session_id === "native-1")?.activity_status, "unknown");
+      repository.recordEvent(event({ event_id: "native-end", sequence: 5, session_id: "native-1", agent_id: "codex",
+        event_type: "session_ended", occurred_at: "2026-10-02T00:00:05Z", payload: {} }), "2026-10-02T00:00:05Z");
+      repository.recordEvent(metadata(6, { source_last_activity_at: "2026-10-02T00:00:06Z" }, "Final title", "native-1", "codex"), "2026-10-02T00:00:06Z");
+      const ended = repository.getInstallationState("install-1", "2026-10-02T00:00:07Z")!;
+      assert.equal(ended.main_running_count, 0);
+      assert.equal(ended.history_sessions?.find((row) => row.session_id === "native-1")?.activity_status, "ended");
+      assert.equal(ended.history_sessions?.find((row) => row.session_id === "native-1")?.title, "Final title");
+    }
+    const expected = memory.getInstallationState("install-1", "2026-10-02T00:00:07Z");
+    sqlite.close();
+    sqlite = new SqliteRelayRepository(path);
+    assert.deepEqual(sqlite.getInstallationState("install-1", "2026-10-02T00:00:07Z"), expected);
+  } finally {
+    sqlite.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("metadata rename refreshes a recent completion label without changing its identity or deadline", () => {
+  for (const repository of [new InMemoryRelayRepository(), new SqliteRelayRepository(":memory:")]) {
+    try {
+      repository.recordEvent(event({ event_id: "started", sequence: 1, event_type: "task_started",
+        task_id: "task-1", occurred_at: "2026-10-02T00:00:01Z", payload: {} }), "2026-10-02T00:00:01Z");
+      repository.recordEvent(event({ event_id: "finished", sequence: 2, event_type: "task_finished",
+        task_id: "task-1", occurred_at: "2026-10-02T00:00:02Z", payload: {} }), "2026-10-02T00:00:02Z");
+      const before = repository.getInstallationState("install-1", "2026-10-02T00:00:03Z")!;
+      const result = repository.recordEvent(event({ event_id: "renamed", sequence: 3,
+        event_type: "session_metadata_updated", session_title: "Final title", payload: {},
+        occurred_at: "2026-10-02T00:00:03Z" }), "2026-10-02T00:00:03Z");
+      const after = repository.getInstallationState("install-1", "2026-10-02T00:00:03Z")!;
+      assert.equal(result.activity_applied, false);
+      assert.deepEqual(after.recent_completion, { ...before.recent_completion, display_name: "Final title" });
+      assert.deepEqual(after.activity, before.activity);
+      assert.deepEqual(after.active_tasks, before.active_tasks);
+      assert.equal(after.sessions?.[0]?.last_activity_sequence, 2);
+      assert.equal(repository.getInstallationState("install-1", "2026-10-02T00:00:08Z")?.recent_completion, undefined);
+    } finally {
+      if (repository instanceof SqliteRelayRepository) repository.close();
+    }
+  }
+});
+
+test("observed session start does not claim creation time without explicit source metadata", () => {
+  for (const repository of [new InMemoryRelayRepository(), new SqliteRelayRepository(":memory:")]) {
+    try {
+      repository.recordEvent(event({ event_id: "observed-start", sequence: 1,
+        event_type: "session_started", occurred_at: "2026-10-02T00:00:01Z", payload: {} }),
+      "2026-10-02T00:00:01Z");
+      const observed = repository.getInstallationState("install-1", "2026-10-02T00:00:02Z")!;
+      assert.equal(observed.history_sessions?.[0]?.started_at, undefined);
+      assert.equal(observed.history_sessions?.[0]?.last_activity_at, "2026-10-02T00:00:01Z");
+      repository.recordEvent(event({ event_id: "source-start", sequence: 2,
+        event_type: "session_metadata_updated", occurred_at: "2026-10-02T00:00:02Z",
+        payload: { source_started_at: "2026-09-29T00:00:00Z" } }), "2026-10-02T00:00:02Z");
+      const enriched = repository.getInstallationState("install-1", "2026-10-02T00:00:03Z")!;
+      assert.equal(enriched.history_sessions?.[0]?.started_at, "2026-09-29T00:00:00Z");
+      assert.equal(enriched.history_sessions?.[0]?.last_activity_at, "2026-10-02T00:00:01Z");
+      assert.equal(enriched.sessions?.[0]?.last_activity_sequence, 1);
+      assert.deepEqual(enriched.activity, observed.activity);
+    } finally {
+      if (repository instanceof SqliteRelayRepository) repository.close();
+    }
+  }
+});
+
 test("usage aggregate is installation scoped, revisioned, and durable without session reduction", () => {
   const directory = mkdtempSync(join(tmpdir(), "relay-usage-revisions-"));
   const dbPath = join(directory, "relay.sqlite");

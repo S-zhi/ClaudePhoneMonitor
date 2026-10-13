@@ -12,4 +12,5 @@ export * from "./codex-normalizer.js";
 export * from "./codex-watcher.js";
 export * from "./codex-approvals.js";
 export * from "./agent-session-watcher.js";
+export * from "./agent-identity.js";
 export * from "./magpie-sessions.js";

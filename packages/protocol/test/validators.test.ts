@@ -47,6 +47,28 @@ const snapshot: Snapshot = {
   updated_at: new Date(400).toISOString(),
 };
 
+test("metadata event and bounded history have strict safe wire shapes", () => {
+  const metadata = { ...makeEvent(EVENT_TYPES.SESSION_METADATA_UPDATED, {
+    source_started_at: "2026-10-01T00:00:00Z",
+    source_last_activity_at: "2026-10-02T00:00:00Z",
+  }), agent_id: "magpie", session_title: "Agent project" };
+  assert.equal(validateEventEnvelope(metadata).success, true);
+  assert.equal(validateEventEnvelope({ ...metadata, payload: { source_last_activity_at: "bad" } }).success, false);
+  assert.equal(validateEventEnvelope({ ...metadata, payload: { source_started_at: "2026-02-30T00:00:00Z" } }).success, false);
+  assert.equal(validateEventEnvelope({ ...metadata, payload: { source_started_at: "2026-10-02T00:00:00Z", source_last_activity_at: "2026-10-01T00:00:00Z" } }).success, false);
+  assert.equal(validateEventEnvelope({ ...metadata, payload: { prompt: "private" } }).success, false);
+  assert.equal(validateEventEnvelope({ ...metadata, session_id: "unknown" }).success, false);
+  assert.equal(validateEventEnvelope({ ...metadata, task_id: "task-1" }).success, false);
+  assert.equal(validateEventEnvelope({ ...metadata, correlation_id: "call-1" }).success, false);
+  assert.equal(validateSnapshot({ ...snapshot, history_sessions: [{ session_id: "session-1", agent_id: "magpie",
+    title: "Agent project", activity_status: "unknown", started_at: "2026-10-01T00:00:00Z" }] }).success, true);
+  assert.equal(validateSnapshot({ ...snapshot, history_sessions: [{ session_id: "session-1", title: "Agent project",
+    activity_status: "guessing" }] }).success, false);
+  assert.equal(validateSnapshot({ ...snapshot, history_sessions: Array.from({ length: 51 }, (_, index) => ({
+    session_id: `session-${index}`, title: "Agent project", activity_status: "unknown",
+  })) }).success, false);
+});
+
 const usage = {
   epoch_id: "epoch-1",
   started_at: "2026-10-07T00:00:00.000Z",

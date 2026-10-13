@@ -19,18 +19,33 @@ Use `COLLECTOR_AGENT_ID` to namespace hashes and
 
 ## Magpie session reader
 
-Magpie itself is also an opt-in read-only source. Enable
+Magpie is an opt-in read-only history source. Enable
 `--watch-magpie-sessions` or `COLLECTOR_WATCH_MAGPIE_SESSIONS=1` after checking
-that the local `magpie` command is available. The reader polls
-`magpie sessions --json --limit N`, keeps the first snapshot as a baseline, and
-emits only later session additions and safe title changes. Override the binary
-with `--magpie-bin` or `COLLECTOR_MAGPIE_BIN`; use
-`--magpie-session-limit` or `COLLECTOR_MAGPIE_SESSION_LIMIT` to bound each
-poll. Polling defaults to two seconds; set
-`COLLECTOR_MAGPIE_POLL_INTERVAL_MS` to change it. It never forwards prompts, transcript bodies, resume commands, or local
-paths; the public session and task IDs are stable hashes. The reader reports
-session/title metadata only, so task/tool activity still requires a
-source-specific Agent adapter.
+that the local `magpie` command is available. Each poll reads
+`magpie sessions --json --limit N`; the first poll emits historical metadata
+with unknown activity status. Source start and last-activity timestamps are
+metadata, not proof that a session is working. Missing rows never emit end
+events. A private checkpoint suppresses repeats across restart and list
+eviction; enqueue failures retry on the next poll.
+
+Magpie CLI titles may be first-prompt fallback text and are never forwarded.
+For Codex UUID sessions, only verified native titles from the configured
+Codex metadata root are sent. Codex IDs match the native watcher, while
+Claude Code Magpie rows are excluded because native Hook IDs cannot safely
+be merged with Magpie's hashed IDs. The Claude Hook remains the authority
+for Claude activity. Other Agents get a stable hashed ID. Prompts,
+transcript bodies, resume commands and paths never enter the event.
+
+Override the binary with `--magpie-bin` / `COLLECTOR_MAGPIE_BIN`.
+`--magpie-session-limit` / `COLLECTOR_MAGPIE_SESSION_LIMIT` accepts 1..10000
+(default 100). `--magpie-poll-interval-ms` /
+`COLLECTOR_MAGPIE_POLL_INTERVAL_MS` accepts 250..300000 (default 2000).
+`--magpie-command-timeout-ms` / `COLLECTOR_MAGPIE_COMMAND_TIMEOUT_MS`
+accepts 100..60000 (default 10000). The checkpoint defaults to
+`COLLECTOR_DATA_DIR/magpie-session-checkpoint.json`, or set
+`--magpie-checkpoint-file` / `COLLECTOR_MAGPIE_CHECKPOINT_FILE`.
+Invalid numeric settings disable this source with a fixed startup diagnostic.
+Task/tool/wait/finish activity requires a source-specific Agent adapter.
 
 ## Build and test
 

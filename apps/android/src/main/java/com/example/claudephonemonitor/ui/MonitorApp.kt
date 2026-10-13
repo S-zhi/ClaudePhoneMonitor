@@ -7,6 +7,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -84,6 +85,9 @@ import com.example.claudephonemonitor.monitor.ReminderStrength
 import com.example.claudephonemonitor.monitor.SessionDisplayState
 import com.example.claudephonemonitor.monitor.displayState
 import com.example.claudephonemonitor.monitor.sortedTopSessions
+import com.example.claudephonemonitor.monitor.sessionSourceLabel
+import com.example.claudephonemonitor.monitor.formatHistoryTime
+import com.example.claudephonemonitor.monitor.HistorySession
 import com.example.claudephonemonitor.monitor.PetState
 import com.example.claudephonemonitor.monitor.WebSocketMonitorClient
 import com.journeyapps.barcodescanner.ScanContract
@@ -860,6 +864,8 @@ private fun SessionSummaryPanel(
     modifier: Modifier = Modifier,
 ) {
     val sessions = snapshot.sortedTopSessions()
+    val history = snapshot.historySessions.orEmpty()
+    var historyExpanded by remember { mutableStateOf(false) }
     val density = LocalDensity.current
     val titleSize = (13f * scale).sp
     val statusSize = (12f * scale).sp
@@ -909,7 +915,9 @@ private fun SessionSummaryPanel(
                         .fillMaxWidth()
                         .heightIn(min = rowHeight)
                         .testTag("session-${session.sessionId}")
-                        .semantics(mergeDescendants = true) { contentDescription = "Session ${index + 1}: ${state.label}" },
+                        .semantics(mergeDescendants = true) {
+                            contentDescription = "Session ${index + 1}: ${sessionSourceLabel(session.agentId, session.sessionId)}, ${state.label}, ${session.title}"
+                        },
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Box(modifier = Modifier.width(markerSpace)) {
@@ -928,16 +936,23 @@ private fun SessionSummaryPanel(
                         textHeight = statusSize,
                         modifier = Modifier.width(statusWidth),
                     )
-                    Text(
-                        text = session.title,
-                        color = InkColor,
-                        fontSize = titleSize,
-                        fontWeight = FontWeight.Normal,
-                        letterSpacing = (0.35f * scale).sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = session.title,
+                            color = InkColor,
+                            fontSize = titleSize,
+                            fontWeight = FontWeight.Normal,
+                            letterSpacing = (0.35f * scale).sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = sessionSourceLabel(session.agentId, session.sessionId),
+                            color = MutedInkColor,
+                            fontSize = (8f * scale).sp,
+                            maxLines = 1,
+                        )
+                    }
                 }
             }
             if (sessions.isEmpty()) {
@@ -948,7 +963,43 @@ private fun SessionSummaryPanel(
                     modifier = Modifier.padding(start = markerSpace, top = (8f * scale).dp),
                 )
             }
+            if (history.isNotEmpty()) {
+                Text(
+                    text = if (historyExpanded) "RECENT HISTORY · ${history.size}  −" else "RECENT HISTORY · ${history.size}  +",
+                    color = MutedInkColor,
+                    fontSize = (9f * scale).sp,
+                    letterSpacing = (1.0f * scale).sp,
+                    modifier = Modifier
+                        .padding(start = markerSpace, top = (20f * scale).dp, bottom = (8f * scale).dp)
+                        .clickable { historyExpanded = !historyExpanded }
+                        .testTag("history-toggle"),
+                )
+                if (historyExpanded) history.forEach { session ->
+                    HistorySessionRow(session, scale, markerSpace)
+                }
+            }
         }
+    }
+}
+
+@Composable
+private fun HistorySessionRow(session: HistorySession, scale: Float, markerSpace: androidx.compose.ui.unit.Dp) {
+    Column(modifier = Modifier.fillMaxWidth().padding(start = markerSpace, bottom = (12f * scale).dp)
+        .testTag("history-${session.sessionId}")) {
+        Text(
+            text = "${sessionSourceLabel(session.agentId, session.sessionId)} · ${session.activityStatus.label}",
+            color = MutedInkColor,
+            fontSize = (9f * scale).sp,
+            maxLines = 1,
+        )
+        Text(session.title, color = InkColor, fontSize = (12f * scale).sp,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        val detail = listOfNotNull(
+            session.startedAt?.let { "Started ${formatHistoryTime(it)}" },
+            session.lastActivityAt?.let { "Last observed activity ${formatHistoryTime(it)}" },
+        ).joinToString("\n").ifBlank { "Activity time unknown" }
+        Text(detail, color = MutedInkColor, fontSize = (8f * scale).sp,
+            maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 

@@ -220,6 +220,19 @@ function safeSequence(value: unknown): number | undefined {
     : undefined;
 }
 
+function safeWireTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 64) return false;
+  const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(value);
+  if (!parts) return false;
+  const [, y, m, d, h, min, sec, zoneH, zoneMin] = parts;
+  const year = Number(y), month = Number(m), day = Number(d);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  return days !== undefined && day >= 1 && day <= days && Number(h) < 24 && Number(min) < 60 &&
+    Number(sec) < 60 && (zoneH === undefined || (Number(zoneH) < 24 && Number(zoneMin) < 60)) &&
+    Number.isFinite(Date.parse(value));
+}
+
 function messageType(value: unknown): string | undefined {
   return isRecord(value) && typeof value.type === "string" ? value.type : undefined;
 }
@@ -670,6 +683,7 @@ export class Relay {
       last_sequence: state?.last_sequence ?? null,
       updated_at: state?.updated_at ?? now,
       ...(state?.sessions ? { sessions: state.sessions } : {}),
+      ...(state?.history_sessions ? { history_sessions: state.history_sessions } : {}),
       main_running_count: state?.main_running_count ?? 0,
       main_session_count: state?.main_session_count ?? 0,
       total_running_count: state?.total_running_count ?? 0,
@@ -1169,7 +1183,7 @@ export class Relay {
     for (const stored of this.repository.listEventsAfter(installationId, lastSequence)) {
       // Approval history is reconstructed only from the authoritative snapshot.
       // Replaying old actionable payloads cannot prove that a hook is alive.
-      if (stored.event.event_type === "approval_requested" || stored.event.event_type === "approval_resolved") continue;
+      if (["approval_requested", "approval_resolved", "session_metadata_updated"].includes(stored.event.event_type)) continue;
       // Older databases default presentation eligibility to true, but unknown
       // completions still cannot identify a session or task to present.
       if (stored.activity_applied !== false &&
@@ -1419,12 +1433,24 @@ export class Relay {
     if (message.session_kind !== undefined && !["main", "subagent"].includes(String(message.session_kind))) return undefined;
     if (eventType === "session_classification_updated" && (!message.session_kind || sessionId === "unknown" ||
       !isRecord(message.payload) || Object.keys(message.payload).length !== 0)) return undefined;
+    if (eventType === "session_metadata_updated") {
+      if (sessionId === "unknown" || !isRecord(message.payload) ||
+        Object.keys(message.payload).some((key) => !["source_started_at", "source_last_activity_at"].includes(key))) return undefined;
+      for (const value of Object.values(message.payload)) {
+        if (!safeWireTimestamp(value)) return undefined;
+      }
+      if (message.task_id !== undefined || message.correlation_id !== undefined) return undefined;
+    }
     const sessionKind = message.session_kind as "main" | "subagent" | undefined;
     const taskId = optionalString(message.task_id);
     const correlationId = optionalString(message.correlation_id);
     const sessionTitle =
-      ["session_started", "task_started", "task_finished", "session_title_updated"].includes(eventType)
+      ["session_started", "task_started", "task_finished", "session_title_updated", "session_metadata_updated"].includes(eventType)
         ? safeSessionTitle(message.session_title) : undefined;
+    if (eventType === "session_metadata_updated" && message.session_title !== undefined && !sessionTitle) return undefined;
+    if (eventType === "session_metadata_updated" && isRecord(message.payload) &&
+      typeof message.payload.source_started_at === "string" && typeof message.payload.source_last_activity_at === "string" &&
+      Date.parse(message.payload.source_last_activity_at) < Date.parse(message.payload.source_started_at)) return undefined;
     if (eventType === "session_title_updated" && (
       !sessionTitle || !isRecord(message.payload) || Object.keys(message.payload).length !== 0
     )) return undefined;
@@ -1586,6 +1612,7 @@ export class Relay {
     return JSON.stringify({
       claude_state: state?.claude_state,
       sessions: state?.sessions,
+      history_sessions: state?.history_sessions,
       running_count: state?.running_count,
       main_running_count: state?.main_running_count,
       main_session_count: state?.main_session_count,

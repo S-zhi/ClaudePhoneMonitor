@@ -25,3 +25,11 @@ Collector 是会话适配器的统一入口。适配器可以读取 Agent 明确
 3. 接入任务、工具、等待、完成和失败事件，并验证 Relay 聚合。
 4. 增加 `agent_id` 和多 Agent Android 展示。
 5. 接入 Magpie 路由、历史用量和成本查询。
+
+## Magpie 会话历史读取
+
+可选开启 `COLLECTOR_WATCH_MAGPIE_SESSIONS=1` 或 `--watch-magpie-sessions`，默认关闭。Collector 只读取 `magpie sessions --json --limit N` 返回的最近 N 条，将安全身份、可核实的原生标题和来源时间写为 `session_metadata_updated`；没有标题和时间时也可只记录身份。只有来源明确提供的 `source_started_at` 才能作为会话创建时间。Relay 快照的 `history_sessions` 最多返回最近 50 条；来源的最近 N 条并非完整历史。时间变化和列表缺失都不能证明工作中或已结束；当前活动必须有原生监听或桥接事件依据，否则状态为 `unknown`。此方案也无法观察哪个 Agent 窗口处于前台或获得焦点。
+
+Magpie CLI 的 `title` 可能是首条提示词，始终丢弃。Codex UUID 会话只用本机原生标题，身份与 Codex 原生监听统一；组合运行时排除 Claude Code 的 Magpie 行，由现有 Hook 负责其活动。原始 ID、路径、工作目录、提示词、恢复命令和转录正文不会进入事件。私有 checkpoint 仅保存哈希身份与安全元数据指纹；每轮批量写入，入队失败下轮重试，列表暂时挤出或重启不会重放已记录的行。
+
+通用 Agent 桥接区分已有文件的追加内容和新发现或轮转文件的初始片段：初始片段的事件必须带有效且新鲜的来源时间，才可形成实时状态；追加事件缺少时间时，使用观察时间，不声称是精确来源时间。读取预算允许为推进游标而多读一条有上限的完整记录。任务、工具、等待、完成等状态仍需各 Agent 的原生或桥接生命周期证据。路由、Token 与成本历史，以及生产环境和手机安装验证，留待后续阶段。

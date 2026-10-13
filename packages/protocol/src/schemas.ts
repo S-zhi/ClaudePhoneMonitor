@@ -169,6 +169,10 @@ function approvalPayloadSchema(source: "claude_code" | "codex", requested: boole
 const payloadSchemas: Record<MonitorEventType, JsonSchema> = {
   [EVENT_TYPES.SESSION_STARTED]: strictObject({}),
   [EVENT_TYPES.SESSION_TITLE_UPDATED]: strictObject({}),
+  [EVENT_TYPES.SESSION_METADATA_UPDATED]: strictObject({
+    source_started_at: wireTimestampSchema,
+    source_last_activity_at: wireTimestampSchema,
+  }),
   [EVENT_TYPES.SESSION_CLASSIFICATION_UPDATED]: strictObject({}),
   [EVENT_TYPES.TASK_STARTED]: strictObject({}),
   [EVENT_TYPES.TOOL_STARTED]: strictObject({
@@ -215,16 +219,16 @@ const eventProperties = (
   event_id: idSchema,
   agent_id: agentIdSchema,
   installation_id: idSchema,
-  session_id: [EVENT_TYPES.SESSION_CLASSIFICATION_UPDATED, EVENT_TYPES.APPROVAL_REQUESTED, EVENT_TYPES.APPROVAL_RESOLVED].some((type) => type === eventType) ? identifiedSessionIdSchema : idSchema,
+  session_id: [EVENT_TYPES.SESSION_CLASSIFICATION_UPDATED, EVENT_TYPES.SESSION_METADATA_UPDATED, EVENT_TYPES.APPROVAL_REQUESTED, EVENT_TYPES.APPROVAL_RESOLVED].some((type) => type === eventType) ? identifiedSessionIdSchema : idSchema,
   session_kind: { enum: ["main", "subagent"] },
-  task_id: idSchema,
-  ...([EVENT_TYPES.SESSION_STARTED, EVENT_TYPES.TASK_STARTED, EVENT_TYPES.TASK_FINISHED, EVENT_TYPES.SESSION_TITLE_UPDATED].some((type) => type === eventType)
+  ...(eventType === EVENT_TYPES.SESSION_METADATA_UPDATED ? {} : { task_id: idSchema }),
+  ...([EVENT_TYPES.SESSION_STARTED, EVENT_TYPES.TASK_STARTED, EVENT_TYPES.TASK_FINISHED, EVENT_TYPES.SESSION_TITLE_UPDATED, EVENT_TYPES.SESSION_METADATA_UPDATED].some((type) => type === eventType)
     ? { session_title: safeTitleSchema } : {}),
   sequence: sequenceSchema,
   occurred_at: wireTimestampSchema,
   event_type: { const: eventType },
   payload: payloadSchemas[eventType],
-  correlation_id: idSchema,
+  ...(eventType === EVENT_TYPES.SESSION_METADATA_UPDATED ? {} : { correlation_id: idSchema }),
 });
 
 const eventSchemas = Object.fromEntries(
@@ -302,6 +306,18 @@ export const SNAPSHOT_SCHEMA: JsonSchema = {
           },
           ["session_id", "title", "claude_state", "last_activity_sequence"],
         ),
+      },
+      history_sessions: {
+        type: "array",
+        maxItems: 50,
+        items: strictObject({
+          session_id: identifiedSessionIdSchema,
+          agent_id: agentIdSchema,
+          title: safeTitleSchema,
+          started_at: wireTimestampSchema,
+          last_activity_at: wireTimestampSchema,
+          activity_status: { enum: ["working", "waiting", "idle", "ended", "unknown"] },
+        }, ["session_id", "title", "activity_status"]),
       },
       main_running_count: sequenceSchema,
       main_session_count: sequenceSchema,

@@ -87,7 +87,7 @@ internal object MonitorPresentationReducer {
         val sessionKinds = current.sessionKinds.toMutableMap()
         event.snapshot?.sessions?.forEach { row -> row.sessionKind?.let { if (sessionKinds[row.sessionId] != SessionKind.SUBAGENT) sessionKinds[row.sessionId] = it } }
         event.sessionId?.let { id -> event.sessionKind?.let { if (sessionKinds[id] != SessionKind.SUBAGENT) sessionKinds[id] = it } }
-        val neutral = event.name == MonitorEventName.SESSION_CLASSIFICATION_UPDATED ||
+        val neutral = event.name in setOf(MonitorEventName.SESSION_CLASSIFICATION_UPDATED, MonitorEventName.SESSION_METADATA_UPDATED) ||
             (event.type == MonitorEventType.EVENT && sessionKinds[event.sessionId] == SessionKind.SUBAGENT)
         val resolvedSnapshot = event.snapshot?.copy(sessions = event.snapshot.sessions?.map { row ->
             row.copy(sessionKind = sessionKinds[row.sessionId] ?: row.sessionKind)
@@ -657,11 +657,11 @@ class MonitorViewModel(
             presentationEvent.sessionTitle?.let { rememberSessionTitle(presentationEvent.sessionId, it) }
         }
 
-        val isNeutral = presentationEvent.name == MonitorEventName.SESSION_CLASSIFICATION_UPDATED ||
+        val isNeutral = presentationEvent.name in setOf(MonitorEventName.SESSION_CLASSIFICATION_UPDATED, MonitorEventName.SESSION_METADATA_UPDATED) ||
             (presentationEvent.type == MonitorEventType.EVENT &&
                 presentationState.sessionKinds[presentationEvent.sessionId] == SessionKind.SUBAGENT)
         val isTitleUpdate = presentationEvent.type == MonitorEventType.EVENT &&
-            presentationEvent.name == MonitorEventName.SESSION_TITLE_UPDATED
+            presentationEvent.name in setOf(MonitorEventName.SESSION_TITLE_UPDATED, MonitorEventName.SESSION_METADATA_UPDATED)
         val activityFromEvent = when {
             isTitleUpdate || isNeutral -> null
             presentationEvent.type == MonitorEventType.EVENT && presentationEvent.name != MonitorEventName.UNKNOWN -> presentationEvent.name.wireValue
@@ -702,6 +702,9 @@ class MonitorViewModel(
         val presentationSnapshot = nextSnapshot.copy(
             recentCompletion = completion,
             sessions = nextSnapshot.sessions?.map { it.copy(sessionKind = presentationState.sessionKinds[it.sessionId] ?: it.sessionKind) },
+            historySessions = nextSnapshot.historySessions?.filter {
+                presentationState.sessionKinds[it.sessionId] != SessionKind.SUBAGENT
+            },
         )
         val activity = if (isTitleUpdate || isNeutral) previous.activity else {
             (activityFromEvent ?: nextSnapshot.activity ?: event.name.wireValue).toActivityVariation()

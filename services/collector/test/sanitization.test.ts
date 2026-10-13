@@ -26,6 +26,7 @@ test("sanitization is an allowlist and excludes private hook material", async ()
   assert.deepEqual(normalized, {
     event_type: "tool_finished",
     session_id: "session-123",
+    agent_id: "claude_code",
     task_id: "task-456",
     occurred_at: "2026-10-02T10:00:00.000Z",
     payload: {

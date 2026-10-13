@@ -35,6 +35,8 @@ interface ParsedArgs {
   magpieBin?: string;
   magpieSessionLimit?: number;
   magpiePollIntervalMs?: number;
+  magpieCommandTimeoutMs?: number;
+  magpieCheckpointFile?: string;
   agentSessionsRoot?: string;
   agentId?: string;
   agentCheckpointFile?: string;
@@ -63,6 +65,9 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === "--no-watch-magpie-sessions") parsed.watchMagpieSessions = false;
     else if (arg === "--magpie-bin") parsed.magpieBin = argv[++index];
     else if (arg === "--magpie-session-limit") parsed.magpieSessionLimit = Number(argv[++index]);
+    else if (arg === "--magpie-poll-interval-ms") parsed.magpiePollIntervalMs = Number(argv[++index]);
+    else if (arg === "--magpie-command-timeout-ms") parsed.magpieCommandTimeoutMs = Number(argv[++index]);
+    else if (arg === "--magpie-checkpoint-file") parsed.magpieCheckpointFile = argv[++index];
     else if (arg === "--agent-sessions-root") parsed.agentSessionsRoot = argv[++index];
     else if (arg === "--agent-id") parsed.agentId = argv[++index];
     else if (arg === "--agent-checkpoint-file") parsed.agentCheckpointFile = argv[++index];
@@ -105,6 +110,8 @@ export interface CollectorRuntimeOptions {
   magpieBin?: string;
   magpieSessionLimit?: number;
   magpiePollIntervalMs?: number;
+  magpieCommandTimeoutMs?: number;
+  magpieCheckpointFile?: string;
   agentSessionsRoot?: string;
   agentId?: string;
   agentCheckpointFile?: string;
@@ -257,11 +264,15 @@ export async function createCollectorRuntime(
     try {
       const sessionLimit = options.magpieSessionLimit ?? Number(env.COLLECTOR_MAGPIE_SESSION_LIMIT ?? "100");
       const pollIntervalMs = options.magpiePollIntervalMs ?? Number(env.COLLECTOR_MAGPIE_POLL_INTERVAL_MS ?? "2000");
+      const commandTimeoutMs = options.magpieCommandTimeoutMs ?? Number(env.COLLECTOR_MAGPIE_COMMAND_TIMEOUT_MS ?? "10000");
       magpieWatcher = await startMagpieSessionsWatcher({
         commandName: options.magpieBin ?? env.COLLECTOR_MAGPIE_BIN ?? "magpie",
-        defaultLimit: Number.isFinite(sessionLimit) && sessionLimit > 0 ? sessionLimit : 100,
-        sessionLimit: Number.isFinite(sessionLimit) && sessionLimit > 0 ? sessionLimit : 100,
-        pollIntervalMs: Number.isFinite(pollIntervalMs) && pollIntervalMs > 0 ? pollIntervalMs : 2_000,
+        sessionLimit,
+        pollIntervalMs,
+        commandTimeoutMs,
+        checkpointFile: options.magpieCheckpointFile ?? env.COLLECTOR_MAGPIE_CHECKPOINT_FILE ?? join(dataDir, "magpie-session-checkpoint.json"),
+        codexMetadataRoot: options.codexMetadataRoot ?? env.COLLECTOR_CODEX_METADATA_DIR ?? dirname(sessionsRoot),
+        excludedAgentIds: ["claude_code"],
         emit: async (event) => { await collector.ingestNormalized(event); try { await relay?.flushPending(); } catch { /* Durable outbox retries on reconnect. */ } },
       });
     } catch { stderr.write("magpie_sessions_watch_start_failed\n"); }
@@ -352,9 +363,12 @@ export function helpText(): string {
     "  --agent-sessions-root PATH Override COLLECTOR_AGENT_SESSIONS_DIR.",
     "  --agent-id ID Namespace hashed session identifiers (COLLECTOR_AGENT_ID).",
     "  --agent-checkpoint-file PATH Override the agent session checkpoint file.",
-    "  --watch-magpie-sessions Poll `magpie sessions --json` for new/renamed sessions (read-only; opt-in).",
+    "  --watch-magpie-sessions Poll Magpie for history metadata (read-only; opt-in).",
     "  --magpie-bin PATH Override the Magpie executable (COLLECTOR_MAGPIE_BIN).",
     "  --magpie-session-limit N Limit sessions returned per poll (COLLECTOR_MAGPIE_SESSION_LIMIT).",
+    "  --magpie-poll-interval-ms N Poll interval, 250..300000 ms (COLLECTOR_MAGPIE_POLL_INTERVAL_MS).",
+    "  --magpie-command-timeout-ms N Command timeout, 100..60000 ms (COLLECTOR_MAGPIE_COMMAND_TIMEOUT_MS).",
+    "  --magpie-checkpoint-file PATH Override COLLECTOR_MAGPIE_CHECKPOINT_FILE.",
   ].join("\n");
 }
 
@@ -374,7 +388,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return 0;
   }
   if (args.mode === "collector") {
-    await runCollector({ socketPath: args.socketPath, watchCodex: args.watchCodex, watchUsage: args.watchUsage, watchAgentSessions: args.watchAgentSessions, watchMagpieSessions: args.watchMagpieSessions, magpieBin: args.magpieBin, magpieSessionLimit: args.magpieSessionLimit, agentSessionsRoot: args.agentSessionsRoot, agentId: args.agentId, agentCheckpointFile: args.agentCheckpointFile, codexMetadataRoot: args.codexMetadataRoot, codexIpcSocket: args.codexIpcSocket, approvalBridge: args.approvalBridge });
+    await runCollector({ socketPath: args.socketPath, watchCodex: args.watchCodex, watchUsage: args.watchUsage, watchAgentSessions: args.watchAgentSessions, watchMagpieSessions: args.watchMagpieSessions, magpieBin: args.magpieBin, magpieSessionLimit: args.magpieSessionLimit, magpiePollIntervalMs: args.magpiePollIntervalMs, magpieCommandTimeoutMs: args.magpieCommandTimeoutMs, magpieCheckpointFile: args.magpieCheckpointFile, agentSessionsRoot: args.agentSessionsRoot, agentId: args.agentId, agentCheckpointFile: args.agentCheckpointFile, codexMetadataRoot: args.codexMetadataRoot, codexIpcSocket: args.codexIpcSocket, approvalBridge: args.approvalBridge });
     return 0;
   }
   process.stdout.write(`${helpText()}\n`);
